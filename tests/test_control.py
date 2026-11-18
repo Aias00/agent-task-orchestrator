@@ -35,6 +35,17 @@ class ControlTests(unittest.TestCase):
         with patch('control.subprocess.run', side_effect=self.transport):
             control.tick()
 
+    def verify_running_progress(self, directory, question_id):
+        evidence = self.repo/'verified-resume.log'; evidence.write_text('first')
+        s=runner.read(directory/'state.json')
+        s.update(status='running',owner_pid=os.getpid(),active_process=dict(
+            pid=os.getpid(),argv=['fixture-running-check'],evidence=str(evidence)))
+        runner.save(directory/'state.json',s)
+        self.tick()
+        self.assertEqual(self.action(question_id)['state'],'awaiting_execution')
+        evidence.write_text('first\nprogress')
+        self.tick()
+
     def test_durable_lifecycle_requires_real_execution_not_accept_or_presentation(self):
         q = self.prepare()
         self.tick()
@@ -56,8 +67,10 @@ class ControlTests(unittest.TestCase):
         with (self.d/'events.jsonl').open('a') as f:
             f.write(json.dumps(dict(event='workflow_started', time=runner.now()))+'\n')
         self.tick()
+        self.assertEqual(self.action(q['id'])['state'], 'awaiting_execution')
+        self.verify_running_progress(self.d, q['id'])
         self.assertEqual(self.action(q['id'])['state'], 'resolved')
-        self.assertEqual(runner.read(self.d/'state.json')['status'], 'blocked')
+        self.assertEqual(runner.read(self.d/'state.json')['status'], 'running')
 
     def test_presented_is_hub_only_and_does_not_answer(self):
         q = self.prepare(); self.tick()
@@ -152,6 +165,8 @@ class ControlTests(unittest.TestCase):
         with (new/'events.jsonl').open('a') as f:
             f.write(json.dumps(dict(event='workflow_started', time=runner.now()))+'\n')
         self.tick()
+        self.assertEqual(self.action(q['id'])['state'], 'awaiting_execution')
+        self.verify_running_progress(new, q['id'])
         self.assertEqual(self.action(q['id'])['state'], 'resolved')
         other = runner.read(self.repo/'input.json'); other['acceptance'][0]['checks'] = [['true']]
         runner.save(self.repo/'bad.json', other)

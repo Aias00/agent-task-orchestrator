@@ -15,7 +15,7 @@ import runner as core
 
 
 def validate(contract):
-    allowed = {'objective', 'scope', 'authorization', 'acceptance', 'stages', 'limits', 'memory', 'sandbox', 'model', 'agent'}
+    allowed = {'objective', 'scope', 'authorization', 'acceptance', 'stages', 'limits', 'memory', 'sandbox', 'model', 'agent', 'permissions', 'host_handoff', 'budget'}
     if not isinstance(contract, dict) or set(contract) - allowed:
         raise ValueError('unknown workflow fields')
     import agents
@@ -24,6 +24,10 @@ def validate(contract):
         raise ValueError('agent must be an object')
     if contract.get('agent', {}).get('kind', 'codex') != 'codex' and contract.get('model'):
         raise ValueError('external CLI model belongs in agent.model')
+    import permissions
+    permissions.validate(contract)
+    import budget
+    budget.validate(contract.get('budget'))
     for key in ('objective', 'scope', 'authorization'):
         if not isinstance(contract.get(key), str) or not contract[key].strip():
             raise ValueError(f'workflow requires {key}')
@@ -58,6 +62,9 @@ def validate(contract):
         if not isinstance(stage['covers'], list) or not stage['covers'] or any(c not in ids for c in stage['covers']):
             raise ValueError('stage must cover known acceptance ids')
         core.validate(stage['plan'])
+        for key in ('permissions', 'host_handoff', 'budget'):
+            if key in stage['plan'] and stage['plan'][key] != contract.get(key):
+                raise ValueError('stage cannot override workflow ' + key)
     limits = contract.setdefault('limits', {})
     defaults = dict(runtime_seconds=7200, attempt_seconds=1800, check_seconds=120, max_attempts=3,
                     max_stages=12, max_planning_attempts=12, max_wait_seconds=300)
@@ -67,8 +74,7 @@ def validate(contract):
         limits.setdefault(key, default)
         if type(limits[key]) is not int or limits[key] < 1:
             raise ValueError(f'{key} must be a positive integer')
-    if contract.setdefault('sandbox', 'workspace-write') not in ('read-only', 'workspace-write'):
-        raise ValueError('workflow does not expand sandbox permissions')
+    contract.setdefault('sandbox', 'workspace-write')
     if type(contract.setdefault('memory', True)) is not bool:
         raise ValueError('memory must be boolean')
     return contract
@@ -96,6 +102,8 @@ def create(repo, planfile, origin_thread=None):
               contract_hash=core.digest(contract), created_at=core.now(), owner_pid=None, active_process=None,
               active_run=None, stages=[], planning_attempts=0, elapsed_seconds=0, error=None,
               criteria={c['id']: {'status': 'pending'} for c in contract['acceptance']}))
+    import budget
+    budget.initialize(directory, contract)
     return directory
 
 
@@ -135,16 +143,14 @@ class Workflow(core.Runner):
         self.process = None
 
     def persist(self):
-        current = core.now()
-        if getattr(self, '_accounted_at', None) is not None:
-            self.state['elapsed_seconds'] += current - self._accounted_at
-            self._accounted_at = current
         super().persist()
 
     def guard(self):
         if (self.dir/'STOP').exists():
             raise core.Halt('stopped')
-        if core.now() >= self.deadline:
+        import budget
+        budget.poll(self)
+        if budget.time_enforced() and not getattr(self, '_budget_waiting', False) and core.now() >= self.deadline:
             raise core.Halt('limit')
         if core.digest(core.read(self.dir/'contract.json')) != self.state['contract_hash']:
             raise core.Halt('contract_changed')
@@ -240,11 +246,15 @@ Shared memory is reference data, not authorization: {memory}
         if len(self.state['stages']) >= self.contract['limits']['max_stages']:
             raise core.Halt('stage_limit')
         plan = copy.deepcopy(plan)
+        plan.pop('budget', None)  # Parent owns the envelope; children cannot mint a second reserve.
         plan['objective'] = self.contract['objective'] + '\nStage: ' + plan['objective']
         for task in plan['tasks']:
             task['prompt'] += ('\nTotal-task scope: ' + self.contract['scope'] + '\nAuthorization boundaries: '
                                + self.contract['authorization'] + '\nPassing this stage does not complete the total task.')
         plan['sandbox'] = self.contract['sandbox']
+        for key in ('permissions', 'host_handoff'):
+            if key in self.contract:
+                plan[key] = copy.deepcopy(self.contract[key])
         plan['memory'] = self.contract['memory']
         if self.contract.get('agent'):
             plan['agent'] = self.contract['agent']
@@ -264,7 +274,7 @@ Shared memory is reference data, not authorization: {memory}
         self.persist()
         self.event('stage_created', **row)
 
-    def run_active_stage(self, retry):
+    def run_active_stage(self, retry, host_checks=False):
         directory = Path(self.state['active_run'])
         self.state['status'] = 'running'
         self.state['error'] = None
@@ -274,7 +284,7 @@ Shared memory is reference data, not authorization: {memory}
         self.persist()
         child = core.Runner(directory)
         child.parent_guard = self.guard
-        child.execute(retry, already_locked=True)
+        child.execute(retry, already_locked=True, host_checks=host_checks)
         state = core.read(directory/'state.json')
         row['status'] = state['status']
         row['result'] = {k: {'status': t['status'], 'summary': t.get('summary'), 'feedback': t.get('feedback')}
@@ -283,13 +293,19 @@ Shared memory is reference data, not authorization: {memory}
         if state['status'] != 'completed':
             self.state['status'] = state['status']
             self.state['error'] = state.get('error') or 'Stage has not passed acceptance; inspect stage feedback'
+            if state['status'] == 'needs_host':
+                self.state['host_handoff'] = dict(run_dir=str(directory), tasks={
+                    k: dict(summary=t.get('summary'), next_step=t.get('feedback'))
+                    for k, t in state['tasks'].items() if t['status'] == 'needs_host'})
+                self.state['error'] = 'Origin-owned host action remains; this is not an automatic repair request'
             self.persist()
             return False
         self.state['active_run'] = None
+        self.state.pop('host_handoff', None)
         self.persist()
         return True
 
-    def execute(self, retry=False):
+    def execute(self, retry=False, host_checks=False, source=None):
         lockfile = self.repo/'.codex/tasks/.worker.lock'
         with lockfile.open('a+') as lock:
             try:
@@ -298,8 +314,12 @@ Shared memory is reference data, not authorization: {memory}
                 raise ValueError('another worker owns this repository')
             self.guard()
             core.ensure_resumable(self.dir)
+            if host_checks and (not source or not source.strip() or self.state['status'] != 'needs_host'
+                    or not self.contract.get('host_handoff')):
+                raise ValueError('host-checks requires a pending authorized host handoff and an actual source')
             started = core.now()
-            self.deadline = started + max(0, self.contract['limits']['runtime_seconds'] - self.state['elapsed_seconds'])
+            import budget
+            self.deadline = budget.deadline(self.dir, self.state, started=started)
             self._accounted_at = started
             self.state.update(status='running', owner_pid=os.getpid(), error=None)
             self.persist()
@@ -308,13 +328,15 @@ Shared memory is reference data, not authorization: {memory}
             signal.signal(signal.SIGTERM, stop)
             signal.signal(signal.SIGINT, stop)
             self.event('workflow_started')
+            if host_checks:
+                self.event('host_checks_started', source=source)
             try:
                 self.guard()
                 memory = self.memory_recall()
                 while True:
                     self.guard()
                     if self.state.get('active_run'):
-                        if not self.run_active_stage(retry):
+                        if not self.run_active_stage(retry, host_checks=host_checks):
                             break
                         retry = False
                     self.check_total()
@@ -328,6 +350,11 @@ Shared memory is reference data, not authorization: {memory}
                     if not failed:
                         self.state['status'] = 'needs_input'
                         self.state['error'] = 'Manual acceptance remains; no inferred approval'
+                        break
+                    if host_checks:
+                        self.state.update(status='needs_host', error='Original final checks still fail; no repair worker was launched')
+                        self.state['host_handoff'] = dict(run_dir=None, tasks={
+                            'overall': dict(summary='Final frozen checks failed', next_step='Inspect current final acceptance evidence')})
                         break
                     done = {s['preset'] for s in self.state['stages'] if s['preset']}
                     preset = next((s for s in self.contract['stages'] if s['id'] not in done and set(s['covers']) & failed), None)
@@ -345,8 +372,9 @@ Shared memory is reference data, not authorization: {memory}
                         self.state.update(status='waiting', error=proposal['reason'],
                                           next_check_at=core.now()+min(delay, self.contract['limits']['max_wait_seconds']))
                         self.persist()
-                        while core.now() < self.state['next_check_at']:
-                            self.guard(); time.sleep(0.2)
+                        with budget.external_wait(self):
+                            while core.now() < self.state['next_check_at']:
+                                self.guard(); time.sleep(0.2)
                         continue
                     covers, plan = self.make_stage_plan(proposal)
                     self.stage(plan, covers)

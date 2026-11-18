@@ -83,3 +83,9 @@
 派发器经本机 app-server Unix WebSocket 的 thread/start 创建并持久化会话，再 name/set 和 thread/read 核验；保留实际返回ID，检查 cwd、sandbox、approvalPolicy 和本地rollout，不查询“最新”推测目标。它用完整合约创建 workflow 并把 origin 设为新会话，hub 保持用户入口。新会话收到 ctask-delegation 后只读约定并 delegation-accept，本机派发器负责启动；当前轮不另起调度器、不并行修改业务代码。
 
 派发记录位于工程 .codex/tasks/delegations/ID/，包含合约副本、来源、会话关联、消息回执和启动证据。重复同一请求至多创建一次和发送一次；超时/回执不明不盲目重复。dispatcher 等待真实accept后启动同一workflow；已有活动执行器或未完成总任务时拒绝另一派发，先使用原任务或隔离worktree。不会自动扩大沙箱、重启Codex daemon或批准服务端权限请求。
+
+## 不向用户入口直接投递后台状态（2026-11-17）
+
+当notification-policy为user_input_only时，原会话将进度、部分样本、普通完成等无需用户介入的结果写入原任务evidence；不得绕过controller直接用codex queue向hub发送状态。真正需要用户决定、授权、补充信息或人工验收时使用ctask ask/needs_input，保持canonical问题/代次/原会话检查。
+
+可选的 `CTASK_SOURCE/hub_queue_gate.py` 用于本地投递入口：仅对当前user_input_only hub的queue生效；普通消息元数据记为recorded_only，不生成Queued message，不投递。其它命令和其它目标仍exec原生程序，原生二进制未修改。不能将recorded_only误读为queued/accepted/恢复；不能用伪造question前缀绕过canonical校验。显式调用包内原生二进制或其它app-server客户端不经过该launcher，仍必须遵守禁止向hub投递普通状态的规则。

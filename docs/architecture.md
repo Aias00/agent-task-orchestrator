@@ -128,3 +128,9 @@ watchdog 仅观察模型 worker；安静的构建/宿主验收不按模型停滞
 没有开机自启、跨机器通知、网页面板、同一仓库多 worker 并发、任意第三方会话注入或自动无限预算。macOS 第三方文件工具 worker 不能等同于完整原生 Codex 沙箱。所有宿主检查必须在真实授权范围内；合约不能视作可直接运行的不可信输入。controller 是观察与路由层，机器休眠/关机期间不计算。
 
 Pizza 的事件、回复回传和 watchdog 实现提供过设计参考；当前代码按本项目已有完整目标、有限接管与 hub 协议实现，没有安装 Pizza 或引入其 goal 调度器。
+
+## User attention and execution coordination
+
+Hub notification routing is independent of task status and operational delivery to origin. An opt-in `user_input_only` policy emits only current canonical pending questions; background states remain inspectable without creating conversation turns. Direct native queue ingress is a separate optional launcher boundary. Suppression never counts as presentation, approval, recovery or completion.
+
+The existing generation-based host-handoff identity and explicit successor registration are separate mechanisms; quiet routing does not claim to fix their historical deduplication limits. A newly created workflow must be checked for controller observation and any explicitly authorized recovery configuration; watching an older predecessor does not automatically watch its successor.

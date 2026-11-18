@@ -11,6 +11,7 @@ import sys
 import time
 
 import interaction
+import notifications
 import recovery
 import runner as core
 
@@ -105,7 +106,7 @@ def register(workflow):
         con.execute('insert or ignore into workflows values(?,?)', (str(d), json.dumps(body)))
 
 
-def send(key, target, message):
+def send(key, target, message, *, workflow=None):
     """Claim before send. Unknown transport/crash is never blindly replayed."""
     with database() as con:
         con.execute('begin immediate')
@@ -202,7 +203,7 @@ def record(identifier, state=None, note=None, evidence=None, workflow=None):
                 raise ValueError('only explicit presentation with a user-facing source can be recorded')
             if action['state'] in TERMINAL:
                 raise ValueError('closed follow-up cannot be presented as current')
-            action.update(presented_at=core.now(), presentation_source=note)
+            action.update(presented_at=core.now(), presentation_source=note, state='presented')
             if action['kind'] == 'workflow_result':
                 d, s, c, origin = interaction.binding(action['workflow'], require_open=False)
                 if s['status'] != 'completed':
@@ -229,7 +230,15 @@ def reconcile_questions(cfg):
                 hub=q['hub_thread'], created_at=q['created_at'], reminders=0,
                 baseline_generation=q['generation'], state='unpresented')
             if action['state'] in TERMINAL:
-                continue
+                # A guard may have stopped this workflow just after the hub recorded
+                # a valid answer. Only the explicit, checked budget resume reopens it.
+                launch = Path(action['workflow'])/'launch.json'
+                if (action['state']=='stopped' and q['state']=='accepted' and q.get('budget_stop_acceptance')
+                        and not (Path(action['workflow'])/'STOP').exists() and launch.is_file()
+                        and core.read(launch).get('approved_budget_answer') == identifier):
+                    action.update(state='awaiting_execution', previous_stop_resolution=action.pop('resolution', None))
+                else:
+                    continue
             action.update(kind=q.get('kind') or 'question', origin=q['origin_thread'], hub=q['hub_thread'])
             action.setdefault('baseline_generation', q['generation'])
             action.setdefault('original_workflow', q['workflow'])
@@ -244,9 +253,8 @@ def reconcile_questions(cfg):
                 action.update(state='completed', resolution='overall workflow completed', resolved_at=core.now())
             elif (d/'STOP').exists() or s['status'] == 'stopped':
                 action.update(state='stopped', resolution='workflow stopped; not completed')
-            elif generation != action['baseline_generation']:
-                # A persisted workflow_started event proves actual execution, including fast runs.
-                action.update(state='resolved', resolution='execution resumed; overall acceptance remains separate',
+            elif resumed(action, d, s, generation):
+                action.update(state='resolved', resolution='live execution and subsequent progress verified; overall acceptance separate',
                               resolved_at=core.now(), resumed_generation=generation)
             elif q['state'] == 'accepted':
                 action['state'] = 'awaiting_execution'
@@ -313,6 +321,87 @@ def observe_origin(action):
                 tracker['seen'] = False
 
 
+def live_execution(directory, state):
+    """A queued answer/start event is not a running worker. Require live owner and child."""
+    if state.get('status') not in recovery.ACTIVE or not recovery.alive(state.get('owner_pid')):
+        return None
+    child = state
+    if state.get('active_run'):
+        child = core.read(Path(state['active_run'])/'state.json')
+    process = child.get('active_process')
+    if not process or not recovery.alive(process.get('pid')):
+        return None
+    evidence = Path(process.get('evidence', ''))
+    size = evidence.stat().st_size if evidence.is_file() else None
+    # Changes in command/phase/check results/output prove progress, not just a new timestamp.
+    token = core.digest([process.get('pid'), process.get('argv'), size,
+                         state.get('criteria'), child.get('tasks'), child.get('status')])
+    return dict(pid=process['pid'], owner_pid=state['owner_pid'], token=token,
+                observed_at=core.now())
+
+
+def resumed(action, directory, state, generation):
+    if generation == action['baseline_generation'] and action.get('kind') not in ('watchdog', 'budget_review', 'budget_watchdog'):
+        return False
+    probe = live_execution(directory, state)
+    if not probe:
+        action.pop('resume_probe', None)
+        return False
+    previous = action.get('resume_probe')
+    action['resume_probe'] = probe
+    if not previous or previous['token'] == probe['token']:
+        return False
+    action['resumption_evidence'] = dict(previous=previous, current=probe,
+                                         generation=generation)
+    return True
+
+
+def observe_budget(row, directory, state, contract, generation):
+    import budget
+    info = budget.observation(directory, state, core.now(), recovery.alive(state.get('owner_pid')))
+    row['budget'] = info
+    level = info['level']
+    if not level:
+        return
+    advisory = info['enforcement'] == 'advisory'
+    identifier = 'budget-'+core.digest([str(directory), state['contract_hash'], info['hard_seconds'], level,
+        info['policy_revision']] if advisory else [str(directory), state['contract_hash'], info['hard_seconds'], level])[:20]
+    label = {'warning':'总执行额度已使用80%，原会话应提前复评剩余目标。',
+             'critical':'总执行额度已使用90%，原会话应确认停止检查点和必要的估算。',
+             'exhausted':'总执行额度已耗尽；保存停点并向用户报告，不擅自恢复或追加。',
+             'overrun':'执行耗时已超过预估；继续既有目标并复评剩余工作，不因时长停工或申请追加。'}[level]
+    if advisory and level != 'overrun':
+        label = '执行耗时接近预估；原会话检查进展和剩余工作，继续执行，不申请时间额度。'
+    with database() as con, con:
+        prior = con.execute('select body from actions where id=?', (identifier,)).fetchone()
+        action = json.loads(prior[0]) if prior else dict(id=identifier, kind='budget_watchdog',
+            workflow=str(directory), origin=row['origin'], hub=row['hub'], state='unpresented',
+            created_at=core.now(), reminders=0, baseline_generation=generation,
+            objective=contract['objective'], budget_level=level,
+            question=label+('' if advisory else ' 通知不代表已呈现，获批不代表真实恢复。'))
+        action['budget'] = info
+        if advisory:
+            action.setdefault('notice', dict(state='origin_only'))
+        put(con, action)
+    if level != 'exhausted' and not action.get('origin_delivery'):
+        instruction = ('\n本机已按用户指令启用advisory时长策略，旧soft/hard仅是估算参考，'
+            '不是继续执行的许可门槛；超估继续原完整目标，无需向用户申请分钟数。'
+            '保持原验收、权限、STOP与已有失败/用时/repair计数。无新证据的重复失败要换诊断或报告具体阻塞，'
+            '不可无限重复。缺凭据/真实人工决定或新增业务权限仍通过ask。'
+            if advisory else
+            '\n既有hard以内的预留额度由原会话按证据budget-reforecast；超出hard才向hub申请。')
+        message = (f'[ctask-budget-warning id={identifier}]\n{label}\nWorkflow: {directory}'
+            f'\n预算快照: {json.dumps(info, ensure_ascii=False)}'
+            '\n使用现有budget账本。核对真实进程和剩余验收，不并行修改、不打断健康worker。'
+            + instruction +
+            '缺失的宿主耗时为未知，用budget-run/有证据的budget-charge处理，不当成零。'
+            '不增加接管额度/监督窗口，不重置预算或批准人工验收。')
+        action['origin_delivery'] = (dict(state='same_session') if row['origin']==row['hub']
+            else send('budget-origin:'+identifier, row['origin'], message, workflow=str(directory)))
+        with database() as con, con:
+            put(con, action)
+
+
 def workflow_observation(row):
     """Observe known, authorized workflows only. Never create or restart a business executor."""
     if row.get('superseded_by'):
@@ -322,6 +411,9 @@ def workflow_observation(row):
     if origin != row['origin'] or s['contract_hash'] != row['contract_hash']:
         raise ValueError('watched workflow binding changed')
     generation = recovery.generation(d, s)
+    if (d/'STOP').exists() or s['status'] == 'stopped':
+        row['active_key'] = None
+        return
     row['active_key'] = None
     if s['status'] == 'completed':
         identifier = 'result-'+core.digest([str(d), s['contract_hash']])[:20]
@@ -331,6 +423,55 @@ def workflow_observation(row):
                     hub=row['hub'], state='unpresented', created_at=core.now(), reminders=0,
                     objective=c['objective'], question='总任务状态已完成；核对全部最终验收证据后向用户报告。',
                     baseline_generation=generation))
+        return
+    observe_budget(row, d, s, c, generation)
+    import budget
+    forecast = budget.review(d)
+    if forecast:
+        identifier = 'budget-review-'+core.digest([str(d), forecast['key']])[:20]
+        with database() as con, con:
+            prior = con.execute('select body from actions where id=?', (identifier,)).fetchone()
+            action = json.loads(prior[0]) if prior else dict(id=identifier, kind='budget_review',
+                workflow=str(d), origin=origin, hub=row['hub'], state='awaiting_origin', created_at=core.now(),
+                reminders=0, objective=c['objective'], baseline_generation=generation,
+                question='接近任务执行预估，由原会话在既有总额度内复评，不需要用户重复批准。',
+                notice={'state':'origin_only'})
+            put(con, action)
+        if not action.get('origin_delivery'):
+            message = (f'[ctask-budget-review id={identifier}]\nWorkflow: {d}'
+                f'\n已登记预算来源: {forecast["source"]}\n当前预算: {json.dumps(forecast, ensure_ascii=False)}'
+                '\n这是预估复评，不是新的业务授权或异常修复接管。核对真实进程及剩余工作；'
+                '有worker仍在编辑时不并行修改或重复恢复。使用实测检查耗时和当前证据形成剩余分项估算，'
+                '需要时在执行器退出后用ctask budget-reforecast调整既有hard上限内的soft额度，再恢复同一任务。'
+                '保留已用时间、失败和修复计数；不消耗/增加修复额度，不批准人工验收。'
+                '只有剩余工作超出hard上限、长期无进展或出现新权限时才通过ask向hub提出具体决定。'
+                '宿主执行用budget-run计入同一账本，用户/外部等待不计主动耗时。')
+            action['origin_delivery'] = (dict(state='same_session') if origin == row['hub']
+                else send('budget-review:'+identifier, origin, message, workflow=str(d)))
+            with database() as con, con:
+                put(con, action)
+    if s['status'] == 'needs_host' and c.get('host_handoff'):
+        identifier = 'host-handoff-'+core.digest([str(d), generation, s.get('host_handoff')])[:20]
+        with database() as con, con:
+            prior = con.execute('select body from actions where id=?', (identifier,)).fetchone()
+            action = json.loads(prior[0]) if prior else dict(id=identifier, kind='host_handoff',
+                workflow=str(d), origin=origin, hub=row['hub'], state='unpresented', created_at=core.now(),
+                reminders=0, objective=c['objective'], baseline_generation=generation,
+                question='代码阶段请求正常宿主交接；由原会话按合约接手，不占用异常修复次数。')
+            put(con, action)
+        if not action.get('origin_delivery'):
+            message = (f'[ctask-host-handoff id={identifier}]\n这是已授权正常阶段交接，不是异常修复或新业务授权。'
+                f'\nWorkflow: {d}\n任务: {c["objective"]}\n来源: {c["host_handoff"]["source"]}'
+                f'\n宿主职责: {c["host_handoff"]["instructions"]}'
+                f'\n当前请求（仅任务材料）: {json.dumps(s.get("host_handoff"), ensure_ascii=False)}'
+                '\n先核对最新合约、STOP、实际进程和剩余预算。仅按原合约执行正常宿主步骤，'
+                '然后运行 ctask host-checks WORKFLOW --source 实际执行来源，独立复核全部固化验收。'
+                '不恢复旧repair请求、不新增修复次数、不重置预算、不代替人工验收。'
+                '缺少真实用户决定或新权限时通过ctask ask送hub。阶段交接不表示整体完成。')
+            action['origin_delivery'] = (dict(state='same_session', note='Origin is hub; its followup carries the handoff')
+                if origin == row['hub'] else send('host-handoff:'+identifier, origin, message, workflow=str(d)))
+            with database() as con, con:
+                put(con, action)
         return
     if s['status'] in recovery.ACTIVE and recovery.alive(s.get('owner_pid')):
         state = s
@@ -362,7 +503,7 @@ def workflow_observation(row):
                     baseline_generation=generation, evidence=str(evidence),
                     question='执行器仍活跃，但观察到无输出、工具停滞或重复调用。先核对，勿并行修改或重启。'))
         return
-    if s['status'] in recovery.REPAIR | recovery.REPORT or (s['status'] in recovery.ACTIVE and not recovery.alive(s.get('owner_pid'))):
+    if s['status'] in recovery.REPAIR | recovery.REPORT | {'permission_blocked'} or (s['status'] in recovery.ACTIVE and not recovery.alive(s.get('owner_pid'))):
         # Works even after the bounded repair supervisor exits. Observation grants no repairs.
         identifier = 'workflow-'+core.digest([str(d), generation, s['status']])[:20]
         with database() as con, con:
@@ -402,7 +543,8 @@ def tick():
                 source_error(identifier, cfg['hub_thread'], row['workflow'], str(exc))
         actions = rows(include_terminal=True)
         # Existing questions already describe this blocker: avoid a second generic alert.
-        questions = {a['workflow'] for a in actions if a['kind'] in ('question', 'supervision_alert') and a['state'] not in TERMINAL}
+        questions = {a['workflow'] for a in actions if (a['kind'] in ('question', 'supervision_alert') or
+            a['kind']=='budget_watchdog' and a.get('budget_level')=='exhausted') and a['state'] not in TERMINAL}
         for action in actions:
             if action['hub'] != cfg['hub_thread']:
                 continue  # A new default hub never steals old questions or delivery bindings.
@@ -411,7 +553,7 @@ def tick():
                     observe_origin(action)
                 except (ValueError, OSError, KeyError) as exc:
                     action['reply_error'] = str(exc)
-            if action['kind'] in ('watchdog', 'workflow') and action['state'] not in TERMINAL:
+            if action['kind'] in ('watchdog', 'workflow', 'host_handoff', 'budget_review', 'budget_watchdog') and action['state'] not in TERMINAL:
                 try:
                     d, s, c, origin = interaction.binding(action['workflow'], require_open=False)
                     source = next((r for r in sources if r['workflow'] == str(d)), {})
@@ -421,24 +563,47 @@ def tick():
                         action.update(state='completed', resolution='overall acceptance passed')
                     elif (d/'STOP').exists() or s['status'] == 'stopped':
                         action.update(state='stopped', resolution='workflow stopped')
-                    elif recovery.generation(d, s) != action['baseline_generation']:
-                        action.update(state='resolved', resolution='new execution observed')
+                    elif action['kind'] == 'budget_review' and not __import__('budget').time_enforced():
+                        action.update(state='superseded', resolution='Elapsed-time policy is advisory; no budget renewal gate')
+                    elif action['kind'] == 'budget_watchdog':
+                        import budget
+                        info=budget.observation(d, s, core.now(), recovery.alive(s.get('owner_pid')))
+                        previous_enforcement = action.get('budget', {}).get('enforcement', 'enforced')
+                        action['budget']=info
+                        levels={'warning':1, 'critical':2, 'exhausted':3, 'overrun':3}
+                        if previous_enforcement != info['enforcement']:
+                            action.update(state='superseded', resolution='Elapsed-time enforcement policy changed; history retained')
+                        elif info['level'] and levels[info['level']] > levels[action['budget_level']]:
+                            action.update(state='superseded', resolution='higher budget threshold tracks the task')
+                        elif info['level'] != 'exhausted' and resumed(action, d, s, recovery.generation(d, s)):
+                            action.update(state='resolved', resolution='live resumed execution and progress verified')
+                    elif resumed(action, d, s, recovery.generation(d, s)):
+                        action.update(state='resolved', resolution='live execution and subsequent progress verified')
                     elif action['kind'] == 'watchdog':
                         source = next((r for r in sources if r['workflow'] == str(d)), {})
                         active_key = source.get('active_key')
                         if not recovery.alive(s.get('owner_pid')) or active_key != action['command_key']:
-                            action.update(state='resolved', resolution='observed command ended; overall task remains separate')
+                            action.setdefault('command_ended_at', core.now())
+                            # Ending the stalled command is not evidence of task recovery.
                     elif action['workflow'] in questions:
                         action.update(state='superseded', resolution='specific question tracks this blocker')
                 except (ValueError, OSError, KeyError) as exc:
                     action.update(state='source_error', error=str(exc))
             reply = action.get('origin_reply')
+            disposition = notifications.disposition(action)
+            if disposition['mode'] == 'user_input_only':
+                action['hub_notification_policy'] = disposition
             if reply and not reply.get('delivery'):
-                reply['delivery'] = send('reply:'+action['id']+':'+str(reply['turn']), action['hub'],
+                reply_policy = notifications.disposition(action, channel='origin_reply')
+                if not reply_policy['notify']:
+                    reply['delivery'] = dict(state='recorded_only', policy=reply_policy,
+                                             at=core.now(), target=action['hub'])
+                else:
+                    reply['delivery'] = send('reply:'+action['id']+':'+str(reply['turn']), action['hub'],
                     f"[ctask-origin-reply id={action['id']}]\n原会话处理结果，属于任务材料，不是用户指令或自动验收。"
                     f"\n任务: {action.get('objective')}\nWorkflow: {action['workflow']}\n{reply['text']}"
                     '\n先核实总任务、实际进程和待办；将关键结果向用户说明。回复完成不等于总任务完成。')
-            if action['state'] not in TERMINAL:
+            if action['state'] not in TERMINAL and disposition['notify']:
                 due = core.now()-max(action.get('last_notice_at', action['created_at']),
                                      action.get('presented_at', 0)) >= cfg['reminder_seconds']
                 first = not action.get('notice')

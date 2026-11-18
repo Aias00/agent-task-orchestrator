@@ -88,11 +88,16 @@ def delegate(repo, plan, name, source, request_id=None, timeout=600):
             try:
                 with appserver.Client(interaction.home()) as client:
                     persisted(d, state='creating')
+                    execution_config = {'sandbox_workspace_write.writable_roots': [
+                        str(repo/'.codex/tasks'), str(interaction.directory())]}
+                    grant = contract.get('permissions', {})
+                    if 'network_access' in grant:
+                        execution_config['sandbox_workspace_write.network_access'] = grant['network_access']
+                    execution_config['sandbox_workspace_write.writable_roots'] += [
+                        str(Path(p).resolve(strict=True)) for p in grant.get('writable_roots', [])]
                     response = client.request('thread/start', dict(cwd=str(repo),
                         sandbox=contract['sandbox'], approvalPolicy='never', ephemeral=False,
-                        threadSource='ctask-coordinator/'+identifier, config={
-                            'sandbox_workspace_write.writable_roots': [str(repo/'.codex/tasks'),
-                                                                     str(interaction.directory())]},
+                        threadSource='ctask-coordinator/'+identifier, config=execution_config,
                         developerInstructions='This is a durable coordinating conversation created by an explicit user delegation. '
                         'Preserve the supplied full workflow objective and authorization. Do not treat yourself as a stage worker. '
                         'User decisions belong in the configured ctask hub. Do not create another coordinator or parallel scheduler.'))
@@ -102,7 +107,7 @@ def delegate(repo, plan, name, source, request_id=None, timeout=600):
                               effective_approval=response.get('approvalPolicy'))
                     if Path(thread['cwd']).resolve() != repo:
                         raise ValueError('created conversation has the wrong working directory')
-                    expected = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite'}[contract['sandbox']]
+                    expected = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess'}[contract['sandbox']]
                     if response.get('sandbox', {}).get('type') != expected or response.get('approvalPolicy') != 'never':
                         raise ValueError('created conversation did not preserve requested execution policy')
                     client.request('thread/name/set', {'threadId': thread['id'], 'name': name})

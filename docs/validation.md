@@ -42,3 +42,9 @@ ctask followups
 同时检查总任务、当前阶段、真实处理进程、监督、待办与来源。只见 `queued` 不能说原会话已响应；只见 `accepted` 不能说已恢复；只见阶段 `completed` 不能说完整目标完成。结果通知需要核对所有最终验收日志，向用户说明后才 `presented`。
 
 本机停止 controller 只停止观察，不停止业务 worker；`unsupervise` 只关闭业务监督，`stop WORKFLOW_DIR` 才请求停止具体任务。操作前区分这三个层次。
+
+## Long-task skill and notification release (2026-11-17)
+
+The source release passed all 230 local unittest cases in an isolated test Codex home, with zero failures or skips. Coverage includes advisory/enforced time policy, permission and normal host handoff boundaries, selected frozen host rechecks retaining attempts, pending-question delivery, non-intervention hub suppression, direct queue ingress and legacy installer behavior. The skill format validator and local reference checks passed. This is local validation; cloud Actions results must be reported separately.
+
+Fixtures use fictional origin/hub UUIDs. No live task state, queue bindings, authentication, provider configuration or business logs are part of the release. Installation of the optional direct-queue guard requires an explicit local launcher choice and retains the native executable. It does not install automatically with the ordinary task-runner launcher.

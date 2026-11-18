@@ -1,5 +1,7 @@
 """Durable question/answer routing between workers' origin threads and a user hub."""
 import json
+import hashlib
+import math
 import os
 from pathlib import Path
 import re
@@ -67,6 +69,16 @@ def binding(workflow, require_open=True):
 def deliver(q, field, target, text, path, allow_local=True):
     if q.get(field):
         return  # Durable at-most-once outbox, including an ambiguous crash window.
+    # An automatic supervisor alert is operational status, not a user question.
+    # Keep the canonical inbox record without waking the user's conversation.
+    if field == 'question_delivery' and q.get('kind') == 'supervision_alert' and target == q.get('hub_thread'):
+        import notifications
+        policy = notifications.disposition(q)
+        if not policy['notify']:
+            q[field] = dict(state='recorded_only', thread_id=target,
+                            created_at=core.now(), policy=policy)
+            core.save(path, q)
+            return
     rollout = Path(recovery.session_path(home(), target))
     q[field] = dict(state='dispatching', thread_id=target, created_at=core.now(),
                     rollout_offset=rollout.stat().st_size)
@@ -212,8 +224,68 @@ def question_path(identifier):
     return directory()/'questions'/(identifier+'.json')
 
 
-def validate_question(q):
-    d, s, c, origin = binding(q['workflow'])
+def budget_stop_proof(q, evidence):
+    """Recognize a recorded answer preceding a matching automatic budget stop.
+
+    Accepting the answer does not clear STOP, change a budget or start execution.
+    Legacy guard receipts are supported explicitly; ordinary/manual STOP remains
+    a hard boundary for every existing command without this evidence.
+    """
+    d, s, c, origin = binding(q['workflow'], require_open=False)
+    stop = d/'STOP'
+    if s['status'] in ('completed', 'paused') or not stop.is_file() or stop.is_symlink():
+        raise ValueError('budget-stop handoff requires an existing regular STOP and unfinished, unpaused task')
+    if q.get('request_id') or q.get('kind') or q.get('state') not in ('answered', 'accepted'):
+        raise ValueError('only an actual ordinary answered question can cross a documented budget stop')
+    if not q.get('answer') or not q.get('answer_source') or not q.get('answer_delivery'):
+        raise ValueError('no actual recorded user answer/delivery')
+    def timestamp(value):
+        if type(value) not in (float, int) or not math.isfinite(value) or value <= 0:
+            raise ValueError('invalid budget-stop timestamp')
+        return value
+    answered = timestamp(q.get('answered_at'))
+    proof = Path(evidence).resolve()
+    if not proof.is_file():
+        raise ValueError('budget guard evidence is missing')
+    receipt = core.read(proof)
+    observed = timestamp(receipt.get('observed_at'))
+    deadline = timestamp(receipt.get('deadline'))
+    st = stop.stat()
+    if (receipt.get('status') != 'active_budget_stop_requested'
+            or observed < deadline or answered > st.st_mtime
+            or not deadline-1 <= st.st_mtime <= observed+1):
+        raise ValueError('answer must precede the exact evidenced automatic budget stop; do not override later/manual stops')
+    outcomes = receipt.get('outcomes')
+    if not isinstance(outcomes, list) or not any(
+            isinstance(r, dict) and r.get('directory') == str(d)
+            and type(r.get('exit')) is int and r['exit'] == 0 for r in outcomes):
+        raise ValueError('guard receipt does not prove a successful stop of this exact workflow')
+    if q['contract_hash'] != s['contract_hash'] or q['origin_thread'] != origin:
+        raise ValueError('budget-stop question binding changed')
+    if q['generation'] != recovery.generation(d, s):
+        raise ValueError('execution advanced after the question; budget-stop exception cannot be reused')
+    return dict(evidence=str(proof), checksum=hashlib.sha256(proof.read_bytes()).hexdigest(),
+                stop_signature=dict(inode=st.st_ino, mtime_ns=st.st_mtime_ns, ctime_ns=st.st_ctime_ns, size=st.st_size),
+                guard_deadline=deadline, guard_observed_at=observed, answered_at=answered)
+
+
+def accepted_budget_stop(identifier, workflow):
+    q = core.read(question_path(identifier))
+    actor(q['origin_thread'])
+    if q['state'] != 'accepted' or Path(q['workflow']).resolve() != Path(workflow).resolve():
+        raise ValueError('budget handoff requires the matching answer accepted by its original conversation')
+    old = q.get('budget_stop_acceptance')
+    if not old or budget_stop_proof(q, old['evidence']) != old:
+        raise ValueError('automatic stop/evidence changed after acceptance; do not override it')
+    return q
+
+
+def validate_question(q, budget_stop_evidence=None):
+    if budget_stop_evidence is not None:
+        budget_stop_proof(q, budget_stop_evidence)
+        d, s, c, origin = binding(q['workflow'], require_open=False)
+    else:
+        d, s, c, origin = binding(q['workflow'])
     if q['contract_hash'] != s['contract_hash'] or origin != q['origin_thread']:
         raise ValueError('question contract or origin binding changed')
     if q.get('generation') != recovery.generation(d, s):
@@ -285,14 +357,16 @@ Workflow: {q['workflow']}
         return public(q)
 
 
-def accept(identifier):
+def accept(identifier, *, budget_stop_evidence=None):
     path = question_path(identifier)
     with recovery.locked(path.with_suffix('.lock')):
         q = core.read(path)
         actor(q['origin_thread'])
-        validate_question(q)
+        validate_question(q, budget_stop_evidence)
         if q['state'] != 'answered' or not q.get('answer_delivery'):
             raise ValueError('answer is missing or has already been accepted')
+        if budget_stop_evidence is not None:
+            q['budget_stop_acceptance'] = budget_stop_proof(q, budget_stop_evidence)
         q.update(state='accepted', accepted_at=core.now())
         core.save(path, q)
         return public(q)

@@ -2,7 +2,13 @@
 
 本地、串行、可恢复的 Codex CLI 依赖调度器。Python 3.12 标准库实现，无额外运行依赖，不使用 goal。由当前对话完成需求访谈与任务规划，后台进程完成执行、独立验收和有限重试。
 
+执行时长可设为 `advisory`：按实测估时、记录耗时和超估预警，但不因时间额度耗尽停工或反复要求追加分钟数；同一本机策略同时覆盖旧任务与新任务，权限、人工停止、最终验收和重复失败保护保留。也支持显式选择有界弹性额度；命令、账本与迁移见 [预算机制](docs/adaptive-budgets.md)。
+
 实现包含完整目标与阶段依赖、有限异常接管、统一用户入口、持久化主控待办，以及 Codex / Claude Code / Pi CLI worker 适配。架构、状态流与实现边界见 [设计方案](docs/architecture.md)，验证方法和已知限制见 [验证说明](docs/validation.md)。
+
+通用会话消息层使用 SQLite 持久化消息箱和 Codex/Claude Code/Pi 受管适配器，见
+[消息协议](docs/message-protocol.md) 与 [适配器接口](docs/agent-transports.md)。
+源码已接入 interaction/control/recovery/delegation，支持显式注册的非 Codex origin 与 hub。受管通信会话保留原生上下文，旧 JSON、Codex UUID、授权与累计预算保留。本 checkout 不替换正在运行的部署；完整验收状态见 [交付验证](docs/message-delivery-validation.md)。
 
 ## 安装与接入
 
@@ -60,7 +66,7 @@ ctask resume /absolute/path/to/repo/.codex/tasks/workflows/WORKFLOW_ID
 - 合约与每个阶段计划分别固化并校验哈希；不能通过缩小目标、删验收或调低检查来获得完成。超出原范围的工作返回明确阻塞。合约改变需要重新整理并创建新总任务，不修改旧合约。
 - 只有所有最终条件通过才标 `completed`。`needs_input` 表示人工验收未完成；`waiting` 表示有具体外部条件，有限等待后再检查；`blocked` 表示需处理前置条件；`stage_limit`、`planning_limit`、`limit` 表示预算到达边界，均不是完成。
 - 外部权限与业务决策不由规划器放行。worker 仍采用既有 sandbox 和禁止自动提交/推送/部署的边界；确需宿主环境的验收必须事先写进已授权合约。宿主检查会执行命令，宜使用只读验收；合约不能作为不可信输入直接运行。
-- 每个总任务默认 2 小时累计运行预算、12 阶段、12 次规划、每次外部等待最多 300 秒；阶段沿用 3 次尝试、单次 worker 1800 秒、检查 120 秒。可在合约 `limits` 中设置 `runtime_seconds`、`max_stages`、`max_planning_attempts`、`max_wait_seconds`、`max_attempts`、`attempt_seconds`、`check_seconds`。恢复不会偷偷重置总预算。
+- 每个总任务的合约默认时长参考为 2 小时；`budget-policy` 的 `advisory` 策略使其仅用于估时，不是停工点。12 阶段、12 次规划、每次外部等待最多 300 秒；阶段沿用 3 次尝试、单次 worker 1800 秒、检查 120 秒。可在合约 `limits` 中设置各项参数；恢复保留累计耗时，单次卡死和无进展重试保护独立于总时长策略。
 - `stop` 作用于总任务和当前阶段；恢复会处理未完成阶段并重新核对全部条件。存在未清理的子进程组时拒绝直接恢复。仓库锁覆盖总任务的所有阶段与规划，避免两个执行器并行修改同一仓库。
 
 人工验收写为 `{"id":"visual","description":"用户确认界面满足约定","kind":"manual"}`。只有实际收到用户验收结论后，协调会话才记录证据并运行：
@@ -119,7 +125,7 @@ ctask list --repo /absolute/path/to/repo
 
 每个任务必须有独立检查命令，使用 argv 数组，默认不经过 shell。需要 shell 语义时显式使用 `["/bin/sh", "-c", "..."]`。检查本身也会执行代码，必须属于任务授权范围。纯人工验收不能伪装成 `true` 命令，应作为单独的待人工交付项。
 
-默认上限可在每个计划中调整。可选 `model` 指定 worker 模型，否则沿用 Codex 配置。默认 workspace-write、approval_policy=never；环境缺少网络/写权限时任务可能阻塞，不自动放开沙箱。执行授权边界写入 worker 提示，不等于对恶意 worker 或恶意仓库的安全隔离。
+默认上限可在每个计划中调整。可选 `model` 指定 worker 模型，否则沿用 Codex 配置。旧计划默认 workspace-write、approval_policy=never；新任务可显式配置 Codex worker 网络、额外写目录、能力前检及带来源的完整权限模式，不自动扩大旧任务权限。正常宿主交接与异常修复次数分开，详见 [worker 权限与宿主交接](docs/worker-permissions-and-handoffs.md)。执行授权边界写入 worker 提示，不等于对恶意 worker 或恶意仓库的安全隔离。
 
 ## 执行语义
 
@@ -156,7 +162,7 @@ python3.12 -m unittest discover -s tests -v
 
 ## 阻塞后自动接管
 
-监督进程独立于 worker，已启用时每 5 秒检查一次总任务。总任务发生 blocked/error/cleanup_blocked 或执行器意外退出时，持久化一次请求，通过 `codex queue` 通知已核实的原会话。不会新建业务目标、改变合约、扩大操作权限或直接修改业务代码。
+监督进程独立于 worker，已启用时每 5 秒检查一次总任务。总任务发生 blocked/error/cleanup_blocked 或执行器意外退出时，持久化一次请求，通过持久化消息箱及已注册适配器通知已核实的原会话。不会新建业务目标、改变合约、扩大操作权限或直接修改业务代码。
 
 新总任务由协调会话在已有持续推进授权下启用：
 
@@ -203,7 +209,7 @@ ctask hub --thread VERIFIED_HUB_UUID --source '用户要求全部在此会话交
 ctask hub
 ```
 
-绑定存于 CODEX_HOME/ctask-interaction/hub.json。新旧本机工作流都使用此默认入口，origin 不变；未配置时保留原会话提问。会话必须在当前本机 Codex 存储中核实，不能从最新会话或迁移笔记猜测。
+绑定存于 CODEX_HOME/ctask-interaction/hub.json。新旧本机工作流都使用此默认入口，origin 不变；未配置时保留原会话提问。Codex 会话须在当前本机存储精确核实；受管 Claude/Pi 使用显式注册的 endpoint ID 和 host capability。不能从最新会话或迁移笔记猜测。
 
 执行会话发起问题：
 
@@ -222,7 +228,7 @@ ctask answer QUESTION_ID --answer '用户实际答复' --source '此会话用户
 
 原会话收到队列消息后先运行 `ctask accept-answer QUESTION_ID`，再根据实际答复解决输入并恢复原总任务；需要改范围时仍创建新合约，不能修改旧合约。代码不会把文本答复自动当作权限或人工验收，也不会替用户调用 acknowledge。已关闭的 needs_input 请求无需再 takeover working，正常恢复会重新启动已配置的监督，累计预算不变。
 
-通知采用至多发送一次的持久化 outbox；发送回执未知不会自动重发。停止、完成、合约/来源变化或原阻塞已解决时拒绝迟到答复。命令核对当前 CODEX_THREAD_ID，问题只能由原会话提出、答复只能由该问题的入口发送、接收只能由原会话确认。它是协作校验，不是对恶意本机进程的权限隔离。默认入口改变不重绑已发问题。同一会话兼任两种角色时标 local，不向自身队列发送消息。当前迁移包不包含入口绑定、问题、答复或原会话存储，MacBook需单独设置自己的入口。
+通知采用至多发送一次的持久化 outbox；发送回执未知不会自动重发。停止、完成、合约/来源变化或原阻塞已解决时拒绝迟到答复。命令核对当前 CODEX_THREAD_ID 或受管 host capability，问题只能由原会话提出、答复只能由该问题的入口发送、接收只能由原会话确认。它是协作校验，不是对恶意本机进程的权限隔离。默认入口改变不重绑已发问题。同一会话兼任两种角色时标 local，不向自身队列发送消息。当前迁移包不包含入口绑定、问题、答复或原会话存储，MacBook需单独设置自己的入口。
 
 
 ## 主控待办、结果回传与进度观察
@@ -285,8 +291,45 @@ ctask delegation-status /absolute/project/.codex/tasks/delegations/DELEGATION_ID
 
 原生输出、stderr、调用信息和session/usage元数据在checkpoints/<attempt>.agent-runtime，目录0700。只接受成功终态的完整JSON，partial、错误、工具输出或截断不能冒充完成；缺认证返回blocked，不反复尝试。STOP/超时按同一进程组管理bridge、CLI及子进程，仓库锁/累计预算/独立验收保持原机制。
 
-第三方目前是worker和只读planner；origin协调和hub仍由Codex负责。Claude禁用原生session持久化；Pi保存本次独立session。任务恢复使用完整合约、当前文件、前次反馈和检查点重新启动CLI，**不承诺原生对话resume，不向已有第三方交互窗口注入消息**。第三方session_id不能当作Codex origin_thread。blocked由现有协调/监督核实并通过hub提问，实际答复回到origin处理。
+上述 agents.py 阶段 worker/只读 planner 每次按完整合约和检查点重启；Claude worker 不持久化会话，Pi worker 保留本次 session。通信协调端使用另一套 message_adapters.py：Claude stream-json/精确 resume、Pi RPC/精确 session，支持多轮上下文和显式受管 origin/hub。第三方使用 origin_endpoint_id，不覆盖旧 origin_thread_id。协调端默认无工具，由可信 host 执行有权限的状态转换；模型结构化提问/接收事件不授予 shell、额外预算或业务执行许可。不支持注入任意既有交互窗口。
 
 验证分别报告：fixture CLI协议/进程测试，实际安装Pi+本地模拟模型端点（真实路径guard、write工具及独立验收），以及云端模型调用。前两者通过不证明账号额度或云端模型效果。缺少Claude登录或Pi provider凭据时是认证阻塞；真实云端验收需在目标机独立配置。开发环境另外验证过Pi真实provider调用和两阶段workflow，不能推广为每台机器已有登录或任意模型都同样可靠。仓库不携带node_modules、认证或会话；目标机独立安装CLI。非macOS暂不执行第三方worker。
 
 官方依据：[Claude headless](https://code.claude.com/docs/en/headless)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[Pi JSON](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md)。已按安装版本--help核对，升级需复验。
+
+持久化消息适配器同一受管会话串行接收后续消息。协议与混合 origin/hub 使用独立进程 fixture 验证；真实 Claude 2.1.325/Pi 1.5.2 曾由外部宿主通过本地 provider 双轮验证，后续源码变更须重新原生验收。worker 的 socket/nested sandbox 限制不等于宿主失败，也不能用旧证据宣称当前完整目标通过。未验证云端账号。接口与证据见 [agent-transports](docs/agent-transports.md) 和 [交付验证](docs/message-delivery-validation.md)。
+
+
+### Agent-neutral workflow routing (feature checkout)
+
+`interaction`, `control`, `recovery` and `delegation` deliver through the shared
+persistent mailbox and transport adapters. Managed Claude/Pi origins use explicit
+`mailbox-register` and `workflow-create --origin-endpoint`; existing Codex UUIDs,
+JSON outboxes, authorization sources and accumulated limits remain valid.
+Managed models can emit structured questions; actual sourced user answers return
+through the existing hub and origin-acceptance flow. A foreground `mailbox-pump`
+processes one managed native turn with tools disabled. No installed runtime is
+activated by this checkout. See [managed host interfaces](docs/agent-transports.md)
+and [workflow guards and compatibility](docs/message-protocol.md).
+
+
+### Offline upgrade and rollback
+
+`scripts/upgrade_runtime.py --dry-run --runtime /path/to/old-runtime` only reads
+source fingerprints and prints a plan. `--stage /new/private/stage --runtime
+/path/to/old-runtime` prepares an independent runtime; it never updates the old
+runtime, launcher, native config or hub. Optional explicit `--offline --state-root`
+snapshots and `--restore ... --destination NEW_DIR --offline` support temporary
+migration/rollback rehearsals. Legacy JSON/controller tables need no conversion;
+the mailbox is additive and unknown old deliveries are never imported as new sends.
+See [upgrade procedure](docs/runtime-upgrade.md) for operator activation prerequisites,
+current-ledger preservation and managed-origin rollback limits. Live installation
+is a separate authorized operation.
+
+## User-intervention-only hub notifications
+
+Use `ctask notification-policy set --mode user_input_only --source 'actual user instruction'` from the verified hub to keep ordinary status and handoff records out of the conversation. Real pending user questions still notify through `ask`/`needs_input`; task state, origin handoffs and historical evidence are preserved. `notification-policy status` reads the policy.
+
+Direct origin calls to native `codex queue` are a separate entry point. The optional `hub_queue_gate.py` guard supports the same policy for the local launcher; normal installation does not replace Codex. See [notification routing and queue-ingress boundaries](docs/notification-policy.md).
+
+For a repaired failed stage, `ctask host-recheck WORKFLOW --task TASK_ID --source 'actual repair evidence'` executes only that task's frozen checks while retaining attempt counts and old failures. It does not create repair attempts or bypass STOP and manual acceptance.

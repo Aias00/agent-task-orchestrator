@@ -67,6 +67,8 @@ def command(plan, directory, label, schema, output, sandbox=None):
     cfg = plan.get('agent', {'kind': 'codex'})
     validate(cfg)
     kind = cfg['kind']
+    import permissions
+    permissions.validate(plan)
     mode = sandbox or plan.get('sandbox', 'workspace-write')
     model = cfg.get('model') or (plan.get('model') if kind == 'codex' else None)
     if kind == 'codex':
@@ -74,6 +76,7 @@ def command(plan, directory, label, schema, output, sandbox=None):
                 '-c', 'approval_policy="never"', '--json', '--output-schema', str(schema), '-o', str(output)]
         if model:
             argv += ['--model', model]
+        argv += permissions.codex_args(plan, sandbox)
         return argv+['-']
     argv = [sys.executable, str(Path(__file__).resolve()), '_invoke', '--kind', kind,
             '--directory', str(directory), '--label', label, '--schema', str(schema),
