@@ -1,6 +1,6 @@
-# Codex Task Runner
+# Agent Task Orchestrator
 
-本地、串行、可恢复的 Codex CLI 依赖调度器。核心使用 Python 3.12 标准库，显式选用 ACP 时另装锁定依赖，不使用 goal。由当前对话完成需求访谈与任务规划，后台进程完成执行、独立验收和有限重试。
+面向多种编码 Agent 的可恢复长任务编排器，支持持久化任务、独立验收、过程追踪、有限接管和统一人工交互。核心使用 Python 3.12 标准库，显式选用 ACP 时另装锁定依赖，不使用 goal。由当前对话完成需求访谈与任务规划，后台进程完成执行、独立验收和有限重试。
 
 执行时长可设为 `advisory`：按实测估时、记录耗时和超估预警，但不因时间额度耗尽停工或反复要求追加分钟数；同一本机策略同时覆盖旧任务与新任务，权限、人工停止、最终验收和重复失败保护保留。也支持显式选择有界弹性额度；命令、账本与迁移见 [预算机制](docs/adaptive-budgets.md)。
 
@@ -15,13 +15,15 @@
 需要 Python 3.12+、Git，以及已经配置可用模型的 Codex CLI。当前完整测试环境为 macOS；Claude Code/Pi worker 还要求系统提供 `sandbox-exec`。核心运行时只使用 Python 标准库；可选 ACP 路线需要 `requirements-acp.lock` 中的 Python SDK 和 `integrations/pi-acp` 中的锁定适配器。
 
 ```sh
-git clone https://github.com/Aias00/codex-task-runner.git
-cd codex-task-runner
+git clone https://github.com/Aias00/agent-task-orchestrator.git
+cd agent-task-orchestrator
 python3.12 scripts/install.py
 # 可选：同时安装对话 skill；已有同名入口/skill 时先检查，再显式使用 --force
 python3.12 scripts/install.py --skills-dir "$HOME/.codex/skills" --force
 ctask --help
 ```
+
+项目名称与仓库地址已更新；现有 `ctask` 命令、本地目录和任务记录保留兼容。
 
 安装器只写命令入口和显式选择的 skill，不启动服务，不迁移账号、知识库或会话。请将 `~/.local/bin` 加入 PATH。也可以直接运行 `python3.12 runner.py` 或 `./bin/ctask`；后者通过 `CTASK_PYTHON` 选择 Python，默认 `python3.12`。安装后的入口引用当前 checkout，因此移动或删除 checkout 后需重新安装。
 
