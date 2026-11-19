@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import re
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
@@ -46,19 +45,14 @@ def alive(pid):
 
 def session_path(home, thread):
     """Read only the exact thread index; never infer from the latest session."""
-    for db in sorted(Path(home).glob('state_*.sqlite'), reverse=True):
-        try:
-            with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=2) as con:
-                row = con.execute('select rollout_path from threads where id=?', (thread,)).fetchone()
-            if row:
-                path = Path(row[0]).resolve()
-                with path.open() as handle:
-                    meta = json.loads(handle.readline())
-                if meta.get('payload', {}).get('id') == thread:
-                    return str(path)
-        except (OSError, ValueError, sqlite3.Error):
-            continue
-    raise ValueError('original session cannot be verified in the configured Codex home')
+    import codex_legacy
+    return codex_legacy.session_path(home, thread)
+
+
+def origin_reference(origin):
+    if origin.get('origin_session_ref') and origin.get('origin_thread_id'):
+        raise ValueError('ambiguous origin identity')
+    return origin.get('origin_session_ref') or origin.get('origin_thread_id')
 
 
 def enable(directory, source, max_requests=3, same_blocker_limit=2,
@@ -71,9 +65,21 @@ def enable(directory, source, max_requests=3, same_blocker_limit=2,
         if type(n) is not int or n < 1:
             raise ValueError('supervision limits must be positive integers')
     origin = core.read(d/'origin.json')
-    thread = str(uuid.UUID(origin['origin_thread_id']))
+    thread = origin.get('origin_session_ref')
     home = Path(origin['codex_home']).resolve()
-    rollout = session_path(home, thread)
+    if thread:
+        if origin.get('origin_thread_id'):
+            raise ValueError('ambiguous origin identity')
+        import session_router
+        _, adapter = session_router.resolve(thread, project=state['repo'], capability='session_observe')
+        if not callable(getattr(adapter, 'observe_session', None)) or not callable(getattr(adapter, 'session_cursor', None)):
+            raise ValueError('adapter has no session observation implementation')
+        session_router.preflight(thread)
+        rollout = None
+    else:
+        import codex_legacy
+        thread = codex_legacy.identity(origin['origin_thread_id'])
+        rollout = session_path(home, thread)
     contract = core.read(d/'contract.json')
     if core.digest(contract) != state['contract_hash']:
         raise ValueError('workflow contract has changed')
@@ -159,34 +165,20 @@ def snapshot(d):
 
 
 def observe_response(r, request):
-    path = Path(r['rollout'])
-    if not path.exists():
+    if not r['rollout']:
+        import session_router
+        events, cursor = session_router.observe(r['thread_id'], request['id'], request.get('event_cursor'))
+        request['event_cursor'] = cursor
+        for event in events:
+            if event.kind == 'received' and event.turn_id:
+                request.update(seen_in_session=True, observed_turn=event.turn_id)
+            elif request.get('seen_in_session') and event.turn_id == request.get('observed_turn') and event.kind == 'responded':
+                request.setdefault('responded_at', core.now())
+            elif request.get('seen_in_session') and event.turn_id == request.get('observed_turn') and event.kind == 'completed':
+                request.setdefault('turn_completed_at', core.now())
         return
-    with path.open('rb') as handle:
-        handle.seek(request.get('scan_offset', request['rollout_offset']))
-        for _ in range(1000):
-            line = handle.readline()
-            if not line:
-                break
-            if not line.endswith(b'\n'):
-                break
-            request['scan_offset'] = handle.tell()
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            p = e.get('payload', {})
-            if (e.get('type') == 'response_item' and p.get('role') == 'user'
-                    and request['id'] in json.dumps(p, ensure_ascii=False)):
-                request['seen_in_session'] = True
-            if (e.get('type') == 'event_msg' and p.get('type') == 'user_message'
-                    and request['id'] in p.get('message', '')):
-                request['seen_in_session'] = True
-            if request.get('seen_in_session'):
-                if e.get('type') == 'response_item' and p.get('role') == 'assistant':
-                    request.setdefault('responded_at', core.now())
-                if e.get('type') == 'event_msg' and p.get('type') == 'task_complete':
-                    request.setdefault('turn_completed_at', core.now())
+    import codex_legacy
+    codex_legacy.observe_recovery(r['rollout'], request, core.now)
 
 
 def message(d, r, request, state, reason):
@@ -216,25 +208,82 @@ Workflow: {d}
 '''
 
 
+def takeover_status(directory, request_id, *, check_repo_lock=True):
+    """Inspect eligibility without changing the ledger or acquiring ownership."""
+    d = Path(directory).resolve()
+    r = core.read(d/'recovery.json')
+    current, status, gen, episode, _, _ = snapshot(d)
+    requests = r.get('requests', [])
+    request = next ( (q for q in requests if q['id'] == request_id), None)
+    reasons = []
+    if not r.get('enabled'):
+        reasons.append('disabled')
+    if (d/'STOP').exists():
+        reasons.append('stopped')
+    if request is None:
+        reasons.append('unknown_request')
+    else:
+        if request is not requests[-1]:
+            reasons.append('replaced_request')
+        if request.get('state') not in ('queued', 'working'):
+            reasons.append('already_handled')
+        if core.now() >= request['expires_at']:
+            reasons.append('expired')
+        if core.now() >= r['deadline'] and request.get('mode') != 'report':
+            reasons.append('supervision_window_expired')
+        if gen != request.get('generation'):
+            reasons.append('generation_changed')
+        if episode != request.get('episode') and gen == request.get('generation'):
+            reasons.append('status_changed')
+    try:
+        if origin_reference(core.read(d/'origin.json')) != r['thread_id']:
+            reasons.append('binding_changed')
+    except (ValueError, KeyError, OSError):
+        reasons.append('binding_changed')
+    if (core.digest(core.read(d/'contract.json')) != r['contract_hash']
+            or current.get('contract_hash') != r['contract_hash']):
+        reasons.append('contract_changed')
+    if alive(current.get('owner_pid')):
+        reasons.append('owner_active')
+    lock_path = Path(current['repo'])/'.codex/tasks/.worker.lock'
+    try:
+        # Do not create a lock file as a side effect of a read-only query.
+        if not lock_path.parent.is_dir():
+            reasons.append('repository_unavailable')
+        elif check_repo_lock and lock_path.exists():
+            with lock_path.open('r') as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle, fcntl.LOCK_UN)
+    except BlockingIOError:
+        reasons.append('repository_busy')
+    except OSError:
+        reasons.append('repository_unavailable')
+    return dict(eligible=not reasons, reasons=reasons, request=request,
+                current=dict(generation=gen, status=status, raw_status=current.get('status'),
+                             stopped=(d/'STOP').exists(), owner_pid=current.get('owner_pid'),
+                             supervision_enabled=r.get('enabled'), deadline=r.get('deadline')),
+                next_action=('Claim only after rechecking eligibility' if not reasons else
+                             'Do not claim; inspect the listed reasons and current workflow evidence'))
+
+
 def takeover(directory, request_id, state, note, evidence=None, recommendation=''):
     d = Path(directory).resolve()
     if state not in ('working', 'repaired', 'needs_input', 'blocked') or not note.strip():
         raise ValueError('takeover requires state working/repaired/needs_input/blocked and a note')
     with locked(d/'recovery.lock'):
         r = core.read(d/'recovery.json')
-        request = next((q for q in r['requests'] if q['id'] == request_id), None)
-        current, status, gen, episode, _, _ = snapshot(d)
-        if (not r['enabled'] or (d/'STOP').exists()
-                or not request or request != r['requests'][-1]
-                or (core.now() >= r['deadline'] and request['mode'] != 'report')
-                or request['state'] not in ('queued', 'working')
-                or core.now() >= request['expires_at'] or episode != request['episode']
-                or core.read(d/'origin.json').get('origin_thread_id') != r['thread_id']
-                or core.digest(core.read(d/'contract.json')) != r['contract_hash']):
-            raise ValueError('takeover is stale, disabled, expired, changed or already resolved')
+        import session_router
+        if session_router.is_reference(r['thread_id']):
+            session_router.actor(r['thread_id'])
+        diagnostic = takeover_status(d, request_id)
+        if not diagnostic['eligible']:
+            raise ValueError('takeover rejected: '+', '.join(diagnostic['reasons']))
+        request = next(q for q in r['requests'] if q['id'] == request_id)
+        current = core.read(d/'state.json')
         with locked(Path(current['repo'])/'.codex/tasks/.worker.lock', blocking=False):
-            if alive(current.get('owner_pid')):
-                raise ValueError('workflow owner is still alive; do not take over')
+            diagnostic = takeover_status(d, request_id, check_repo_lock=False)
+            if not diagnostic['eligible']:
+                raise ValueError('takeover rejected: '+', '.join(diagnostic['reasons']))
             if state == 'repaired':
                 if request['mode'] != 'repair' or not evidence or not Path(evidence).is_file():
                     raise ValueError('repair requires actual evidence and a repair-mode request')
@@ -280,7 +329,7 @@ def tick(directory):
             return finish('disabled' if not r['enabled'] else 'stopped')
         state, status, gen, episode, fingerprint, reason = snapshot(d)
         if (core.digest(core.read(d/'contract.json')) != r['contract_hash']
-                or core.read(d/'origin.json').get('origin_thread_id') != r['thread_id']):
+                or origin_reference(core.read(d/'origin.json')) != r['thread_id']):
             return finish('binding_changed')
         latest = r['requests'][-1] if r['requests'] else None
         if latest:
@@ -313,8 +362,7 @@ def tick(directory):
                 latest['state'] = 'resume_launching'
                 finish('resume_launching')  # A crash cannot cause another launch.
                 try:
-                    result = subprocess.run([sys.executable, str(Path(core.__file__).resolve()),
-                                             'resume', str(d), '--retry-failed'],
+                    result = subprocess.run(core.runtime_command('resume', d, '--retry-failed'),
                                             capture_output=True, text=True, timeout=25)
                     latest['resume_receipt'] = (result.stdout + result.stderr)[-4000:]
                     latest['state'] = 'resuming' if result.returncode == 0 else 'resume_failed'
@@ -352,25 +400,40 @@ def tick(directory):
         try:
             with locked(Path(state['repo'])/'.codex/tasks/.worker.lock', blocking=False):
                 report = status in REPORT or bool(escalation)
+                if not r['rollout']:
+                    import session_router
+                    session_router.preflight(r['thread_id'])
+                    event_cursor = session_router.cursor(r['thread_id'])
+                else:
+                    event_cursor = None
                 request = dict(id='recover-'+uuid.uuid4().hex[:16], episode=episode,
                                fingerprint=fingerprint, generation=gen, state='dispatching',
                                mode='report' if report else 'repair', escalation=escalation,
                                sent_at=core.now(), expires_at=(core.now()+r['response_seconds'] if report
                                    else min(r['deadline'], core.now()+r['response_seconds'])),
-                               rollout_offset=Path(r['rollout']).stat().st_size)
+                               rollout_offset=Path(r['rollout']).stat().st_size if r['rollout'] else None)
+                if event_cursor is not None:
+                    request['event_cursor'] = event_cursor
                 request['message'] = message(d, r, request, state, reason)
                 r['requests'].append(request)
                 finish('dispatching')  # Durable BEFORE sending, including crash windows.
-                env = dict(os.environ, CODEX_HOME=r['codex_home'])
-                argv = [os.environ.get('CTASK_QUEUE_BIN', 'codex'), 'queue', '--thread',
-                        r['thread_id'], '--message', request['message']]
+                if not r['rollout']:
+                    import session_router
+                    try:
+                        result = session_router.send(r['thread_id'], request['message'])
+                        request.update(state={'delivered': 'queued', 'failed': 'send_failed',
+                                              'delivery_unknown': 'delivery_unknown'}[result.state],
+                                       message_id=result.external_id)
+                    except Exception:
+                        request['state'] = 'delivery_unknown'
+                    return finish(request['state'], request['state'] == 'queued')
                 try:
-                    result = subprocess.run(argv, env=env, cwd=state['repo'], capture_output=True,
-                                            text=True, timeout=25)
+                    import codex_legacy
+                    result, receipt_id = codex_legacy.queue(r['codex_home'], r['thread_id'],
+                                                            request['message'], cwd=state['repo'])
                     request['receipt'] = (result.stdout + result.stderr)[-4000:]
-                    match = re.search(r'Queued message ([0-9a-f-]+) for thread ([0-9a-f-]+)', result.stdout)
-                    if result.returncode == 0 and match and match[2] == r['thread_id']:
-                        request.update(state='queued', message_id=match[1])
+                    if receipt_id:
+                        request.update(state='queued', message_id=receipt_id)
                     else:
                         request['state'] = 'delivery_unknown'
                 except subprocess.TimeoutExpired:
@@ -391,8 +454,7 @@ def start(directory):
         if path.exists() and alive(core.read(path).get('pid')):
             return
         with (d/'supervisor.log').open('ab') as log:
-            proc = subprocess.Popen([sys.executable, str(Path(core.__file__).resolve()),
-                                     '_supervisor', str(d)], stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(core.runtime_command('_supervisor', d), stdin=subprocess.DEVNULL,
                                     stdout=log, stderr=log, start_new_session=True)
         core.save(path, dict(pid=proc.pid, heartbeat=core.now(), status='launching'))
 

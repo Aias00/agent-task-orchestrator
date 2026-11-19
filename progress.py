@@ -7,32 +7,12 @@ def initial():
 
 
 def normalize(row):
-    """Only retain tool identity and arguments; callers persist hashes, never bodies."""
-    kind = row.get('type')
-    if kind == 'tool_execution_start':  # Pi
-        return [('start', row.get('toolCallId'), row.get('toolName'), row.get('args', {}))]
-    if kind in ('tool_execution_end', 'tool_execution_update'):
-        return [('end' if kind.endswith('end') else 'progress', row.get('toolCallId'), None, None)]
-    if kind in ('item.started', 'item.completed'):  # Codex exec --json
-        item = row.get('item', {})
-        if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search'):
-            name = item.get('tool') or item['type']
-            args = item.get('arguments', item.get('command', item.get('query', {})))
-            return [('start' if kind.endswith('started') else 'end', item.get('id'), name, args)]
-    if kind in ('assistant', 'user'):  # Claude stream-json
-        result = []
-        for block in row.get('message', {}).get('content', []):
-            if not isinstance(block, dict):
-                continue
-            if block.get('type') == 'tool_use':
-                result.append(('start', block.get('id'), block.get('name'), block.get('input', {})))
-            elif block.get('type') == 'tool_result':
-                result.append(('end', block.get('tool_use_id'), None, None))
-        return result
-    return []
+    """Compatibility decoder for old process records lacking agent metadata."""
+    import agent_native_events
+    return agent_native_events.legacy(row)
 
 
-def observe(path, state, now, digest, stream_idle=120, tool_idle=600, repeated=6):
+def observe(path, state, now, digest, stream_idle=120, tool_idle=600, repeated=6, normalizer=None):
     """Incremental bounded JSONL read. Partial records are retried, never skipped."""
     if state['last_output'] is None:
         state['last_output'] = now
@@ -62,7 +42,7 @@ def observe(path, state, now, digest, stream_idle=120, tool_idle=600, repeated=6
                     continue
     found = []
     for row in rows:
-        for event, identity, name, args in normalize(row):
+        for event, identity, name, args in (normalizer or normalize)(row):
             if not identity:
                 continue
             identity = str(identity)

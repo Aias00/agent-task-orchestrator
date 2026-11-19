@@ -1,18 +1,18 @@
 # Codex Task Runner
 
-本地、串行、可恢复的 Codex CLI 依赖调度器。Python 3.12 标准库实现，无额外运行依赖，不使用 goal。由当前对话完成需求访谈与任务规划，后台进程完成执行、独立验收和有限重试。
+本地、串行、可恢复的 Codex CLI 依赖调度器。核心使用 Python 3.12 标准库，显式选用 ACP 时另装锁定依赖，不使用 goal。由当前对话完成需求访谈与任务规划，后台进程完成执行、独立验收和有限重试。
 
 执行时长可设为 `advisory`：按实测估时、记录耗时和超估预警，但不因时间额度耗尽停工或反复要求追加分钟数；同一本机策略同时覆盖旧任务与新任务，权限、人工停止、最终验收和重复失败保护保留。也支持显式选择有界弹性额度；命令、账本与迁移见 [预算机制](docs/adaptive-budgets.md)。
 
 实现包含完整目标与阶段依赖、有限异常接管、统一用户入口、持久化主控待办，以及 Codex / Claude Code / Pi CLI worker 适配。架构、状态流与实现边界见 [设计方案](docs/architecture.md)，验证方法和已知限制见 [验证说明](docs/validation.md)。
 
-通用会话消息层使用 SQLite 持久化消息箱和 Codex/Claude Code/Pi 受管适配器，见
-[消息协议](docs/message-protocol.md) 与 [适配器接口](docs/agent-transports.md)。
-源码已接入 interaction/control/recovery/delegation，支持显式注册的非 Codex origin 与 hub。受管通信会话保留原生上下文，旧 JSON、Codex UUID、授权与累计预算保留。本 checkout 不替换正在运行的部署；完整验收状态见 [交付验证](docs/message-delivery-validation.md)。
+执行端通过受信任的 Agent 注册表接入，包含可选 ACP Pi worker、持久化工具时间线和原生结果校验。Claude/Pi 的原生协调会话与 hub 仍不支持，明确的能力矩阵见 [Agent 抽象](docs/agent-abstraction.md)。
+
+阻塞处理提供只读 `takeover-status`、有界的原会话诊断跟进，以及不依赖代答的 `workflow-link`。旧任务状态与后继交付分别展示；STOP、修复次数、独立验收、未知投递和静默规则保留，见 [接管与后继关联](docs/recovery-escalation.md)。
 
 ## 安装与接入
 
-需要 Python 3.12+、Git，以及已经配置可用模型的 Codex CLI。当前完整测试环境为 macOS；Claude Code/Pi worker 还要求系统提供 `sandbox-exec`。核心运行时只使用 Python 标准库。
+需要 Python 3.12+、Git，以及已经配置可用模型的 Codex CLI。当前完整测试环境为 macOS；Claude Code/Pi worker 还要求系统提供 `sandbox-exec`。核心运行时只使用 Python 标准库；可选 ACP 路线需要 `requirements-acp.lock` 中的 Python SDK 和 `integrations/pi-acp` 中的锁定适配器。
 
 ```sh
 git clone https://github.com/Aias00/codex-task-runner.git
@@ -291,40 +291,17 @@ ctask delegation-status /absolute/project/.codex/tasks/delegations/DELEGATION_ID
 
 原生输出、stderr、调用信息和session/usage元数据在checkpoints/<attempt>.agent-runtime，目录0700。只接受成功终态的完整JSON，partial、错误、工具输出或截断不能冒充完成；缺认证返回blocked，不反复尝试。STOP/超时按同一进程组管理bridge、CLI及子进程，仓库锁/累计预算/独立验收保持原机制。
 
-上述 agents.py 阶段 worker/只读 planner 每次按完整合约和检查点重启；Claude worker 不持久化会话，Pi worker 保留本次 session。通信协调端使用另一套 message_adapters.py：Claude stream-json/精确 resume、Pi RPC/精确 session，支持多轮上下文和显式受管 origin/hub。第三方使用 origin_endpoint_id，不覆盖旧 origin_thread_id。协调端默认无工具，由可信 host 执行有权限的状态转换；模型结构化提问/接收事件不授予 shell、额外预算或业务执行许可。不支持注入任意既有交互窗口。
+上述阶段 worker/只读 planner 按完整合约和检查点重启；原生会话字段只作调用元数据。Claude/Pi 原生协调端和 hub 尚未实现；注册表拒绝不支持的能力。独立的消息账本 API 不会自动迁移或接管旧 JSON 交互记录，见 [消息与传输边界](docs/message-protocol.md)。
 
 验证分别报告：fixture CLI协议/进程测试，实际安装Pi+本地模拟模型端点（真实路径guard、write工具及独立验收），以及云端模型调用。前两者通过不证明账号额度或云端模型效果。缺少Claude登录或Pi provider凭据时是认证阻塞；真实云端验收需在目标机独立配置。开发环境另外验证过Pi真实provider调用和两阶段workflow，不能推广为每台机器已有登录或任意模型都同样可靠。仓库不携带node_modules、认证或会话；目标机独立安装CLI。非macOS暂不执行第三方worker。
 
 官方依据：[Claude headless](https://code.claude.com/docs/en/headless)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[Pi JSON](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md)。已按安装版本--help核对，升级需复验。
 
-持久化消息适配器同一受管会话串行接收后续消息。协议与混合 origin/hub 使用独立进程 fixture 验证；真实 Claude 2.1.325/Pi 1.5.2 曾由外部宿主通过本地 provider 双轮验证，后续源码变更须重新原生验收。worker 的 socket/nested sandbox 限制不等于宿主失败，也不能用旧证据宣称当前完整目标通过。未验证云端账号。接口与证据见 [agent-transports](docs/agent-transports.md) 和 [交付验证](docs/message-delivery-validation.md)。
+## Agent 注册、过程与接管诊断
 
-
-### Agent-neutral workflow routing (feature checkout)
-
-`interaction`, `control`, `recovery` and `delegation` deliver through the shared
-persistent mailbox and transport adapters. Managed Claude/Pi origins use explicit
-`mailbox-register` and `workflow-create --origin-endpoint`; existing Codex UUIDs,
-JSON outboxes, authorization sources and accumulated limits remain valid.
-Managed models can emit structured questions; actual sourced user answers return
-through the existing hub and origin-acceptance flow. A foreground `mailbox-pump`
-processes one managed native turn with tools disabled. No installed runtime is
-activated by this checkout. See [managed host interfaces](docs/agent-transports.md)
-and [workflow guards and compatibility](docs/message-protocol.md).
-
-
-### Offline upgrade and rollback
-
-`scripts/upgrade_runtime.py --dry-run --runtime /path/to/old-runtime` only reads
-source fingerprints and prints a plan. `--stage /new/private/stage --runtime
-/path/to/old-runtime` prepares an independent runtime; it never updates the old
-runtime, launcher, native config or hub. Optional explicit `--offline --state-root`
-snapshots and `--restore ... --destination NEW_DIR --offline` support temporary
-migration/rollback rehearsals. Legacy JSON/controller tables need no conversion;
-the mailbox is additive and unknown old deliveries are never imported as new sends.
-See [upgrade procedure](docs/runtime-upgrade.md) for operator activation prerequisites,
-current-ledger preservation and managed-origin rollback limits. Live installation
-is a separate authorized operation.
+- [注册适配器](docs/agent-adapter-guide.md)：由受信任代码声明能力，不从计划加载插件或命令。
+- [ACP 过程与可信结果](docs/acp-process.md)：显式选择 `acp_pi`，过程可用 `ctask trace RUN --json` 查询；原生结果、传输结束和宿主验收分别判定。
+- [接管与后继关联](docs/recovery-escalation.md)：`takeover-status`、有界诊断归属、必要人工问题与观察型 `workflow-link`。
 
 ## User-intervention-only hub notifications
 
@@ -333,3 +310,18 @@ Use `ctask notification-policy set --mode user_input_only --source 'actual user 
 Direct origin calls to native `codex queue` are a separate entry point. The optional `hub_queue_gate.py` guard supports the same policy for the local launcher; normal installation does not replace Codex. See [notification routing and queue-ingress boundaries](docs/notification-policy.md).
 
 For a repaired failed stage, `ctask host-recheck WORKFLOW --task TASK_ID --source 'actual repair evidence'` executes only that task's frozen checks while retaining attempt counts and old failures. It does not create repair attempts or bypass STOP and manual acceptance.
+
+## 本次运行版与复现验证
+
+本次源码同步包含已在本机验收的 Agent 抽象、ACP 过程与阻塞接管升级。GitHub 源码发布不会自动替换已安装入口、重启 controller 或迁移业务状态。安装与回滚边界见 [迁移说明](docs/recovery-escalation-migration.md)。
+
+在隔离环境运行完整离线测试（不调用真实模型，不投递真实用户消息）：
+
+```sh
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements-acp.lock
+npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp
+.venv/bin/python scripts/run_tests.py
+```
+
+Node.js 20+ 用于锁定的 pi-acp 协议 fixture；完整 CI 使用 Node.js 24。`run_tests.py` 使用临时配置目录，避免本机 hub、时间策略或投递记录影响回归。运行版验收与源码发布验证的范围分别记录在 [发布说明](docs/recovery-release.md)。

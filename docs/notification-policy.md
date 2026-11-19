@@ -52,3 +52,23 @@ must follow the same source-session policy. Recheck after launcher upgrades.
 This policy prevents chat interruptions; it does not fix the separate logical
 host-handoff identity/generation or successor-linking issues. It does not add
 automatic recovery, a new observer window or business execution authority.
+
+## Project silence, once-only questions and diagnostic follow-through
+
+An explicitly muted project's pending questions remain in the inbox without
+waking the hub. The same project check applies at the optional direct queue guard,
+not just controller delivery. This is not an answer, acknowledgement or closure.
+
+With controller max_reminders set to zero, the question and followup channels
+share the first delivery claim. A pending but already queued/dispatching/unknown
+question cannot be replayed as a new followup. The initial canonical ask is still
+allowed while its own durable delivery state is dispatching; status messages do
+not become human questions by adding a prefix.
+
+The separate recovery upgrade adds bounded diagnostic ownership and validated
+successor projection; it does not loosen this routing policy. A verified handler
+may use operational-disposition to ask for a specific real decision, authority,
+missing information, handler assignment or human acceptance, with pinned evidence
+and tried steps. Such a canonical question follows the normal once-only and
+answer/accept guards. A timeout or no-output event alone grants no extra repair
+or permission. See [recovery and successor linkage](recovery-escalation.md).

@@ -32,6 +32,73 @@ def configure(mode, source):
     return status()
 
 
+def project_mutes():
+    import interaction
+    import runner as core
+    path = interaction.directory()/'notification-project-mutes.json'
+    hub = interaction.config() or {}
+    if not path.exists():
+        return []
+    data = core.read(path)
+    if data.get('hub_thread') != hub.get('thread_id'):
+        return []
+    return [r for r in data.get('rules', []) if r.get('muted') is True]
+
+
+def configure_project(repo, muted, source):
+    from pathlib import Path
+    import interaction
+    import recovery
+    import runner as core
+    hub = interaction.config()
+    if not hub or not source or not source.strip() or type(muted) is not bool:
+        raise ValueError('project notification preference requires verified hub and user source')
+    interaction.actor(hub['thread_id'])
+    project = Path(repo).expanduser().resolve(strict=True)
+    if not project.is_dir():
+        raise ValueError('project must be an existing directory')
+    path = interaction.directory()/'notification-project-mutes.json'
+    with recovery.locked(interaction.directory()/'notification-project-mutes.lock'):
+        data = core.read(path) if path.exists() else {}
+        if data.get('hub_thread') != hub['thread_id']:
+            data = dict(hub_thread=hub['thread_id'], rules=[])
+        rules = [r for r in data.get('rules', []) if r.get('repo') != str(project)]
+        rules.append(dict(repo=str(project), muted=muted, source=source, updated_at=core.now()))
+        core.save(path, dict(hub_thread=hub['thread_id'], rules=rules))
+    return dict(repo=str(project), muted=muted, source=source, pending_tasks_unchanged=True)
+
+
+def project_suppression(action):
+    from pathlib import Path
+    workflow = action.get('workflow')
+    if not workflow:
+        return None
+    actual = Path(workflow).resolve()
+    for rule in project_mutes():
+        tasks = Path(rule['repo']).resolve()/'.codex/tasks'
+        if actual.is_relative_to(tasks):
+            return rule
+    return None
+
+
+def question_already_notified(question, action=None):
+    """Under the user's once-only controller preference, no second channel wakeup.
+
+    A presentation is not a read/answer. An ambiguous delivery is preserved and
+    never replayed as a new reminder. A definite initial send failure may use
+    the controller's single fallback notice.
+    """
+    import control
+    cfg = control.settings() or {}
+    policy = status()
+    if cfg.get('hub_thread') != policy.get('hub_thread') or cfg.get('max_reminders') != 0:
+        return False
+    action = action or {}
+    delivery = question.get('question_delivery', {}).get('state')
+    return (delivery in ('queued', 'local', 'dispatching', 'delivery_unknown')
+            or bool(action.get('presented_at')) or bool(action.get('notice')))
+
+
 def disposition(action, channel='followup'):
     """Only a current, canonical pending ask requires user intervention.
 
@@ -39,6 +106,10 @@ def disposition(action, channel='followup'):
     handoff, or an automatically generated supervision alert.
     """
     policy = status()
+    mute = project_suppression(action)
+    if mute:
+        return dict(mode=policy['mode'], notify=False, source=mute['source'],
+                    project=mute['repo'], reason='project notifications silenced by user; recorded only')
     if policy['mode'] == 'all':
         return dict(mode='all', notify=True, reason='all notifications enabled')
     notify = False
@@ -50,6 +121,9 @@ def disposition(action, channel='followup'):
             interaction.validate_question(q)
             notify = (q['state'] == 'pending' and not q.get('kind')
                       and q['hub_thread'] == policy['hub_thread'])
+            if notify and question_already_notified(q, action):
+                return dict(mode=policy['mode'], notify=False, source=policy['source'],
+                            reason='user question already notified or presented; no repeated reminders')
         except (ValueError, OSError, KeyError):
             pass
     return dict(mode=policy['mode'], notify=notify, source=policy['source'],

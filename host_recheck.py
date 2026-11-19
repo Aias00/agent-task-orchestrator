@@ -46,6 +46,9 @@ def recheck(directory, task_id, source):
         row = child.state['tasks'][task_id]
         if row['status'] not in ('failed', 'blocked', 'needs_host'):
             raise ValueError('only a failed, blocked or needs_host task can be rechecked')
+        if (child.plan.get('agent', {}).get('kind') == 'acp_pi' and
+                (not row.get('attempt_sequence') or row.get('native_proof_attempt') != row['attempt_sequence'])):
+            raise ValueError('current ACP attempt lacks native terminal proof; host checks cannot supply it')
         if any(child.state['tasks'][d]['status'] != 'completed' for d in task.get('depends_on', [])):
             raise ValueError('selected task has an incomplete dependency')
         previous = copy.deepcopy(row)
@@ -60,8 +63,9 @@ def recheck(directory, task_id, source):
         workflow.deadline = budget.deadline(workflow.dir, workflow.state, started=started)
         child.deadline = workflow.deadline
         workflow._accounted_at = child._accounted_at = started
-        workflow.state.update(status='running', owner_pid=os.getpid(), error=None)
-        child.state.update(status='running', owner_pid=os.getpid())
+        identity = core.process_identity(os.getpid())
+        workflow.state.update(status='running', owner_pid=os.getpid(), owner_identity=identity, error=None)
+        child.state.update(status='running', owner_pid=os.getpid(), owner_identity=identity)
         workflow.state['execution_revision'] = workflow.state.get('execution_revision', 0) + 1
         workflow.persist()
         child.persist()

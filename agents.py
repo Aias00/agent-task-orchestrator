@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import agent_registry as registry
 
 KINDS = ('codex', 'claude', 'pi')
 MANAGED = Path.home()/'.local/share/ctask-agent-clis/node_modules/.bin'
@@ -16,8 +17,8 @@ def validate(agent):
     if agent is None:
         return
     if (not isinstance(agent, dict) or set(agent)-{'kind', 'model'}
-            or agent.get('kind') not in KINDS):
-        raise ValueError('agent requires kind codex/claude/pi, optional model')
+            or agent.get('kind') not in registry.kinds()):
+        raise ValueError('agent requires a registered kind and optional model')
     if 'model' in agent and (not isinstance(agent['model'], str) or not agent['model'].strip()
                              or agent['model'].startswith('-')):
         raise ValueError('agent model must be a nonempty model identifier')
@@ -70,20 +71,85 @@ def command(plan, directory, label, schema, output, sandbox=None):
     import permissions
     permissions.validate(plan)
     mode = sandbox or plan.get('sandbox', 'workspace-write')
-    model = cfg.get('model') or (plan.get('model') if kind == 'codex' else None)
-    if kind == 'codex':
+    request = registry.ExecutionRequest(plan, directory, label, schema, output, mode,
+                                        sandbox is not None)
+    return registry.get(kind, 'planner' if request.planner else 'worker').command(request)
+
+
+class _CodexAdapter:
+    kind = 'codex'
+    capabilities = frozenset({'worker', 'planner', 'legacy_model', 'explicit_permissions', 'session_create', 'progress'})
+
+    def progress_path(self, directory, label, log):
+        return log
+
+    def normalize_progress(self, row):
+        import agent_native_events
+        return agent_native_events.codex(row)
+
+    def create_session(self, repo, contract, name, identifier, persist):
+        import codex_legacy
+        return codex_legacy.create_session(repo, contract, name, identifier, persist)
+
+    def command(self, request):
+        import permissions
+        plan, mode = request.plan, request.sandbox
+        schema, output = request.schema, request.output
+        model = plan.get('agent', {}).get('model') or plan.get('model')
         argv = [os.environ.get('CTASK_CODEX_BIN', 'codex'), 'exec', '--sandbox', mode,
                 '-c', 'approval_policy="never"', '--json', '--output-schema', str(schema), '-o', str(output)]
         if model:
             argv += ['--model', model]
-        argv += permissions.codex_args(plan, sandbox)
+        argv += permissions.codex_args(plan, mode if request.planner else None)
         return argv+['-']
-    argv = [sys.executable, str(Path(__file__).resolve()), '_invoke', '--kind', kind,
-            '--directory', str(directory), '--label', label, '--schema', str(schema),
-            '--output', str(output), '--sandbox', mode]
-    if model:
-        argv += ['--model', model]
-    return argv
+
+
+class _FileWorkerAdapter:
+    capabilities = frozenset({'worker', 'planner', 'progress'})
+
+    def progress_path(self, directory, label, log):
+        return Path(directory)/'checkpoints'/(label+'.agent-runtime')/'stdout.jsonl'
+
+    def normalize_progress(self, row):
+        import agent_native_events
+        return {'claude': agent_native_events.claude, 'pi': agent_native_events.pi}[self.kind](row)
+
+    def __init__(self, kind):
+        self.kind = kind
+
+    def command(self, request):
+        argv = [sys.executable, str(Path(__file__).resolve()), '_invoke', '--kind', self.kind,
+                '--directory', str(request.directory), '--label', request.label,
+                '--schema', str(request.schema), '--output', str(request.output),
+                '--sandbox', request.sandbox]
+        model = request.plan.get('agent', {}).get('model')
+        if model:
+            argv += ['--model', model]
+        return argv
+
+
+registry.register(_CodexAdapter())
+registry.register(_FileWorkerAdapter('claude'))
+registry.register(_FileWorkerAdapter('pi'))
+
+
+class _PiACPAdapter:
+    """Explicit opt-in profile; no plan-controlled executable or environment."""
+    kind = 'acp_pi'
+    capabilities = frozenset({'worker', 'planner', 'acp_process'})
+
+    def command(self, request):
+        argv = [sys.executable, str(Path(__file__).with_name('pi_acp_worker.py')),
+                '--directory', str(request.directory), '--label', request.label,
+                '--schema', str(request.schema), '--output', str(request.output),
+                '--sandbox', request.sandbox]
+        model = request.plan.get('agent', {}).get('model')
+        if model:
+            argv += ['--model', model]
+        return argv
+
+
+registry.register(_PiACPAdapter())
 
 
 def validate_result(result, schema):

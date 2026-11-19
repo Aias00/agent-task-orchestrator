@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.12
 """Local launcher gate for unsolicited queue messages into the configured hub.
 
 Native Codex is unchanged. All other commands/targets preserve argv and exec.
@@ -69,6 +69,15 @@ def pending_user_question(text, target):
     try:
         q = core.read(interaction.question_path(identifier))
         interaction.validate_question(q)
+        import notifications
+        if notifications.project_suppression(q):
+            return False
+        # Initial ask is in dispatching state while the real transport gate runs.
+        # Later replay of that ask, or a follow-up after it, must not wake hub again.
+        if match[2] and notifications.question_already_notified(q):
+            return False
+        if match[1] and q.get('question_delivery', {}).get('state') != 'dispatching' and notifications.question_already_notified(q):
+            return False
         return (q['id'] == identifier and q['hub_thread'] == target and q['state'] == 'pending'
                 and q.get('kind') in (None, 'question')
                 and os.environ.get('CODEX_THREAD_ID') in (q['origin_thread'], q['hub_thread']))

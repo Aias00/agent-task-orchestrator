@@ -17,7 +17,7 @@ import workflow
 import recovery
 from test_workflow import PLANNER
 
-THREAD = '11111111-1111-4111-8111-111111111111'
+THREAD = '00000000-0000-4000-8000-000000000002'
 
 
 class RecoveryTests(unittest.TestCase):

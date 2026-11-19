@@ -48,17 +48,33 @@ def preflight(repo):
     return repo
 
 
-def delegate(repo, plan, name, source, request_id=None, timeout=600):
+def delegate(repo, plan, name, source, request_id=None, timeout=600, session_kind='codex'):
     if not name.strip() or not source.strip() or type(timeout) is not int or timeout < 30:
         raise ValueError('delegation requires a name, explicit user instruction source and timeout >=30 seconds')
     hub = interaction.config()
     if not hub:
         raise ValueError('configure and verify the interaction hub first')
     interaction.actor(hub['thread_id'])
-    recovery.session_path(interaction.home(), hub['thread_id'])
+    interaction.verify_target(hub['thread_id'])
     contract = workflow.validate(core.read(plan))
+    import agent_registry
+    adapter = agent_registry.get(session_kind, 'session_create')
+    if not callable(getattr(adapter, 'create_session', None)):
+        raise ValueError('adapter has no session creation implementation')
+    if session_kind != 'codex':
+        for capability, method in (('session_verify', 'verify_session'), ('session_actor', 'is_actor'),
+                                   ('session_observe', 'observe_session'), ('session_observe', 'session_cursor'),
+                                   ('transport', 'send')):
+            agent_registry.get(session_kind, capability)
+            if not callable(getattr(adapter, method, None)):
+                raise ValueError('adapter lacks required delegation method: '+method)
+        if contract.get('permissions') or contract['sandbox'] == 'danger-full-access':
+            raise ValueError('non-Codex delegation cannot widen worker permissions')
     repo = preflight(repo)
-    fingerprint = core.digest([str(repo), contract, name, source, hub['thread_id']])
+    fingerprint_data = [str(repo), contract, name, source, hub['thread_id']]
+    if session_kind != 'codex':
+        fingerprint_data.append(session_kind)
+    fingerprint = core.digest(fingerprint_data)
     identifier = request_id or 'delegate-'+fingerprint[:20]
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', identifier):
         raise ValueError('invalid delegation request ID')
@@ -86,42 +102,28 @@ def delegate(repo, plan, name, source, request_id=None, timeout=600):
                       created_at=core.now(), deadline=core.now()+timeout, state='prepared'))
             # No model is run by thread/start. Persist before every irreversible RPC.
             try:
-                with appserver.Client(interaction.home()) as client:
-                    persisted(d, state='creating')
-                    execution_config = {'sandbox_workspace_write.writable_roots': [
-                        str(repo/'.codex/tasks'), str(interaction.directory())]}
-                    grant = contract.get('permissions', {})
-                    if 'network_access' in grant:
-                        execution_config['sandbox_workspace_write.network_access'] = grant['network_access']
-                    execution_config['sandbox_workspace_write.writable_roots'] += [
-                        str(Path(p).resolve(strict=True)) for p in grant.get('writable_roots', [])]
-                    response = client.request('thread/start', dict(cwd=str(repo),
-                        sandbox=contract['sandbox'], approvalPolicy='never', ephemeral=False,
-                        threadSource='ctask-coordinator/'+identifier, config=execution_config,
-                        developerInstructions='This is a durable coordinating conversation created by an explicit user delegation. '
-                        'Preserve the supplied full workflow objective and authorization. Do not treat yourself as a stage worker. '
-                        'User decisions belong in the configured ctask hub. Do not create another coordinator or parallel scheduler.'))
-                    thread = response['thread']
-                    persisted(d, state='thread_created', origin_thread=thread['id'],
-                              thread_path=thread.get('path'), effective_sandbox=response.get('sandbox'),
-                              effective_approval=response.get('approvalPolicy'))
-                    if Path(thread['cwd']).resolve() != repo:
-                        raise ValueError('created conversation has the wrong working directory')
-                    expected = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess'}[contract['sandbox']]
-                    if response.get('sandbox', {}).get('type') != expected or response.get('approvalPolicy') != 'never':
-                        raise ValueError('created conversation did not preserve requested execution policy')
-                    client.request('thread/name/set', {'threadId': thread['id'], 'name': name})
-                    saved_path = recovery.session_path(interaction.home(), thread['id'])
-                    readback = client.request('thread/read', {'threadId': thread['id'], 'includeTurns': False})
-                    if (readback['thread']['id'] != thread['id']
-                            or Path(readback['thread']['cwd']).resolve() != repo):
-                        raise ValueError('conversation readback mismatch')
-                    persisted(d, verified_rollout=saved_path)
-                w = workflow.create(repo, d/'contract-input.json', thread['id'])
+                persisted(d, state='creating')
+                created = adapter.create_session(repo, contract, name, identifier,
+                                                 lambda **kw: persisted(d, **kw))
+                if (not isinstance(created, agent_registry.CreatedSession)
+                        or Path(created.project).resolve() != repo or created.sandbox != contract['sandbox']
+                        or created.approval != 'never' or not created.source.strip()):
+                    raise ValueError('created session did not prove the requested identity and policy')
+                saved_path = created.legacy_rollout
+                if saved_path:
+                    if session_kind != 'codex':
+                        raise ValueError('legacy Codex rollout is reserved for the Codex bridge')
+                    origin = created.identity
+                    w = workflow.create(repo, d/'contract-input.json', origin)
+                else:
+                    import session_router
+                    origin = session_router.register(session_kind, created.identity, repo, created.source)
+                    w = workflow.create(repo, d/'contract-input.json', origin_ref=origin)
+                persisted(d, origin_thread=origin)
                 core.save(w/'delegation.json', {'directory': str(d), 'hub_thread': hub['thread_id'],
-                                               'origin_thread': thread['id'], 'source': source})
+                                               'origin_thread': origin, 'source': source})
                 (w/'handoff.md').write_text('Independent coordinating conversation\n\n'
-                    f'User delegation source: {source}\nHub: {hub["thread_id"]}\nOrigin: {thread["id"]}\n'
+                    f'User delegation source: {source}\nHub: {hub["thread_id"]}\nOrigin: {origin}\n'
                     f'Delegation: {d}\nFull objective and final acceptance: contract.json\n'
                     'The dispatcher starts this exact workflow after the origin accepts. No replacement task or second worker.\n')
                 recovery.enable(w, source)
@@ -142,19 +144,22 @@ def delegate(repo, plan, name, source, request_id=None, timeout=600):
 接受后本机派发器负责启动这个已建好的总任务；你不要再 start/create、另起worker或同时改业务代码。当前轮只核实和接受，报告实际状态即可。
 后续阻塞会由监督进程通知本会话，按原授权排查并登记修复证据，监督会恢复同一总任务。需要用户决定时通过 ctask ask 或 takeover needs_input 送到统一入口，不要求用户切换窗口。不使用goal，不自动提交/推送/部署或增加业务权限。
 '''
-        persisted(d, state='dispatching', kickoff=message, rollout_offset=Path(saved_path).stat().st_size)
+        persisted(d, state='dispatching', kickoff=message,
+                  rollout_offset=Path(saved_path).stat().st_size if saved_path else None)
         try:
-            result = subprocess.run([os.environ.get('CTASK_QUEUE_BIN', 'codex'), 'queue',
-                                     '--thread', thread['id'], '--message', message],
-                                    capture_output=True, text=True, timeout=25,
-                                    env=dict(os.environ, CODEX_HOME=str(interaction.home())))
-            match = re.search(r'Queued message ([0-9a-f-]+) for thread ([0-9a-f-]+)', result.stdout)
-            if result.returncode == 0 and match and match[2] == thread['id']:
-                persisted(d, state='queued', message_id=match[1], receipt=result.stdout[-2000:])
+            if saved_path:
+                import codex_legacy
+                result, receipt_id = codex_legacy.queue(interaction.home(), origin, message)
+                state = 'queued' if receipt_id else 'delivery_unknown'
+                persisted(d, state=state, message_id=receipt_id, receipt=result.stdout[-2000:])
             else:
-                persisted(d, state='delivery_unknown', error=(result.stdout+result.stderr)[-2000:])
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            persisted(d, state='delivery_unknown', error=str(exc))
+                import session_router
+                result = session_router.send(origin, message)
+                persisted(d, state={'delivered': 'queued', 'failed': 'send_failed',
+                                    'delivery_unknown': 'delivery_unknown'}[result.state],
+                          message_id=result.external_id)
+        except Exception:
+            persisted(d, state='delivery_unknown', error='transport result unavailable')
         start_bridge(d)
     return public(d)
 
@@ -168,7 +173,7 @@ def accept(directory):
             raise ValueError('delegation is stale, expired or already accepted')
         w = Path(r['workflow_dir']);s = core.read(w/'state.json')
         if (core.digest(core.read(w/'contract.json')) != r['contract_hash']
-                or core.read(w/'origin.json')['origin_thread_id'] != r['origin_thread']
+                or recovery.origin_reference(core.read(w/'origin.json')) != r['origin_thread']
                 or (w/'STOP').exists() or s['status'] != 'created'):
             raise ValueError('workflow binding changed, stopped or already started')
         persisted(d, state='accepted', accepted_at=core.now())
@@ -177,7 +182,7 @@ def accept(directory):
 
 def start_bridge(d):
     with (d/'dispatcher.log').open('ab') as log:
-        proc = subprocess.Popen([sys.executable, str(Path(core.__file__).resolve()), '_dispatcher', str(d)],
+        proc = subprocess.Popen(core.runtime_command('_dispatcher', d),
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     core.save(d/'dispatcher.json', {'pid': proc.pid, 'started_at': core.now()})
     return proc
@@ -197,7 +202,7 @@ def watch(directory):
                 if r['state'] == 'accepted':
                     persisted(d, state='launching')
                     try:
-                        result = subprocess.run([sys.executable, str(Path(core.__file__).resolve()), 'start', str(w)],
+                        result = subprocess.run(core.runtime_command('start', w),
                                                  capture_output=True, text=True, timeout=25)
                         persisted(d, launch_receipt=(result.stdout+result.stderr)[-2000:])
                         if result.returncode:

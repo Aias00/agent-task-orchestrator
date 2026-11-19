@@ -15,7 +15,9 @@ def validate(plan):
     grant = plan.get('permissions', {})
     if not isinstance(grant, dict) or set(grant) - {'source', 'network_access', 'writable_roots', 'requirements'}:
         raise ValueError('invalid permissions fields')
-    if plan.get('agent', {}).get('kind', 'codex') != 'codex' and (grant or mode == 'danger-full-access'):
+    import agents
+    adapter = agents.registry.get(plan.get('agent', {}).get('kind', 'codex'))
+    if 'explicit_permissions' not in adapter.capabilities and (grant or mode == 'danger-full-access'):
         raise ValueError('explicit capabilities/full access currently require the Codex adapter')
     if 'network_access' in grant and type(grant['network_access']) is not bool:
         raise ValueError('permissions.network_access must be boolean')

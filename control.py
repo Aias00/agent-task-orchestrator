@@ -114,24 +114,32 @@ def send(key, target, message, *, workflow=None):
         if old:
             con.commit()
             return json.loads(old[0])
-        recovery.session_path(interaction.home(), target)
+        interaction.verify_target(target)
         row = dict(key=key, state='dispatching', target=target, at=core.now())
         con.execute('insert into outbox values(?,?)', (key, json.dumps(row)))
         event(con, 'outbox:'+key, key, 'dispatching', row)
         con.commit()
-    try:
-        r = subprocess.run([os.environ.get('CTASK_QUEUE_BIN', 'codex'), 'queue', '--thread', target,
-                            '--message', message], env=dict(os.environ, CODEX_HOME=str(interaction.home())),
-                           capture_output=True, text=True, timeout=25)
-        match = re.search(r'Queued message ([0-9a-f-]+) for thread ([0-9a-f-]+)', r.stdout)
-        row.update(state='queued' if r.returncode == 0 and match and match[2] == target else 'delivery_unknown',
-                   receipt=(r.stdout+r.stderr)[-2000:])
-        if row['state'] == 'queued':
-            row['message_id'] = match[1]
-    except subprocess.TimeoutExpired:
-        row['state'] = 'delivery_unknown'
-    except OSError as exc:
-        row.update(state='send_failed', receipt=str(exc))
+    import session_router
+    if session_router.is_reference(target):
+        try:
+            result = session_router.send(target, message)
+            row.update(state={'delivered': 'queued', 'failed': 'send_failed',
+                              'delivery_unknown': 'delivery_unknown'}[result.state],
+                       message_id=result.external_id)
+        except Exception:
+            row['state'] = 'delivery_unknown'
+    else:
+        try:
+            import codex_legacy
+            r, receipt_id = codex_legacy.queue(interaction.home(), target, message)
+            row.update(state='queued' if receipt_id else 'delivery_unknown',
+                       receipt=(r.stdout+r.stderr)[-2000:])
+            if row['state'] == 'queued':
+                row['message_id'] = receipt_id
+        except subprocess.TimeoutExpired:
+            row['state'] = 'delivery_unknown'
+        except OSError as exc:
+            row.update(state='send_failed', receipt=str(exc))
     with database() as con, con:
         con.execute('update outbox set body=? where key=?', (json.dumps(row), key))
         event(con, 'receipt:'+key, key, 'delivery_receipt', row)
@@ -165,7 +173,10 @@ def record(identifier, state=None, note=None, evidence=None, workflow=None):
             q = core.read(interaction.question_path(identifier))
             if q['state'] != 'accepted':
                 raise ValueError('continuation link requires the actual answer accepted by its origin')
-            if os.environ.get('CODEX_THREAD_ID') not in (q['origin_thread'], q['hub_thread']):
+            import session_router
+            import codex_legacy
+            current = session_router.current() or codex_legacy.current()
+            if current not in (q['origin_thread'], q['hub_thread']):
                 raise ValueError('continuation bookkeeping requires its verified origin or hub')
             d, s, c, origin = interaction.binding(workflow, require_open=False)
             old_d, old_s, old_c, old_origin = interaction.binding(q['workflow'], require_open=False)
@@ -212,6 +223,46 @@ def record(identifier, state=None, note=None, evidence=None, workflow=None):
         with database() as con, con:
             put(con, action, 'continuation_linked' if workflow else 'presented')
         return action
+
+
+def operational_disposition(identifier, category, blocker, tried, evidence, recommendation, source):
+    """A bound human session records a specific intervention question, never an answer."""
+    import hashlib
+    if category not in ('handler_assignment', 'permission', 'decision', 'missing_information', 'manual_acceptance'):
+        raise ValueError('specific intervention category required')
+    if not all(isinstance(x, str) and x.strip() for x in (blocker, tried, recommendation, source)):
+        raise ValueError('blocker, tried steps, recommendation and source are required')
+    paths = [Path(p).resolve() for p in evidence]
+    if not paths or any(not p.is_file() for p in paths):
+        raise ValueError('existing immutable evidence files are required')
+    with recovery.locked(directory()/'tick.lock'):
+        with database() as con:
+            found = con.execute('select body from actions where id=?', (identifier,)).fetchone()
+        if not found:
+            raise ValueError('unknown operational follow-up')
+        action = json.loads(found[0])
+        if action.get('kind') != 'operational' or action['state'] in TERMINAL:
+            raise ValueError('operational follow-up is not pending')
+        d, s, c, origin = interaction.binding(action['workflow'])
+        hub = interaction.config()
+        if not hub or hub['thread_id'] != action['hub'] or origin != action['origin']:
+            raise ValueError('origin or hub binding changed')
+        if recovery.generation(d, s) != action['baseline_generation'] or recovery.alive(s.get('owner_pid')):
+            raise ValueError('workflow advanced or has an active owner')
+        data = dict(action_id=identifier, category=category, blocker=blocker, tried=tried,
+                    evidence={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},
+                    recommendation=recommendation, source=source)
+        if action.get('escalation') and action['escalation'] != data:
+            raise ValueError('this episode already has a different intervention question')
+        context = json.dumps(dict(task=c['objective'], blocker=blocker, tried=tried,
+                                  evidence=data['evidence'], source=source), ensure_ascii=False)
+        question = interaction.ask(d, blocker, recommendation, context, _controller_escalation=data)
+        if core.read(interaction.question_path(question['id'])).get('controller_escalation') != data:
+            raise ValueError('existing intervention question has different immutable context')
+        action.update(escalation=data, question_id=question['id'])
+        with database() as con, con:
+            put(con, action)
+        return question
 
 
 def reconcile_questions(cfg):
@@ -282,48 +333,41 @@ def observe_origin(action):
     if action['origin'] == action['hub']:
         return  # Already in the same conversation; do not relay to itself.
     delivery = q.get('answer_delivery') or {}
+    import session_router
+    if session_router.is_reference(action['origin']):
+        if 'event_cursor' not in delivery:
+            return
+        tracker = action.setdefault('reply_tracker', dict(cursor=delivery['event_cursor']))
+        events, cursor = session_router.observe(action['origin'], action['id'], tracker['cursor'])
+        tracker['cursor'] = cursor
+        for event in events:
+            if event.kind == 'received' and event.turn_id:
+                tracker.update(seen=True, turn=event.turn_id, text='')
+            elif tracker.get('seen') and event.turn_id == tracker.get('turn'):
+                if event.kind == 'responded':
+                    tracker['text'] = event.text[-6000:]
+                elif event.kind == 'completed':
+                    text = event.text or tracker.get('text')
+                    if text:
+                        action['origin_reply'] = dict(turn=event.turn_id, text=text[-6000:], at=core.now())
+                    tracker['seen'] = False
+        return
     if not delivery.get('rollout_offset') and delivery.get('rollout_offset') != 0:
         return  # Legacy delivery cannot be safely attributed by guessing the last turn.
     path = Path(recovery.session_path(interaction.home(), action['origin']))
     tracker = action.setdefault('reply_tracker', dict(offset=delivery['rollout_offset']))
-    with path.open('rb') as handle:
-        handle.seek(tracker['offset'])
-        for _ in range(1000):
-            line = handle.readline(8*1024*1024+1)
-            if not line or not line.endswith(b'\n'):
-                break
-            tracker['offset'] = handle.tell()
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            p = e.get('payload', {})
-            if e.get('type') == 'response_item' and p.get('type') == 'message':
-                text = '\n'.join(b.get('text', '') for b in p.get('content', []) if isinstance(b, dict))
-                if p.get('role') == 'user' and action['id'] in text:
-                    tracker['seen'] = True
-                elif tracker.get('seen') and p.get('role') == 'assistant':
-                    tracker['text'] = text[-6000:]
-                continue
-            if e.get('type') != 'event_msg':
-                continue
-            kind = p.get('type')
-            if kind == 'task_started':
-                tracker.update(turn=p.get('turn_id'), seen=False, text='')
-            elif kind == 'user_message' and action['id'] in p.get('message', ''):
-                tracker['seen'] = True
-            elif tracker.get('seen') and kind == 'agent_message':
-                tracker['text'] = p.get('message', '')[-6000:]
-            elif tracker.get('seen') and kind == 'task_complete' and p.get('turn_id') == tracker.get('turn'):
-                text = p.get('last_agent_message') or tracker.get('text')
-                if text:
-                    action['origin_reply'] = dict(turn=tracker['turn'], text=text[-6000:], at=core.now())
-                tracker['seen'] = False
+    import codex_legacy
+    reply = codex_legacy.observe_reply(path, tracker, action['id'], core.now)
+    if reply:
+        action['origin_reply'] = reply
 
 
 def live_execution(directory, state):
     """A queued answer/start event is not a running worker. Require live owner and child."""
     if state.get('status') not in recovery.ACTIVE or not recovery.alive(state.get('owner_pid')):
+        return None
+    if 'owner_identity' in state and (not state['owner_identity'] or
+            core.process_identity(state['owner_pid']) != state['owner_identity']):
         return None
     child = state
     if state.get('active_run'):
@@ -331,12 +375,15 @@ def live_execution(directory, state):
     process = child.get('active_process')
     if not process or not recovery.alive(process.get('pid')):
         return None
+    if 'identity' in process and (not process['identity'] or
+            core.process_identity(process['pid']) != process['identity']):
+        return None
     evidence = Path(process.get('evidence', ''))
     size = evidence.stat().st_size if evidence.is_file() else None
     # Changes in command/phase/check results/output prove progress, not just a new timestamp.
-    token = core.digest([process.get('pid'), process.get('argv'), size,
+    token = core.digest([process.get('pid'), process.get('identity'), process.get('phase'), process.get('argv'), size,
                          state.get('criteria'), child.get('tasks'), child.get('status')])
-    return dict(pid=process['pid'], owner_pid=state['owner_pid'], token=token,
+    return dict(pid=process['pid'], owner_pid=state['owner_pid'], phase=process.get('phase'), token=token,
                 observed_at=core.now())
 
 
@@ -400,6 +447,144 @@ def observe_budget(row, directory, state, contract, generation):
             else send('budget-origin:'+identifier, row['origin'], message, workflow=str(directory)))
         with database() as con, con:
             put(con, action)
+
+
+def operational_followthrough(row, d, state, contract, generation):
+    try:
+        with recovery.locked(d/'recovery.lock', blocking=False):
+            _operational_followthrough(row, d, state, contract, generation)
+    except BlockingIOError:
+        return  # A recovery handler is reconciling the same episode.
+
+
+def _operational_followthrough(row, d, state, contract, generation):
+    """Record a bounded diagnostic handoff; it grants no execution authority."""
+    if notifications.status()['mode'] != 'user_input_only':
+        return
+    state = core.read(d/'state.json')
+    if ((d/'STOP').exists() or recovery.generation(d, state) != generation
+            or state.get('contract_hash') != row['contract_hash']
+            or state['status'] not in recovery.REPAIR | recovery.ACTIVE
+            or recovery.alive(state.get('owner_pid'))):
+        return
+    identifier = 'operational-'+core.digest([str(d), generation, state['status']])[:20]
+    with database() as con, con:
+        prior = con.execute('select body from actions where id=?', (identifier,)).fetchone()
+        action = json.loads(prior[0]) if prior else dict(id=identifier, kind='operational',
+            workflow=str(d), origin=row['origin'], hub=row['hub'], state='pending_operational',
+            objective=contract['objective'], baseline_generation=generation,
+            created_at=core.now(), reminders=0, provenance='controller_diagnostic')
+        put(con, action)
+    if action.get('origin_delivery'):
+        # An observed reply is only diagnostic; it never closes the workflow.
+        if action.get('origin_offset') is not None:
+            import codex_legacy
+            tracker = action.setdefault('origin_tracker', dict(offset=action['origin_offset']))
+            reply = codex_legacy.observe_reply(action['origin_rollout'], tracker, identifier, core.now)
+            if reply:
+                action['origin_reply'] = reply
+        with database() as con, con:
+            put(con, action)
+        return
+    import workflow_lineage
+    delivery = workflow_lineage.delivery(d, state)
+    pending_questions = []
+    question_dir = interaction.home()/'ctask-interaction/questions'
+    for path in question_dir.glob('question-*.json'):
+        try:
+            question = core.read(path)
+            if question.get('workflow') == str(d) and question.get('state') in ('pending', 'answered'):
+                interaction.validate_question(question)
+                pending_questions.append(question['id'])
+        except (ValueError, OSError, KeyError):
+            # Damaged or stale question records are ambiguous and require inspection.
+            pending_questions.append(str(path))
+    if delivery['validation'] == 'valid':
+        action['reason'] = 'verified successor already completed'
+    elif delivery['validation'] == 'invalid':
+        action['reason'] = 'successor lineage invalid or ambiguous; inspect before delivery'
+    elif pending_questions:
+        action['reason'] = 'existing or ambiguous user question requires reconciliation'
+    elif row['origin'] == row['hub']:
+        action['reason'] = 'origin_is_hub; no routine self-queue'
+    else:
+        rpath = d/'recovery.json'
+        ledger = core.read(rpath) if rpath.exists() else {}
+        latest = (ledger.get('requests') or [None])[-1]
+        supervisor_path = d/'supervisor.json'
+        supervisor = core.read(supervisor_path) if supervisor_path.exists() else {}
+        launch_path = d/'launch.json'
+        launch = core.read(launch_path) if launch_path.exists() else {}
+        if (recovery.alive(supervisor.get('pid')) or
+                recovery.alive(launch.get('pid')) and core.now()-launch.get('at', 0) < 15):
+            action['reason'] = 'supervisor or workflow launch remains active'
+            with database() as con, con:
+                put(con, action)
+            return
+        if latest and latest.get('state') in ('queued', 'working', 'stalled'):
+            observed = action.get('observed_request')
+            if not observed or observed.get('id') != latest.get('id'):
+                observed = {k: latest[k] for k in ('id', 'rollout_offset', 'scan_offset', 'event_cursor',
+                            'seen_in_session', 'responded_at', 'turn_completed_at') if k in latest}
+            try:
+                recovery.observe_response(ledger, observed)
+                action['observed_request'] = observed
+                latest = dict(latest, **{k: observed[k] for k in
+                    ('seen_in_session', 'responded_at', 'turn_completed_at') if k in observed})
+            except (ValueError, OSError, KeyError) as exc:
+                action['reason'] = 'origin recovery response observation unavailable: '+str(exc)
+                with database() as con, con:
+                    put(con, action)
+                return
+        if (latest and (latest.get('state') in ('dispatching', 'delivery_unknown', 'repaired', 'resuming', 'resume_launching')
+                        or (latest.get('state') in ('queued', 'working') and
+                            (not latest.get('turn_completed_at') or core.now() < latest.get('expires_at', 0)))
+                        or (latest.get('message_id') and not latest.get('turn_completed_at')))):
+            action['reason'] = 'existing recovery delivery or handler may still be active'
+        elif (ledger.get('status') == 'binding_changed' or
+              ledger and (ledger.get('thread_id') != row['origin'] or ledger.get('contract_hash') != state['contract_hash'])):
+            action['reason'] = 'recovery binding changed; diagnostic delivery withheld'
+        else:
+            import session_router
+            if session_router.is_reference(row['origin']):
+                action['reason'] = 'origin activity cannot be independently established for this adapter'
+            else:
+                import codex_legacy
+                rollout = Path(recovery.session_path(interaction.home(), row['origin']))
+                # Only an explicitly completed latest turn establishes idle; absent or
+                # malformed history is unknown, not permission to wake another handler.
+                last = None
+                for line in rollout.read_text().splitlines():
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        last = 'unknown'; continue
+                    if e.get('type') == 'event_msg':
+                        kind = e.get('payload', {}).get('type')
+                        if kind in ('task_started', 'task_complete', 'turn_aborted'):
+                            last = kind
+                if last not in ('task_complete', 'turn_aborted'):
+                    action['reason'] = 'origin turn active or activity unknown'
+                else:
+                    try:
+                        with recovery.locked(Path(state['repo'])/'.codex/tasks/.worker.lock', blocking=False):
+                            fresh = core.read(d/'state.json')
+                            if ((d/'STOP').exists() or recovery.alive(fresh.get('owner_pid'))
+                                    or recovery.generation(d, fresh) != generation):
+                                action['reason'] = 'workflow changed while reconciling'
+                            else:
+                                action['origin_rollout'] = str(rollout)
+                                action['origin_offset'] = rollout.stat().st_size
+                                with database() as con, con:
+                                    put(con, action)
+                                action['origin_delivery'] = send('operational:'+identifier, row['origin'],
+                                    f'[ctask-operational id={identifier}]\nWorkflow: {d}\n'
+                                    '仅诊断既有阻塞与处理人状态；核对 STOP、原合约、现有请求及真实执行。'
+                                    '不得恢复、启动执行器、增加配额或产生业务操作；回复本诊断不代表已恢复。')
+                    except BlockingIOError:
+                        action['reason'] = 'repository busy'
+    with database() as con, con:
+        put(con, action)
 
 
 def workflow_observation(row):
@@ -482,7 +667,18 @@ def workflow_observation(row):
             return
         argv = process.get('argv', [])
         evidence = Path(process['evidence'])
-        if '_invoke' in argv and '--label' in argv:
+        normalizer = None
+        if process.get('agent_kind'):
+            import agents
+            try:
+                adapter = agents.registry.get(process['agent_kind'], 'progress')
+                if not callable(getattr(adapter, 'progress_path', None)) or not callable(getattr(adapter, 'normalize_progress', None)):
+                    return
+                evidence = Path(adapter.progress_path(process['agent_directory'], process['agent_label'], evidence))
+                normalizer = adapter.normalize_progress
+            except (ValueError, KeyError):
+                return  # Unknown capability is never inferred from another agent's stream.
+        elif '_invoke' in argv and '--label' in argv:
             run = Path(s['active_run']) if s.get('active_run') else d
             evidence = run/'checkpoints'/(argv[argv.index('--label')+1]+'.agent-runtime')/'stdout.jsonl'
         elif 'exec' not in argv or '--json' not in argv:
@@ -494,7 +690,7 @@ def workflow_observation(row):
             import progress
             row['progress'] = watch = dict(key=key, evidence=str(evidence), state=progress.initial())
         import progress
-        for alert in progress.observe(evidence, watch['state'], core.now(), core.digest):
+        for alert in progress.observe(evidence, watch['state'], core.now(), core.digest, normalizer=normalizer):
             identifier = 'watchdog-'+core.digest([key, alert['kind'], alert['key']])[:20]
             with database() as con, con:
                 put(con, dict(id=identifier, kind='watchdog', workflow=str(d), origin=origin,
@@ -512,6 +708,7 @@ def workflow_observation(row):
                     hub=row['hub'], state='unpresented', created_at=core.now(), reminders=0,
                     objective=c['objective'], baseline_generation=generation,
                     question='总任务未完成且无活动执行器。核对已有问题和恢复证据，在原授权内处理。'))
+        operational_followthrough(row, d, s, c, generation)
 
 
 def tick():
@@ -548,16 +745,29 @@ def tick():
         for action in actions:
             if action['hub'] != cfg['hub_thread']:
                 continue  # A new default hub never steals old questions or delivery bindings.
+            if action.get('kind') in ('workflow', 'operational') and action.get('workflow'):
+                try:
+                    path = Path(action['workflow'])
+                    if (path/'workflow-lineage.json').exists():
+                        import workflow_lineage
+                        action['delivery'] = workflow_lineage.delivery(path, core.read(path/'state.json'))
+                except (ValueError, OSError, KeyError) as exc:
+                    action['delivery'] = dict(validation='invalid', error=str(exc))
             if action['kind'] in ('question', 'supervision_alert'):
                 try:
                     observe_origin(action)
                 except (ValueError, OSError, KeyError) as exc:
                     action['reply_error'] = str(exc)
-            if action['kind'] in ('watchdog', 'workflow', 'host_handoff', 'budget_review', 'budget_watchdog') and action['state'] not in TERMINAL:
+            if action['kind'] in ('watchdog', 'workflow', 'operational', 'host_handoff', 'budget_review', 'budget_watchdog') and action['state'] not in TERMINAL:
                 try:
                     d, s, c, origin = interaction.binding(action['workflow'], require_open=False)
                     source = next((r for r in sources if r['workflow'] == str(d)), {})
-                    if source.get('superseded_by'):
+                    import workflow_lineage
+                    delivery = workflow_lineage.delivery(d, s)
+                    if delivery['validation'] == 'valid' and action['kind'] in ('workflow', 'operational'):
+                        action.update(state='superseded', resolution='verified independent successor completed; predecessor history retained',
+                                      delivery=delivery)
+                    elif source.get('superseded_by'):
                         action.update(state='superseded', resolution='explicit continuation tracks the remaining task')
                     elif s['status'] == 'completed':
                         action.update(state='completed', resolution='overall acceptance passed')
@@ -585,7 +795,7 @@ def tick():
                         if not recovery.alive(s.get('owner_pid')) or active_key != action['command_key']:
                             action.setdefault('command_ended_at', core.now())
                             # Ending the stalled command is not evidence of task recovery.
-                    elif action['workflow'] in questions:
+                    elif action['kind'] != 'operational' and action['workflow'] in questions:
                         action.update(state='superseded', resolution='specific question tracks this blocker')
                 except (ValueError, OSError, KeyError) as exc:
                     action.update(state='source_error', error=str(exc))
@@ -643,7 +853,7 @@ def start():
         if p.exists() and recovery.alive(core.read(p).get('pid')):
             return status()
         with (directory()/'worker.log').open('ab') as log:
-            proc = subprocess.Popen([sys.executable, str(Path(core.__file__).resolve()), '_controller'],
+            proc = subprocess.Popen(core.runtime_command('_controller'),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         core.save(p, dict(pid=proc.pid, heartbeat=core.now(), state='launching'))
     return status()

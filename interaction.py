@@ -6,14 +6,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import uuid
 
 import runner as core
 import recovery
 
 
 def home():
-    return Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))).resolve()
+    import codex_legacy
+    return codex_legacy.home()
 
 
 def directory():
@@ -28,7 +28,8 @@ def config():
 
 
 def configure(thread, source):
-    thread = str(uuid.UUID(thread))
+    import codex_legacy
+    thread = codex_legacy.identity(thread)
     if not source.strip():
         raise ValueError('hub configuration requires the user instruction source')
     rollout = recovery.session_path(home(), thread)
@@ -43,8 +44,29 @@ def configure(thread, source):
     return hub
 
 
+def configure_session(reference, source):
+    import session_router
+    if not source or not source.strip():
+        raise ValueError('hub configuration requires the user instruction source')
+    session_router.resolve(reference)
+    session_router.actor(reference)
+    p = directory()
+    with recovery.locked(p/'hub.lock'):
+        prior = config()
+        hub = dict(thread_id=reference, session_ref=reference, codex_home=str(home()),
+                   source=source, configured_at=core.now())
+        if prior:
+            hub['previous_thread_id'] = prior['thread_id']
+        core.save(p/'hub.json', hub)
+    return hub
+
+
 def actor(expected):
-    if os.environ.get('CODEX_THREAD_ID') != expected:
+    import session_router
+    if session_router.is_reference(expected):
+        return session_router.actor(expected)
+    import codex_legacy
+    if codex_legacy.current() != expected:
         raise ValueError('this operation must run in its bound Codex conversation')
 
 
@@ -61,14 +83,42 @@ def binding(workflow, require_open=True):
     origin = core.read(d/'origin.json')
     if Path(origin['codex_home']).resolve() != home():
         raise ValueError('workflow and hub must belong to the same local Codex home')
-    thread = str(uuid.UUID(origin['origin_thread_id']))
-    recovery.session_path(home(), thread)
+    thread = origin.get('origin_session_ref')
+    if thread:
+        if origin.get('origin_thread_id'):
+            raise ValueError('ambiguous origin identity')
+        import session_router
+        session_router.resolve(thread, project=s['repo'])
+    else:
+        import codex_legacy
+        thread = codex_legacy.identity(origin['origin_thread_id'])
+        recovery.session_path(home(), thread)
     return d, s, c, thread
+
+
+def verify_target(target):
+    import session_router
+    if session_router.is_reference(target):
+        return session_router.preflight(target)
+    import codex_legacy
+    if codex_legacy.identity(target) != target:
+        raise ValueError('legacy Codex thread must be a canonical UUID')
+    return recovery.session_path(home(), target)
 
 
 def deliver(q, field, target, text, path, allow_local=True):
     if q.get(field):
         return  # Durable at-most-once outbox, including an ambiguous crash window.
+    # Project silence changes delivery only; preserve the pending canonical question.
+    if field == 'question_delivery' and target == q.get('hub_thread'):
+        import notifications
+        mute = notifications.project_suppression(q)
+        if mute:
+            q[field] = dict(state='recorded_only', thread_id=target, created_at=core.now(),
+                            policy=dict(notify=False, project=mute['repo'], source=mute['source'],
+                                        reason='project notifications silenced by user'))
+            core.save(path, q)
+            return
     # An automatic supervisor alert is operational status, not a user question.
     # Keep the canonical inbox record without waking the user's conversation.
     if field == 'question_delivery' and q.get('kind') == 'supervision_alert' and target == q.get('hub_thread'):
@@ -79,22 +129,43 @@ def deliver(q, field, target, text, path, allow_local=True):
                             created_at=core.now(), policy=policy)
             core.save(path, q)
             return
+    import session_router
+    if session_router.is_reference(target):
+        _, adapter = session_router.preflight(target)
+        cursor = None
+        if 'session_observe' in adapter.capabilities:
+            cursor = session_router.cursor(target)
+        q[field] = dict(state='dispatching', session_ref=target, created_at=core.now())
+        if cursor is not None:
+            q[field]['event_cursor'] = cursor
+        core.save(path, q)
+        if allow_local and os.environ.get('CTASK_SESSION_REF') == target:
+            session_router.actor(target)
+            q[field]['state'] = 'local'
+            core.save(path, q)
+            return
+        try:
+            result = session_router.send(target, text)
+            q[field].update(state={'delivered': 'queued', 'failed': 'send_failed',
+                                   'delivery_unknown': 'delivery_unknown'}[result.state],
+                            message_id=result.external_id)
+        except Exception:
+            q[field]['state'] = 'delivery_unknown'
+        core.save(path, q)
+        return
     rollout = Path(recovery.session_path(home(), target))
     q[field] = dict(state='dispatching', thread_id=target, created_at=core.now(),
                     rollout_offset=rollout.stat().st_size)
     core.save(path, q)
-    if allow_local and os.environ.get('CODEX_THREAD_ID') == target:
+    import codex_legacy
+    if allow_local and codex_legacy.current() == target:
         q[field]['state'] = 'local'
     else:
         try:
-            result = subprocess.run([os.environ.get('CTASK_QUEUE_BIN', 'codex'), 'queue',
-                                     '--thread', target, '--message', text],
-                                    env=dict(os.environ, CODEX_HOME=str(home())),
-                                    capture_output=True, text=True, timeout=25)
+            result, receipt_id = codex_legacy.queue(home(), target, text)
             receipt = (result.stdout + result.stderr)[-4000:]
-            match = re.search(r'Queued message ([0-9a-f-]+) for thread ([0-9a-f-]+)', result.stdout)
-            if result.returncode == 0 and match and match[2] == target:
-                q[field].update(state='queued', message_id=match[1])
+            if receipt_id:
+                q[field].update(state='queued', message_id=receipt_id)
             else:
                 q[field]['state'] = 'delivery_unknown'
             q[field]['receipt'] = receipt
@@ -108,7 +179,7 @@ def deliver(q, field, target, text, path, allow_local=True):
 def public(q):
     return {k: q.get(k) for k in ('id', 'workflow', 'objective', 'state', 'question',
             'recommendation', 'context', 'origin_thread', 'hub_thread', 'request_id',
-            'kind', 'recovery_state', 'question_delivery', 'answer', 'answer_source',
+            'kind', 'provenance', 'controller_escalation', 'recovery_state', 'question_delivery', 'answer', 'answer_source',
             'answer_delivery', 'accepted_at')}
 
 
@@ -131,7 +202,7 @@ def supervision_alert(workflow, request_id):
             or request['state'] not in recovery.ALERT_STATES
             or request['generation'] != gen or recovery.alive(s.get('owner_pid'))):
         raise ValueError('supervision alert is stale or not bound to an unresolved request')
-    recovery.session_path(home(), hub['thread_id'])
+    verify_target(hub['thread_id'])
     identifier = 'question-'+core.digest([str(d), s['contract_hash'], 'supervision_alert', request_id])[:20]
     folder = directory()/'questions'; folder.mkdir(exist_ok=True)
     path = folder/(identifier+'.json')
@@ -174,18 +245,43 @@ Workflow: {d}
         return public(q)
 
 
-def ask(workflow, question, recommendation='', context='', request_id=None):
+def ask(workflow, question, recommendation='', context='', request_id=None, *, _controller_escalation=None):
     hub = config()
     if not hub:
         return {'routed': False, 'reason': 'No interaction hub; ask in the original conversation.'}
     d, s, c, origin = binding(workflow)
-    actor(origin)
+    if _controller_escalation:
+        import codex_legacy
+        import control
+        import session_router
+        current = session_router.current() or codex_legacy.current()
+        if current not in (origin, hub['thread_id']):
+            raise ValueError('controller escalation requires the verified origin or hub')
+        actor(current)
+        data = _controller_escalation
+        if (data.get('category') not in ('handler_assignment', 'permission', 'decision', 'missing_information', 'manual_acceptance')
+                or data.get('blocker') != question or data.get('recommendation') != recommendation
+                or not data.get('tried') or not data.get('source') or not isinstance(data.get('evidence'), dict)
+                or not data['evidence']):
+            raise ValueError('controller escalation requires specific structured evidence')
+        for name, checksum in data['evidence'].items():
+            if not Path(name).is_file() or hashlib.sha256(Path(name).read_bytes()).hexdigest() != checksum:
+                raise ValueError('controller escalation evidence changed')
+        with control.database() as con:
+            found = con.execute('select body from actions where id=?', (data.get('action_id'),)).fetchone()
+        action = json.loads(found[0]) if found else {}
+        if (action.get('kind') != 'operational' or action.get('state') in control.TERMINAL
+                or action.get('workflow') != str(d) or action.get('origin') != origin
+                or action.get('hub') != hub['thread_id'] or action.get('baseline_generation') != recovery.generation(d, s)):
+            raise ValueError('controller escalation lacks a current bound operational follow-up')
+    else:
+        actor(origin)
     if not question.strip():
         raise ValueError('a concrete question is required')
-    recovery.session_path(home(), hub['thread_id'])
+    verify_target(hub['thread_id'])
     # A recovery request has one coherent question bundle; ordinary questions
     # are deduplicated by exact contents within the immutable contract.
-    key = [str(d), s['contract_hash'], request_id or
+    key = [str(d), s['contract_hash'], (_controller_escalation or {}).get('action_id') or request_id or
            [recovery.generation(d, s), question, recommendation, context]]
     identifier = 'question-'+core.digest(key)[:20]
     folder = directory()/'questions';folder.mkdir(exist_ok=True)
@@ -204,6 +300,9 @@ def ask(workflow, question, recommendation='', context='', request_id=None):
                  recommendation=recommendation, context=context, request_id=request_id,
                  origin_thread=origin, hub_thread=hub['thread_id'], hub_source=hub['source'],
                  created_at=core.now())
+        if _controller_escalation:
+            q['provenance'] = 'controller_escalation'
+            q['controller_escalation'] = _controller_escalation
         text = f'''[ctask-question id={identifier}]
 用户已指定本会话为统一交互入口。请先运行 ctask inbox 核对问题仍未解决，再在这里向用户提出下面的问题，标明任务与推荐方案；不要替用户作答，不在协调窗口并行修改该工程。
 任务: {c['objective']}
@@ -290,6 +389,13 @@ def validate_question(q, budget_stop_evidence=None):
         raise ValueError('question contract or origin binding changed')
     if q.get('generation') != recovery.generation(d, s):
         raise ValueError('workflow execution has advanced; recheck and ask a fresh question')
+    if q.get('provenance') == 'controller_escalation':
+        data = q.get('controller_escalation') or {}
+        if data.get('category') not in ('handler_assignment', 'permission', 'decision', 'missing_information', 'manual_acceptance'):
+            raise ValueError('invalid controller escalation category')
+        for name, checksum in (data.get('evidence') or {}).items():
+            if not Path(name).is_file() or hashlib.sha256(Path(name).read_bytes()).hexdigest() != checksum:
+                raise ValueError('controller escalation evidence changed')
     if q.get('request_id'):
         r = core.read(d/'recovery.json')
         item = next((x for x in r['requests'] if x['id'] == q['request_id']), None)
@@ -308,7 +414,9 @@ def validate_question(q, budget_stop_evidence=None):
 
 
 def inbox():
-    current = os.environ.get('CODEX_THREAD_ID')
+    import session_router
+    import codex_legacy
+    current = session_router.current() or codex_legacy.current()
     if not current:
         raise ValueError('inbox requires the current conversation ID')
     rows = []
@@ -339,6 +447,7 @@ def answer(identifier, text, source):
         if q['state'] != 'pending':
             raise ValueError('question is not pending')
         validate_question(q)
+        verify_target(q['origin_thread'])
         q.update(state='answered', answer=text, answer_source=source, answered_at=core.now())
         message = f'''[ctask-user-answer id={identifier}]
 统一交互会话已收到用户对此问题的实际答复。先运行 ctask accept-answer {identifier}，核对未停止、合约与原会话匹配、问题未过期；若失败就不要执行迟到动作。
