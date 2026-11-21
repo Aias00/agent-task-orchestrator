@@ -1,0 +1,13 @@
+{
+  "objective": "实现带独立验收的整数求和模块",
+  "scope": "仅当前测试工程的 task_math.py；不新增服务、依赖或远程操作",
+  "authorization": "用户授权本地实现和测试；不提交、推送、部署或发送外部消息",
+  "memory": false,
+  "acceptance": [
+    {
+      "id": "sum",
+      "description": "sum_numbers接受整数列表，正确处理正负数和空列表",
+      "checks": [["python3", "-c", "from task_math import sum_numbers; assert sum_numbers([1,-2,4]) == 3; assert sum_numbers([]) == 0"]]
+    }
+  ]
+}

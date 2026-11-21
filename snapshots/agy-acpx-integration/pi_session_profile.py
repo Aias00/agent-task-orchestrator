@@ -1,0 +1,146 @@
+"""Trusted managed-coordinator launch policy, separate from the ACP worker.
+
+No plan, model, environment override or installed native auth chooses a command.
+The local-only qualification profile accepts explicit *non-secret* model config
+from trusted host code. It never copies a user's native configuration.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent
+SOURCE = ROOT/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'
+ADAPTER_SHA256 = '324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2'
+PI = Path('OPERATOR_HOME/.local/bin/pi')
+NODE = Path('OPERATOR_HOME/.nvm/versions/node/v24.22.1/bin/node')
+SANDBOX = Path('/usr/bin/sandbox-exec')
+
+
+def derive_coordinator(raw):
+    from scripts.derive_pi_acp import derive, replace_once
+    text = derive(raw)
+    # Never fall back to an adapter-generated UUID and call it a native ID.
+    text = replace_once(text,
+        'const sessionId = typeof state?.sessionId === "string" ? state.sessionId : crypto.randomUUID();',
+        'if (typeof state?.sessionId !== "string" || !state.sessionId || !state.sessionFile) throw new Error("native identity required");\n    const sessionId = state.sessionId;')
+    text = replace_once(text, '    _meta: {\n        piAcp: {\n          startupInfo: preludeText || null',
+        '    _meta: {\n        atoIdentity: {nativeId: state.sessionId, project: params.cwd},\n        piAcp: {\n          startupInfo: preludeText || null')
+    # Every emitted active-turn update carries the host's nonce. Unsolicited
+    # startup/history emissions are not attributed to an active request.
+    text = replace_once(text,
+        '        sessionId: this.sessionId,\n        update\n',
+        '        sessionId: this.sessionId,\n        update: {...update, _meta: {...(update._meta ?? {}), ctaskTurn}}\n')
+    text = replace_once(text, '  emit(update) {\n    this.lastEmit',
+                        '  emit(update) {\n    const ctaskTurn = this.ctaskTurn;\n    this.lastEmit')
+    # Prevent project/user slash-command discovery in this restricted profile.
+    text = replace_once(text, 'function loadSlashCommands(cwd) {\n  const commands = [];',
+                        'function loadSlashCommands(cwd) {\n  return [];\n  const commands = [];')
+    return text
+
+
+@dataclass(frozen=True)
+class Launch:
+    command: tuple
+    environment: dict
+    provenance: str
+    native_load_verified: bool = False
+    provenance_data: dict | None = None
+
+
+class LocalPiProfile:
+    """Real Pi 1.5.2 + pinned ACP, loopback model only; no implicit credentials.
+
+    Creating this profile does no IO. ``launch`` checks the exact dependency
+    and version, writes an empty private home, and builds a restricted command.
+    It does not launch a model. No filesystem/network permission widening is
+    accepted through contract fields.
+    """
+    native_load_verified = False
+
+    def __init__(self, model_configuration, model):
+        self.models = json.loads(json.dumps(model_configuration, allow_nan=False))
+        self.model = model
+        from urllib.parse import urlsplit
+        providers = self.models.get('providers', {})
+        if (set(self.models) != {'providers'} or not isinstance(providers, dict) or not providers
+                or not isinstance(model, str) or not model or model.startswith('-')):
+            raise ValueError('explicit local model configuration required')
+        for provider in providers.values():
+            url = urlsplit(provider.get('baseUrl', ''))
+            if (url.scheme != 'http' or url.hostname not in ('127.0.0.1', 'localhost', '::1')
+                    or url.username or url.password or not url.port
+                    or provider.get('apiKey') != 'ato-local-dummy'):
+                raise ValueError('only scripted loopback model with dummy credential is allowed')
+            if set(provider) - {'baseUrl', 'apiKey', 'api', 'models'}:
+                raise ValueError('unsupported provider configuration')
+            if provider.get('api') not in ('openai-completions', 'openai-responses', 'anthropic-messages'):
+                raise ValueError('explicit local protocol required')
+            models = provider.get('models')
+            if not isinstance(models, list) or not models:
+                raise ValueError('explicit scripted model list required')
+            allowed = {'id', 'name', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens'}
+            for entry in models:
+                if (not isinstance(entry, dict) or set(entry)-allowed
+                        or not isinstance(entry.get('id'), str) or not entry['id']):
+                    raise ValueError('model entry may not override endpoint, headers, key or protocol')
+        # Config is data, not executable key commands, headers or extensions.
+        if any(word in json.dumps(self.models) for word in ('!command', 'apiKeyCommand')):
+            raise ValueError('executable model configuration is forbidden')
+
+    def launch(self, runtime, project, sandbox):
+        from transport import _private_save
+        if sandbox not in ('read-only', 'workspace-write'):
+            raise ValueError('managed Pi supports bounded file tools only')
+        if any(path.resolve().is_relative_to(project) for path in (ROOT, SOURCE, PI, NODE)):
+            raise ValueError('model workspace may not contain trusted coordinator code or executables')
+        raw = SOURCE.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != ADAPTER_SHA256:
+            raise ValueError('pinned adapter differs')
+        package = json.loads((SOURCE.parent.parent/'package.json').read_text())
+        if package.get('version') != '0.0.34':
+            raise ValueError('pinned adapter version differs')
+        if not all(p.is_file() for p in (PI, NODE, SANDBOX)):
+            raise ValueError('pinned Pi, Node or OS sandbox unavailable')
+        version = subprocess.run([str(NODE), str(PI.resolve()), '--offline', '--version'],
+            env={'HOME': str(runtime/'home'), 'PATH': '/usr/bin:/bin'},
+            capture_output=True, text=True, timeout=10)
+        if version.returncode or version.stdout.strip() != '1.5.2':
+            raise ValueError('Pi 1.5.2 required')
+        for name in ('home', 'native', 'sessions', 'tmp', 'adapter'):
+            (runtime/name).mkdir(mode=0o700)
+        _private_save(runtime/'native/models.json', self.models)
+        _private_save(runtime/'native/settings.json', dict(quietStartup=True))
+        adapter = runtime/'adapter/pi-acp.mjs'
+        adapter.write_text(derive_coordinator(raw.decode()))
+        (runtime/'adapter/package.json').write_text('{"name":"pi-acp","version":"0.0.34","type":"module"}')
+        (runtime/'adapter/node_modules').symlink_to(SOURCE.parents[2], target_is_directory=True)
+        q = lambda p: json.dumps(str(Path(p).resolve()))
+        # The model has no shell/network tool. The OS further limits the native
+        # model client to loopback and writes to the owned runtime/project.
+        from urllib.parse import urlsplit
+        ports = sorted({urlsplit(p['baseUrl']).port for p in self.models['providers'].values()})
+        rules = ['(version 1)', '(allow default)', '(deny network*)',
+                 *['(allow network-outbound (remote ip "localhost:'+str(port)+'"))' for port in ports],
+                 '(deny file-write*)',
+                 '(allow file-write* (literal "/dev/null") (subpath '+q(runtime)+'))']
+        if sandbox == 'workspace-write':
+            exclusions = ' '.join('(require-not (subpath '+q(project/name)+'))'
+                                  for name in ('.git', '.codex', '.ato', '.pi', '.aws'))
+            rules.append('(allow file-write* (require-all (subpath '+q(project)+') '+exclusions+'))')
+        (runtime/'sandbox.sb').write_text('\n'.join(rules))
+        environment = dict(HOME=str(runtime/'home'), PATH=str(NODE.parent)+':/usr/bin:/bin',
+            PI_CODING_AGENT_DIR=str(runtime/'native'), PI_TELEMETRY='0',
+            CTASK_PI_ACP_STATE_DIR=str(runtime/'adapter-state'),
+            PI_ACP_PI_COMMAND=str(ROOT/'pi_coordinator_exec.py'),
+            CTASK_PI_RUNTIME=str(runtime), CTASK_AGENT_REPO=str(project),
+            CTASK_AGENT_SANDBOX=sandbox, CTASK_PI_MODEL=self.model,
+            TMPDIR=str(runtime/'tmp'), JITI_CACHE=str(runtime/'jiti'))
+        return Launch((str(SANDBOX), '-f', str(runtime/'sandbox.sb'), str(NODE), str(adapter)),
+            environment, 'actual_pi_cli_with_scripted_loopback_model:Pi1.5.2:pi-acp0.0.34:'+ADAPTER_SHA256,
+            provenance_data=dict(pi_version='1.5.2', pi_binary_sha256=hashlib.sha256(PI.resolve().read_bytes()).hexdigest(),
+                adapter_sha256=ADAPTER_SHA256, derived_adapter_sha256=hashlib.sha256(adapter.read_bytes()).hexdigest(),
+                actual_cli_qualified=False, cloud_model_qualified=False))

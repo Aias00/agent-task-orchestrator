@@ -1,0 +1,7 @@
+#!/bin/sh
+# Notification controller only; task execution continues through ctask.
+case "${1-}" in
+  control|notification-policy|followups|presented) ;;
+  *) echo 'Usage: ctask-notify {control|notification-policy|followups|presented} ...' >&2; exit 2 ;;
+esac
+exec OPERATOR_SOURCE/acp-process-live-20261119T022710Z/.venv/bin/python OPERATOR_SOURCE/ato-completion-live-20261119T225017Z/runner.py "$@"

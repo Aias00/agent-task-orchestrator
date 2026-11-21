@@ -1,0 +1,113 @@
+---
+name: codex-long-task
+description: 自动识别需要多阶段实现、依赖调度、持续验证或等待恢复的已授权代码任务，交给本机后台执行器，可指定 Codex、Claude Code 或 Pi CLI 阶段执行端；用户无需说“长任务”或指定 skill。也用于后台任务状态查询、停止、恢复及跨窗口唤醒原会话续办。不用于普通问答、简单修改或已被调度器分派的 worker 子任务，不使用 goal。
+---
+
+# Codex 长任务执行
+
+本机入口 `OPERATOR_HOME/.local/bin/ctask`。完整计划格式与命令见 `CTASK_SOURCE/README.md`，首次创建计划前读取；安装时替换为选定的候选源码路径。
+
+## 完整目标与阶段边界
+
+- 需要持续推进的长任务默认使用 `workflow-create` 总任务入口。先从用户已确认的完整意图建立 `objective`、`scope`、`authorization` 和最终 `acceptance`；不能只拿最近一个报错、当前补丁或独立验收当作总目标。
+- “继续”应回到现有总任务检查剩余条件，不要求用户反复重述完整目标。缺少总任务记录时先从原会话和交接资料重建；无法核实的最终范围只追问关键缺口，不把整个工程路线图擅自纳入授权。
+- 每个阶段只覆盖明确的验收 ID。总任务协调进程会在阶段结束后重查全部条件，必要时规划下一阶段；检查 argv 固化，生成阶段不能替换最终标准。人工验收、外部等待和权限阻塞必须显式记录。
+- `ctask create` 仍可用于单独阶段或复核，但 `completion_scope=stage_only` 不得汇报为整个工作完成。新建验收 run 必须关联原总任务或在交接中明确只是阶段，不用一个新 completed 掩盖其他未完成项。
+
+## 工程路径与执行会话
+
+- 只给工程路径或普通“在这里做某事”，默认当前对话负责；复杂任务仍可使用后台 workflow，origin 是当前会话。不要把后台 worker 当成新的原协调会话，不根据路径擅自复用历史会话。
+- 用户明确“交给某已有会话”时核实那个会话再按跨窗口续办；明确“在路径新开独立执行会话”时才使用新会话派发入口。路径定位工程，不自行决定会话归属。
+- 新会话派发先在当前会话明确完整目标、范围、授权和最终验收，核实目标 Git 工程、统一入口及既有执行器。然后 `ctask delegate --repo REPO --plan CONTRACT --name "任务会话名称" --source "用户明确要求独立会话的来源"`。可用稳定 `--request-id` 标记同一派发；重试同一请求不另建会话。非 Git/不存在的目录先按用户任务明确完成初始化，不隐式建立仓库。
+- 派发器创建真实持久化协调会话，核实目录、身份、执行权限，建立 origin 指向它的 workflow、hub 关联和监督。它发一次接受请求；新会话先 `ctask delegation-accept DELEGATION_DIR`，派发器才启动那个总任务，新会话不能重复 start/create 或并行改代码。
+- 用 `ctask delegation-status DELEGATION_DIR` 区分 thread_created、queued、accepted、started 和总任务验收状态；只创建/入队不能报告已开始执行。创建/发送结果未知时保留记录，不猜 UUID、不盲目另建或重发。默认接受窗口10分钟，原任务预算独立保留。
+- 独立协调会话保留完整上下文，后续按 supervisor 接管；用户问题统一通过已绑定 hub。新会话不等于继承父会话所有历史或额外生产权限，传递的是完整任务合约及授权来源。
+
+## 可选 CLI 执行端
+
+- 用户指定Claude Code或Pi执行时先 `ctask agent-doctor` 检查安装/认证，新plan/contract显式设置 `agent.kind=claude|pi`，模型放 `agent.model`。默认仍Codex，不改既有固化任务。接口与限制见执行器README的“CLI 执行端”。
+- 第一版第三方只承担受限文件工具worker和只读planner，构建测试由宿主原checks执行；不擅自开放shell/MCP/子agent。外部worker要求macOS sandbox-exec，不可用时报告阻塞。
+- `claude` / `pi` / `acp_pi` 的 worker/planner 能力不证明协调能力，第三方 worker 的 session_id 只是元数据。Claude 协调端仍 unsupported。此候选另有 `pi_acp` 受管协调端：可信前台 host、固定 Pi 1.5.2/pinned ACP、私有身份与角色凭证、受限文件工具、显式 loopback/dummy 配置；不自动创建后台宿主。native load 未验证，恢复只能在核实关闭、无未知投递且权限/STOP 允许后，以完整 checkpoint 创建新 native session 并保留 successor 历史。详见候选仓库 `docs/session-decoupling/pi-coordinator.md` 和 `docs/session-decoupling/capabilities.md`。
+- 中立 CLI hub 使用 `local-session-create` / `local-session-grant`、`hub --session-ref REF --actor-file FILE`、`inbox/read/respond/accept-answer/continue-task`；按候选仓库 `docs/session-decoupling/neutral-cli.md` 操作。hub、user、origin 凭证分开，用户答复必须来自实际用户；模型回复、工具结果、环境变量、end_turn 均不授权人工验收。未知能力在副作用前拒绝，发送结果未知不自动重发；不重绑已发问题或猜测真实身份。
+- 本仓库 skill 随候选交付而未安装。`docs/session-decoupling/operator-handoff.md` 规定本次唯一 origin 宿主烟测和后续可逆切换计划；准备脚本或 fixture 通过不表示实际 Pi/云端/总任务验收通过，不自行运行 origin-only 烟测或切换全局入口。
+- 安装、fixture协议测试、真实CLI本地模拟端点与云端认证调用分别报告。缺登录/key先完成可验证工作，再让用户在本机原生CLI登录/配置，凭据不进入任务记录/共享记忆。
+
+## 自动判断执行方式
+
+- 先查 `ctask budget-policy status`。用户要求不因预算停工时，在已核实hub以真实指令来源一次设置 `budget-policy set --mode advisory --source 来源 --request 稳定ID`；它同时覆盖本机旧任务和新任务。`status.budget.mode=advisory` 表示时长仅是估时/预警，`remaining_seconds=null`、`exhausted=false`；不要再申请追加分钟数、创建绝对时长STOP守护或把旧soft/hard当作执行门槛。按实际进展继续完整目标。没有用户来源不擅自切换本机策略；显式选择enforced的场景才适用有界额度审批。
+- 新任务仍按实测分项估算实现、复验和交付耗时，估算用于进度和风险判断；保留全部累计用时、失败、原合约及权限。宿主工作用 `budget-run`，既有实测开销用带证据/稳定request的 `budget-charge`。advisory超估只复评剩余工作，不请求时间许可；不因策略变化恢复人工STOP或声称真实恢复。单次卡死超时、重复失败、阶段/规划次数和监督repair限额独立保留，缺少凭据/人工验收/新增业务权限才问具体问题。已人工停止、外部等待或真正无进展不能伪报继续。详细边界见执行器 `docs/adaptive-budgets.md`。
+
+- 创建需要浏览器、本地服务或联网的任务时，先按实际需要选择 Codex worker 的 `permissions`（来源、network_access、writable_roots、requirements），通过 `ctask permission-check --repo REPO --plan INPUT` 检查。macOS 即使允许网络，workspace-write 仍可能拒绝 Chromium；需要时显式选择已有授权支持的 danger-full-access，或声明由 origin 负责的 `host_handoff`。不把这两种模式的差别隐藏起来，不自动扩大旧合约或第三方 adapter 权限。
+- 实现代码就绪、仅缺宿主既定 checks 时 worker 返回 `ready_for_checks`，由执行器独立运行原检查；不要因 worker 自己的沙箱限制阻断宿主检查。已有明确宿主交接合约时返回 `needs_host`，controller 一次投递给 origin，不消耗/补充异常修复额度。origin 实际完成授权内宿主动作后执行 `ctask host-checks WORKFLOW --source '实际执行及证据来源'`，核实完整验收；失败仍未完成，人工验收仍需真实用户决定。详见执行器 `docs/worker-permissions-and-handoffs.md`。
+
+- 根据实际工作量和执行结构判断，不依赖关键词，也不让用户选择“是否属于长任务”。需要多个有依赖的实现阶段、反复验收修复、外部等待或中断恢复时，主动采用调度器。
+- 用户只需描述目标，例如“完成登录模块并把测试跑通”。先检查现状；若适合后台执行，简短告知采用的方式并按已有授权启动，不追加“是否启用长任务模式”的确认。
+- 简单且能直接完成的修改在当前会话处理，不为流程本身拆任务。用户明确要求前台执行或逐步指导时遵从。
+- 由调度器分派、要求返回结构化结果的 worker 已处于执行流程中，只完成分派任务，不再次启动 ctask 或重复需求访谈。
+
+## 从对话交接
+
+1. 保留用户已确认的目标、边界和默认项。需求尚有关键缺口时使用 grill-me；已确认事项不要重复访谈。
+2. 在目标工程按现有文档约定整理需求、验收和任务依赖。每个任务用明确 prompt、depends_on 和实际有效的 checks（argv 数组）。模型负责提出相关异常验收，不能用空检查或永远成功的命令冒充验证。外部服务、网络、SSH 和写入路径应按实际 worker 环境核对；当前窗口可访问不代表 worker 沙箱也可访问。无法提前核验的条件作为明确前置检查，不反复重试已知环境阻塞。
+3. 使用已经授权的计划直接推进。默认仅本地修改与验证，不自动提交、推送、部署或发消息。说明估时和当前时长策略，不因常规参数反复请求确认。
+4. 总任务执行 `ctask workflow-validate CONTRACT`、`ctask workflow-create --repo REPO --plan CONTRACT`；已核实原会话 UUID 时加 `--origin-thread UUID`。记录返回的 WORKFLOW_DIR，按 [原会话关联与跨窗口续办](references/cross-session.md) 补充紧凑交接，再用 `ctask start WORKFLOW_DIR` 启动。单独阶段才使用 `validate/create`；无法确定会话 ID 时记录缺失，不因此阻止已明确授权的任务。
+5. 检查 `ctask status RUN_DIR` 和 worker.log，确认状态已进入 running 或完成；只得到 launching/PID 不能保证启动成功。不要在同一工作区另起修改代码的进程。
+6. 向用户报告运行目录、当前状态和查询/停止方式。后台任务启动后可以结束当前回复；不要声称尚未验收的任务完成。机器休眠/关机期间不运行，没有开机自启。
+
+## 查询、停止、恢复
+
+- 查询：`ctask list --repo REPO` 与 `ctask status RUN_DIR`，需要时读取 evidence 和 events。
+- Linger 候选提供只读 `ctask task-summary DIRECTORY --format json|text` 和附加 `status.task_view`：同时查看完整目标/阶段、真实进程身份、剩余验收、分类计数及恢复状态。旧 attempts 不是失败数，未知历史保持 unknown。查询不启动模型、通知、接管、标记已读或批准验收。
+- 同时查看总任务与阶段，报告总目标、尚未通过的条件、当前阶段和阻塞。`observed_status` 与原始 `status` 不一致时以实际进程核验为准；不能仅看残留 running 或历史旧 run 的 blocked。一般“本机任务”还应区分调度器任务与其他 Codex 会话，不能把 ctask 清单当成全部未完成工作。
+- 跨窗口查询可直接读取状态；访问任务文件不代表掌握原会话全部上下文。用户要求原会话继续、跨窗口接手或测试唤醒时，先读 [原会话关联与跨窗口续办](references/cross-session.md)，核对来源与请求范围后处理。
+- 停止：`ctask stop RUN_DIR` 后检查任务确已停止；本地状态保留。
+- 恢复：`ctask resume RUN_DIR` 会重新验收已完成项。缺失输入已解决或获授权重新尝试时加 `--retry-failed`。
+- 总任务恢复保留累计时间；advisory不因总时长停工，enforced仍遵守其显式额度。阶段数、规划次数及无进展保护继续生效，不能重置历史掩盖停滞。人工条件仅在用户实际验收后通过 `acknowledge` 记录带来源的证据，再恢复核验，不替用户批准。
+- 新依赖/范围变化：停止当前 run，修订任务图并创建新 run；不要悄悄改固化的 plan.json。未完成分支的失败与人工决策须如实汇报，其他独立工作正常推进。
+- 如果恢复提示孤儿进程，先核对实际进程身份和状态再处理，不按旧 PID 盲目终止。
+- 汇报区分：消息已入队、原会话已响应、后台任务已恢复、任务验收通过。查询时给出本次实际状态与阻塞原因；worker 自述测试通过仍标明来源，不能据此宣称整体验收完成。
+
+## 显式分类记账与容量候选
+
+- 仅新建已授权 plan/contract 可显式选择 `execution_policy={version:2,max_continuations:6,max_waits:4,max_yields:4,max_no_progress:3}`，四个界限可用其他正整数。v2 的 max_attempts 限制真实失败，attempts/attempt_sequence 仍保留所有调用；正常 continue、有限 waiting、清理确认的 yielded 分别累计，不清账、不无限续办。摘要不是进展证明，检查点由宿主核对安全 source 指纹/独立检查变化。没有该字段的旧任务保留原行为，不修改固化计划迁移。
+- 新 plan 可独立选择 `capacity={endpoint:alias,priority:background|interactive}`，全局 limit/reserved_interactive 只读可信 `ATO_HOME/capacity.json`，不可从 plan 覆盖或让 worker 写可信 home。Workflow 原样继承选择。排队不启动模型、不算失败/active；STOP 可取消 pending，active/unknown 必须精确 token/owner/generation 与清理确认，不能按 TTL、PID 死亡或可用槽位推导接管/权限/重发。没有抢占、自动修复或新增 supervisor。
+- 候选的配置、机制与迁移边界见 `CTASK_SOURCE/docs/linger-continuation/architecture.md` 和 `migration.md`。本地交付先核对 `scripts/prepare_linger_candidate.py --check`，保留前驱证明仅对应前驱；所有原始 host gates 通过前不声称完整目标验收。安装/激活、真实模型/Pi、hub/task 迁移或发布均需各自已有的具体授权，本候选没有自动获得这些权限。
+
+## 自动异常接管
+
+- 用户已授权持续推进并启用本机自动接管时，创建总任务使用 `--origin-thread UUID --auto-recover --recovery-source "实际授权来源"`；原会话必须核实。既有任务用 `ctask supervise WORKFLOW_DIR --source "来源"` 接入，不改固化合约；没有来源不要凭共享记忆创造授权。
+- 本次技能维护自身执行器时可以在隔离目录前台实现和验证，避免依赖待修改的执行器自举。
+- 自动请求到达时读取 [跨窗口续办](references/cross-session.md) 的自动接管协议；先 `takeover --state working`，无效/过期请求不得修改或恢复。修复证据落盘后登记 `--state repaired --evidence FILE --note "验证"`，由监督进程恢复原总任务；不能只说修复完成而丢下总目标。
+- `status` 中 recovery 单独表示通知/接手/恢复状态；queued 不等于响应，working/repaired 不等于 resumed，resumed 不等于整体完成。接管预算、重复失败及发送未知状态不得自动重置或绕过去重。
+- 接管超时、原会话登记 blocked、发送失败/结果未知、恢复失败会直接产生 `supervision_alert` 并去重通知已配置 hub，不依赖原会话再次提问。查询同时查看 `recovery.latest.notification` 与 `inbox`；空的普通问题列表不代表任务健康。告警是状态材料，不是新的续办授权；需要时转交用户实际答复，原会话核实后处理。
+
+## 统一用户交互入口
+
+- 用户要求持续集中管理、或处理 `ctask-followup` / `ctask-origin-reply` 时，读取 [主控持续跟进](references/controller.md)。使用独立controller持久化跟进“已通知/已说明/已答复/原会话接收/实际恢复/结果已报告”，不依赖对话记忆；查询不算已说明，轮次结束不算整体完成。controller不扩大业务supervisor额度或原权限。
+
+- 用户要求集中到指定会话交互时，核实该会话 ID 后使用 `ctask hub --thread UUID --source "用户指令来源"` 设定旧 Codex 入口；可信适配器实际提供已验证引用时可使用 `--session-ref REF`。保持各任务的 origin 不变。复制记忆/迁移包不复制会话绑定。
+- 执行会话需要用户决定、授权、凭据说明或人工验收时先查 `ctask hub`。已配置时用 `ctask ask WORKFLOW_DIR --question "具体问题" --recommendation "推荐与原因" --context "必要背景"`，不要求用户切回执行会话。`takeover --state needs_input --note "问题" --recommendation "建议"` 会自动路由；路由失败查看返回结果，用同 request 重试登记，不重复接管或假称已通知。
+- 统一入口收到 `[ctask-question]` 后用 `ctask inbox` 核实未过期，标明任务、问题和建议再向用户提问；不代答或并行修改业务代码。收到实际答复后用 `ctask answer QUESTION_ID --answer "实际答复" --source "用户答复来源"`；多个问题映射不清时先澄清，不能把一般的“好”扩大为批准全部任务。
+- 原会话收到 `[ctask-user-answer]` 后先 `ctask accept-answer QUESTION_ID`；拒绝意味着已处理/已停止/合约或问题已变化，不执行迟到动作。核对用户答复与原授权后继续处理，解决输入后恢复同一总任务并核实真实运行；不要对已关闭的 needs_input 接管请求重复 working，不重置预算、不从转发消息推导额外权限。
+- 入队、原会话确认接收、实际恢复是不同状态；`inbox` 记录问题及答复投递。发送回执不明不盲目重发，已发答案不覆盖。原执行会话可以保留工作汇报，用户需要回答的问题统一送到指定入口。
+- `[ctask-supervision-alert]` 到达时先用 `inbox` 核实未过期/已恢复，向用户报告异常与下一步；已有授权足够时不重复追问。超时不表示原会话已停止工作。用户给出新的处理指令后可经 `answer/accept-answer` 转回原会话，保留累计预算和旧请求过期历史，不重做旧 `takeover`；真实恢复后旧告警不可再用于答复。后台监督即使与 hub 同源也会入队通知，不能因继承会话环境变量而静默视为已告知。
+
+- 答复先记录、旧预算守护随后自动STOP的竞态，读取执行器docs/adaptive-budgets.md的交接规则；原会话仅在原guard回执、时间、合约和代次全匹配时用accept-answer --budget-stop-evidence接收，再以显式hard上限登记和resume --accepted-answer恢复。不是直接绕过普通accept拒绝，不代替用户重批、不解除人工或后续STOP，主控不代origin接收。
+
+## 共享记忆
+
+memory 默认 true，执行器运行前读取偏好和相关记忆，结束时记录有证据路径的摘要。完成后再按全局共享记忆规则沉淀可复用经验，避免把测试成功误写成所有需求都已满足。
+
+
+## 后台状态消息的静默处理
+
+用户要求“不需要我介入的状态或事项更新不在会话中通知”时，按references/controller.md的notification-policy规则执行。只记录无需介入的自动通知，不逐条向用户解释“状态未变”，不把静默标作presented；仅真实有效的决定/授权/补充信息/人工验收问题才主动打断。主动查询和正在处理用户请求的必要进展答复不受此限制。
+
+## 未激活的执行效率候选
+
+- 本仓库 `docs/execution-efficiency/task.md` 的完整目标由 `architecture.md`、`migration.md`、`validation.md` 与 `operator-handoff.md` 统一交付。只运行仓库 `scripts/prepare_efficiency_candidate.py --check` 核对本地候选，不安装此 skill、不激活全局入口、不迁移冻结任务。
+- 新 CLI 创建的任务固定实际 runner/解释器/源与依赖指纹，后续 stage、planner、worker、check、resume 继承原选择。无绑定旧任务保持 legacy；不要据当前全局 launcher 推断旧任务版本，也不要阻止另项已授权精确入口转换。STOP、contract、权限、原 claim、canonical ID 与累计历史不可改写。
+- 新合约可显式启用 `worker_session_policy={version:1,mode:task_bound_native}`、`checkpoint_policy.version=1`（须 execution_policy v2）及 `verification_policy.version=1`。原生续办仅限同任务已核验 exact native ID 与完全相同 profile；不使用 --last、不借 warm 扩权、不自动绕过 unknown/claimed/cleanup 屏障。显式 v2 checkpoint_reconstruction 是新会话，有来源与累计历史，不能冒充 native resume。
+- workflow责任依赖真实执行 owner 或有界已验证任务 claim；普通 origin active/unknown、heartbeat、诊断回复不代表任务有人实际处置或已经恢复。诊断必须形成明确行动/证据、有限外部等待、canonical 用户问题或有据关闭。普通更新静默，一次无人异常仍按原规则记录；inbox 为空不掩盖 followups。
+- 输入完整且可信、原宿主成功日志仍有效的离线检查才复用；最终集成强制 fresh，外部/人工/权限/health 不缓存。保留原 argv、原证据时间与来源。worker自检不替代独立验收，子进程wall不称模型推理，未知usage/latency仍unknown。
+- 真实 Codex 对照仅由 origin 按 `operator-handoff.md` 的原 acceptance.py host_sample --run-origin 执行：三组各两例、每例两轮，最多12 native turns/1200秒，沿用原配置模型/认证与同一受限权限，只在临时Git/小文件中。worker不得执行实际样本；成功绑定精确最终 manifest，失败/unknown 保留日志与一次性claim，不自动追加采样，不读/复制auth、不改native配置、不部署/发布。完整host回归、portable包、提取验证及实际原生proof全部满足前，阶段通过不等于总目标完成。

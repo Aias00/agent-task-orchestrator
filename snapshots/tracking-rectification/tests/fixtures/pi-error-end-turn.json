@@ -1,0 +1,11 @@
+{
+  "description": "Redacted regression derived from an observed Pi 1.5.2 native error followed by ACP end_turn; raw private session evidence is not distributed.",
+  "actual_native_first_stop_reason": "error",
+  "raw_acp_first_stop_reason": "end_turn",
+  "native_first_usage_tokens": 0,
+  "recorded_tool_states": [
+    "pending",
+    "in_progress",
+    "completed"
+  ]
+}
