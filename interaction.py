@@ -1,4 +1,5 @@
 """Durable question/answer routing between workers' origin threads and a user hub."""
+import ato_config
 import json
 import hashlib
 import math
@@ -7,26 +8,25 @@ from pathlib import Path
 import re
 import subprocess
 
-import runner as core
-import recovery
+import ato_core as core
+import ato_core as primitives
+import execution_state
+import agent_registry
 import session_router
 
 
 def home():
     """Compatibility name for the ATO-owned state root."""
-    import ato_config
     return ato_config.ato_home()
 
 
 def directory():
-    import ato_config
     p = ato_config.interaction_directory()
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def config():
-    import ato_config
     path = ato_config.interaction_directory()/'hub.json'
     return core.read(path) if path.exists() else None
 
@@ -35,9 +35,9 @@ def configure(thread, source):
     thread = session_router.compatibility_identity(thread)
     if not source.strip():
         raise ValueError('hub configuration requires the user instruction source')
-    rollout = recovery.session_path(session_router.compatibility_home(), thread)
+    rollout = session_router.compatibility_path(session_router.compatibility_home(), thread)
     p = directory()
-    with recovery.locked(p/'hub.lock'):
+    with primitives.locked(p/'hub.lock'):
         prior = config()
         hub = dict(thread_id=thread, codex_home=str(session_router.compatibility_home()), rollout=rollout,
                    source=source, configured_at=core.now())
@@ -52,16 +52,15 @@ def configure_session(reference, source, *, actor_proof=None):
         raise ValueError('hub configuration requires the user instruction source')
     row, _ = session_router.resolve(reference)
     if row['version'] == 2 and actor_proof is not None:
-        from local_session_adapter import HUB_BINDING
         verified = session_router.authenticate_actor(reference, actor_proof, role='hub',
             project=row['project'], workflow_id='hub-binding:'+row['project'],
-            contract_hash=HUB_BINDING, generation=0)
+            contract_hash=agent_registry.LOCAL_CLI_HUB_BINDING, generation=0)
         session_router.authorize_actor(verified, 'interaction.inbox', project=row['project'],
-            workflow_id='hub-binding:'+row['project'], contract_hash=HUB_BINDING, generation=0)
+            workflow_id='hub-binding:'+row['project'], contract_hash=agent_registry.LOCAL_CLI_HUB_BINDING, generation=0)
     else:
         session_router.actor(reference)
     p = directory()
-    with recovery.locked(p/'hub.lock'):
+    with primitives.locked(p/'hub.lock'):
         prior = config()
         hub = dict(thread_id=reference, session_ref=reference,
                    source=source, configured_at=core.now())
@@ -190,18 +189,18 @@ def supervision_alert(workflow, request_id):
     d, s, c, origin = binding(workflow)
     r = core.read(d/'recovery.json')
     request = r['requests'][-1] if r['requests'] else None
-    gen = recovery.generation(d, s)
+    gen = execution_state.generation(d, s)
     if (not r['enabled'] or r['thread_id'] != origin
             or r['contract_hash'] != s['contract_hash']
             or not request or request['id'] != request_id
-            or request['state'] not in recovery.ALERT_STATES
-            or request['generation'] != gen or recovery.alive(s.get('owner_pid'))):
+            or request['state'] not in execution_state.ALERT_STATES
+            or request['generation'] != gen or primitives.alive(s.get('owner_pid'))):
         raise ValueError('supervision alert is stale or not bound to an unresolved request')
     verify_target(hub['thread_id'])
     identifier = 'question-'+core.digest([str(d), s['contract_hash'], 'supervision_alert', request_id])[:20]
     folder = directory()/'questions'; folder.mkdir(exist_ok=True)
     path = folder/(identifier+'.json')
-    with recovery.locked(folder/(identifier+'.lock')):
+    with primitives.locked(folder/(identifier+'.lock')):
         if path.exists():
             prior = core.read(path)
             if (prior.get('question_delivery') or {}).get('authority') == 'managed_mailbox':
@@ -250,7 +249,7 @@ def ask(workflow, question, recommendation='', context='', request_id=None, *, _
         return {'routed': False, 'reason': 'No interaction hub; ask in the original conversation.'}
     d, s, c, origin = binding(workflow)
     if _controller_escalation:
-        import control
+        import control_store as control
         current = session_router.current_actor_locator()
         if current not in (origin, hub['thread_id']):
             raise ValueError('controller escalation requires the verified origin or hub')
@@ -269,7 +268,7 @@ def ask(workflow, question, recommendation='', context='', request_id=None, *, _
         action = json.loads(found[0]) if found else {}
         if (action.get('kind') != 'operational' or action.get('state') in control.TERMINAL
                 or action.get('workflow') != str(d) or action.get('origin') != origin
-                or action.get('hub') != hub['thread_id'] or action.get('baseline_generation') != recovery.generation(d, s)):
+                or action.get('hub') != hub['thread_id'] or action.get('baseline_generation') != execution_state.generation(d, s)):
             raise ValueError('controller escalation lacks a current bound operational follow-up')
     else:
         question_actor(origin, d, 'origin', 'question.ask', actor_proof)
@@ -279,11 +278,11 @@ def ask(workflow, question, recommendation='', context='', request_id=None, *, _
     # A recovery request has one coherent question bundle; ordinary questions
     # are deduplicated by exact contents within the immutable contract.
     key = [str(d), s['contract_hash'], (_controller_escalation or {}).get('action_id') or request_id or
-           [recovery.generation(d, s), question, recommendation, context]]
+           [execution_state.generation(d, s), question, recommendation, context]]
     identifier = 'question-'+core.digest(key)[:20]
     folder = directory()/'questions';folder.mkdir(exist_ok=True)
     path = folder/(identifier+'.json')
-    with recovery.locked(folder/(identifier+'.lock')):
+    with primitives.locked(folder/(identifier+'.lock')):
         if path.exists():
             prior = core.read(path)
             if (prior.get('question_delivery') or {}).get('authority') == 'managed_mailbox':
@@ -296,7 +295,7 @@ def ask(workflow, question, recommendation='', context='', request_id=None, *, _
                 raise ValueError('recovery request is not awaiting user input')
         q = dict(id=identifier, workflow=str(d), objective=c['objective'],
                  contract_hash=s['contract_hash'], state='pending', question=question,
-                 generation=recovery.generation(d, s),
+                 generation=execution_state.generation(d, s),
                  recommendation=recommendation, context=context, request_id=request_id,
                  origin_thread=origin, hub_thread=hub['thread_id'], hub_source=hub['source'],
                  created_at=core.now())
@@ -361,7 +360,7 @@ def budget_stop_proof(q, evidence):
         raise ValueError('guard receipt does not prove a successful stop of this exact workflow')
     if q['contract_hash'] != s['contract_hash'] or q['origin_thread'] != origin:
         raise ValueError('budget-stop question binding changed')
-    if q['generation'] != recovery.generation(d, s):
+    if q['generation'] != execution_state.generation(d, s):
         raise ValueError('execution advanced after the question; budget-stop exception cannot be reused')
     return dict(evidence=str(proof), checksum=hashlib.sha256(proof.read_bytes()).hexdigest(),
                 stop_signature=dict(inode=st.st_ino, mtime_ns=st.st_mtime_ns, ctime_ns=st.st_ctime_ns, size=st.st_size),
@@ -387,7 +386,7 @@ def validate_question(q, budget_stop_evidence=None):
         d, s, c, origin = binding(q['workflow'])
     if q['contract_hash'] != s['contract_hash'] or origin != q['origin_thread']:
         raise ValueError('question contract or origin binding changed')
-    if q.get('generation') != recovery.generation(d, s):
+    if q.get('generation') != execution_state.generation(d, s):
         raise ValueError('workflow execution has advanced; recheck and ask a fresh question')
     if q.get('provenance') == 'controller_escalation':
         data = q.get('controller_escalation') or {}
@@ -404,9 +403,9 @@ def validate_question(q, budget_stop_evidence=None):
                     or r['contract_hash'] != q['contract_hash']
                     or not item or item != r['requests'][-1]
                     or item['generation'] != q['generation']
-                    or item['state'] not in recovery.ALERT_STATES
+                    or item['state'] not in execution_state.ALERT_STATES
                     or item['state'] != q.get('recovery_state')
-                    or recovery.alive(s.get('owner_pid'))):
+                    or primitives.alive(s.get('owner_pid'))):
                 raise ValueError('supervision alert has already changed or execution is active')
         elif not item or item['state'] != 'needs_input':
             raise ValueError('question recovery episode has already changed')
@@ -446,7 +445,7 @@ def inbox(*, actor_proof=None, reference=None, workflow=None):
 def read_question(identifier, *, actor_proof=None, presented_source=None):
     """Reading alone never asserts presentation, a user answer or approval."""
     path = question_path(identifier)
-    with recovery.locked(path.with_suffix('.lock')):
+    with primitives.locked(path.with_suffix('.lock')):
         q = core.read(path)
         verified = question_actor(q['hub_thread'], q['workflow'], 'hub', 'interaction.present', actor_proof)
         validate_question(q)
@@ -461,7 +460,7 @@ def read_question(identifier, *, actor_proof=None, presented_source=None):
 
 def answer(identifier, text, source, *, actor_proof=None):
     path = question_path(identifier)
-    with recovery.locked(path.with_suffix('.lock')):
+    with primitives.locked(path.with_suffix('.lock')):
         q = core.read(path)
         verified = question_actor(q['hub_thread'], q['workflow'], 'user', 'decision.answer', actor_proof)
         if not text.strip() or not source.strip():
@@ -498,7 +497,7 @@ Workflow: {q['workflow']}
 
 def accept(identifier, *, budget_stop_evidence=None, actor_proof=None):
     path = question_path(identifier)
-    with recovery.locked(path.with_suffix('.lock')):
+    with primitives.locked(path.with_suffix('.lock')):
         q = core.read(path)
         # The legacy documented budget-stop exception keeps its public API.
         if budget_stop_evidence is not None and not actor_proof:

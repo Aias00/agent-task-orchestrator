@@ -38,6 +38,8 @@ ctask --help
 
 架构见 [设计](docs/architecture.md)、[会话适配](docs/agent-transports.md) 与 [源码地图](docs/source-map.md)。
 
+完整分类见 [文档索引](docs/README.md)。`pyproject.toml` 声明 Python 3.12+、核心零第三方依赖和与锁文件一致的 `acp` 可选依赖；它不替代针对选定 checkout 的 `scripts/install.py`，也不注册运行入口或启动服务。结构检查可运行 `.venv/bin/python scripts/check_architecture.py`，覆盖根模块与 `ato_cli/` 的静态导入（含函数内延迟导入）。历史 `prepare_*_candidate.py` 仅用于显式提供私有验收输入后的内部打包，缺少 `operator-evidence/` 时会说明用途并返回非零，日常安装与测试不需要这些材料。
+
 ## 总任务与阶段
 
 长期工作用 `workflow-create` 创建总任务。`create` 创建的单次 run 只表示一个阶段；它的 `completed` 不能代表整个用户目标完成。

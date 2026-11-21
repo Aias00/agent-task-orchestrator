@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 
 import interaction
-import recovery
-import runner as core
+import ato_core as recovery
+import ato_core as core
 import session_router
 
 

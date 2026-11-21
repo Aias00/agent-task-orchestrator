@@ -4,6 +4,7 @@
 Native Codex is unchanged. All other commands/targets preserve argv and exec.
 Only canonical current ctask user questions enter a user-input-only hub.
 """
+import ato_config
 import datetime
 import fcntl
 import hashlib
@@ -86,7 +87,6 @@ def pending_user_question(text, target):
 
 
 def suppression(options):
-    import ato_config
     folder = ato_config.interaction_directory()
     hub_path = folder/'hub.json'; policy_path = folder/'notification-policy.json'
     if not hub_path.exists() or not policy_path.exists():

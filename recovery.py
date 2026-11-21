@@ -18,39 +18,19 @@ import uuid
 
 import session_router
 import runner as core
+from ato_core import now, read, save, digest, process_identity, Halt, locked, alive
+from ato_core import pid_alive as _pid_alive
 
-ACTIVE = {'running', 'planning', 'verifying', 'waiting'}
-REPAIR = {'blocked', 'error', 'cleanup_blocked', 'interrupted'}
-REPORT = {'needs_input', 'limit', 'stage_limit', 'planning_limit', 'contract_changed'}
-ALERT_STATES = {'stalled', 'blocked', 'delivery_unknown', 'send_failed', 'resume_failed'}
+import execution_state
+from execution_state import ACTIVE, REPAIR, REPORT, ALERT_STATES
 WATCH_FAILURE_LIMIT = 5
 EVENT_BLOCK_BYTES = 64 * 1024
 _LINE_BOUNDARY = re.compile(rb'\r\n|[\n\r\v\f\x1c-\x1e]|\xc2\x85|\xe2\x80[\xa8\xa9]')
 
 
-@contextlib.contextmanager
-def locked(path, blocking=True):
-    with Path(path).open('a+') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-        yield
-
-
-def alive(pid):
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # Unknown ownership must not cause another execution.
-
-
 def pid_alive(info):
-    """Old records retain their PID-only compatibility; new records fence reuse."""
-    return alive(info.get('pid')) and ('pid_identity' not in info
-        or core.process_identity(info['pid']) == info['pid_identity'])
+    """Compatibility facade retaining existing liveness/identity injection points."""
+    return _pid_alive(info, alive_fn=alive, identity_fn=core.process_identity)
 
 
 def watch_ticks(tick, path, log_path, state_key, interval, stopped):
@@ -184,36 +164,11 @@ def summary(directory):
 
 
 def generation(d, state):
-    # A very fast resume can finish between watcher polls. The durable start event
-    # still proves execution occurred, unlike a model's claim that it resumed.
-    path = d/'events.jsonl'
-    if path.exists():
-        lines = (reversed(path.read_text().splitlines()) if path.stat().st_size <= EVENT_BLOCK_BYTES
-                 else reverse_event_lines(path))
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict) and event.get('event') == 'workflow_started' and 'time' in event:
-                return [event['time'], state.get('execution_revision', 0)]
-    return [None, state.get('execution_revision', 0)]
+    return execution_state.generation(d, state, block_bytes=EVENT_BLOCK_BYTES)
 
 
 def reverse_event_lines(path):
-    """Match str.splitlines, retaining incomplete lines/UTF-8 delimiters across blocks."""
-    with path.open('rb') as stream:
-        position = stream.seek(0, os.SEEK_END)
-        pending = b''
-        while position:
-            size = min(EVENT_BLOCK_BYTES, position)
-            position -= size
-            stream.seek(position)
-            parts = _LINE_BOUNDARY.split(stream.read(size) + pending)
-            pending = parts[0]
-            for line in reversed(parts[1:]):
-                yield line.decode('utf-8')
-        yield pending.decode('utf-8')
+    return execution_state.reverse_event_lines(path, block_bytes=EVENT_BLOCK_BYTES)
 
 
 def execution_resource(project):

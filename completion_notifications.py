@@ -1,4 +1,5 @@
 """Once-only, verified total-workflow completion notices. No business execution."""
+import ato_core as core
 import hashlib
 import json
 import re
@@ -6,8 +7,8 @@ from pathlib import Path
 
 
 def eligible(action):
-    import interaction, notifications, recovery
-    import runner as core
+    import interaction, recovery
+    import notification_state as notifications
     if (action.get('kind') != 'workflow_result' or action.get('state') not in ('unpresented','needs_user')
             or action.get('notice') or action.get('presented_at') or notifications.project_suppression(action)):
         return False
@@ -64,7 +65,7 @@ def validate_claim(key,target,text, *, envelope=None, endpoint=None):
     separate code-owned route only for the user's newly allowed completion kind;
     arbitrary text/prefixes/environment variables cannot grant this route.
     """
-    import control
+    import control_store as control
     match=re.fullmatch(r'followup:(result-[0-9a-f]{20}):0',key)
     if not match:raise ValueError('not a once-only completion claim')
     with control.database() as con:

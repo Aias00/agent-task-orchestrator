@@ -5,6 +5,7 @@ private journal contains native evidence, never a second outbox or retry loop.
 Hosts are explicitly started/stopped by trusted host code; no observer, worker
 or scheduler is created. One host owns one process group and sequential turns.
 """
+import ato_core as runner
 import asyncio
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -111,7 +112,6 @@ def workflow_guard(project, workflow_id, contract_hash, generation):
     d = Path(workflow_id)
     if not d.is_absolute():
         return  # Explicit synthetic/local protocol bindings, not workflow authority.
-    import runner
     import recovery
     state = runner.read(d/'state.json')
     if ((d/'STOP').exists() or (d/'user-closure.json').exists()
@@ -130,7 +130,6 @@ def execution_guard(project, workflow_id, contract_hash, generation):
         yield
         return
     import recovery
-    import runner
     with recovery.locked(Path(project)/'.codex/tasks/.worker.lock', blocking=False):
         workflow_guard(project, workflow_id, contract_hash, generation)
         state = runner.read(Path(workflow_id)/'state.json')
@@ -374,7 +373,6 @@ class PiCoordinator:
         workflow_guard(self.project, message['task_id'], message['contract_hash'], json.loads(message['generation'])
                        if isinstance(message['generation'], str) else message['generation'])
         if Path(message['task_id']).is_absolute():
-            import runner
             import session_router
             origin = runner.read(Path(message['task_id'])/'origin.json')
             target = session_router.bind_origin(origin, self.project)
@@ -395,7 +393,6 @@ class PiCoordinator:
         supplies existing authority. It cannot redirect a session to another
         project, contract or generation while work is active/unknown.
         """
-        import runner
         import recovery
         import session_router
         if self.current or self.state['lifecycle'] != 'idle':
@@ -817,7 +814,6 @@ class PiSessionAdapter:
         if state['bindings'] != binding or state['lifecycle'] not in ('idle', 'active'):
             raise ValueError('origin actor grant needs the exact live workflow binding')
         if Path(workflow_id).is_absolute():
-            import runner
             import recovery
             import session_router
             workflow = runner.read(Path(workflow_id)/'state.json')
@@ -913,7 +909,6 @@ class PiSessionAdapter:
                 raise ValueError('unknown delivery or native effects forbid reconstruction')
             gen = generation
             if Path(workflow_id).is_absolute():
-                import runner
                 import session_router
                 current = runner.read(Path(workflow_id)/'state.json')
                 gen = recovery.generation(Path(workflow_id), current)
@@ -967,7 +962,8 @@ async def foreground(args):
             await host.listen()
             _private_save(provision, dict(host_id=host.host_id))
             if args.create:
-                import agents
+                if PiSessionAdapter.kind not in registry.kinds():
+                    registry.register(PiSessionAdapter())
                 import session_router
                 identity = await host.start()
                 reference = session_router.register_v2(identity)

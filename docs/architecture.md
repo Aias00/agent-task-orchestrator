@@ -31,6 +31,8 @@ flowchart TD
 
 | 模块 | 责任 | 不承担的责任 |
 | --- | --- | --- |
+| `ato_core.py` | 标准库基础原语、原子读写、锁、PID 身份与共享 Halt 类型 | 不导入业务模块，不注册适配器或启动服务 |
+| `ato_cli/` | 保留原参数表面，按领域调度命令；由 runner 门面传入运行上下文 | 不从计划加载代码，不改变验收或权限 |
 | `runner.py` | 校验 DAG、阶段 worker、重试、进程组清理、仓库锁、宿主 checks | 不从 worker 的自述推断通过 |
 | `workflow.py` | 完整合约、最终验收、阶段规划与累计预算、人工条件 | 不把新阶段当新总目标；不自行批准人工验收 |
 | `recovery.py` | 有来源的有限接管、回复观察、证据登记与恢复 | 不无限修复或重置预算 |
@@ -39,6 +41,8 @@ flowchart TD
 | `progress.py` | CLI 工具事件归一化、重复调用/无进展信号 | 不把告警等同于业务失败或自动取消依据 |
 | `agents.py`、`pi-path-guard.mjs` | 第三方 CLI 协议、结果校验、受限文件工具 | 不管理任意已有第三方聊天窗口 |
 | `delegation.py`、`appserver.py` | 显式新建持久化 origin 会话，接受后启动绑定 workflow | 不根据工程路径猜原会话或绕过已有处理者 |
+
+`control_store.py`、`notification_state.py` 与 `execution_state.py` 把已有账本存取、只读通知策略和持久化执行代次读取从主动控制逻辑中分开，继续使用原文件路径和 SQLite 表。`host_budget.py` 通过显式传入的预算接口执行既有宿主命令，不创建第二套预算或验收。`runner` 与 `recovery` 保留基础原语公共名称；`recovery.pid_alive` 的薄门面还保留旧的 alive/identity 注入点。8 个受保护核心模块仍位于仓库根目录，原生适配器导入禁令保持不变。
 
 ## 三层任务状态
 

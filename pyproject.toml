@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-task-orchestrator"
+version = "0.0.0"
+description = "Source metadata for durable agent task orchestration with independent host checks"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+acp = [
+  "agent-client-protocol==1.0.0",
+  "annotated-types==0.8.0",
+  "pydantic==2.14.3",
+  "pydantic_core==2.50.4",
+  "typing-inspection==0.4.5",
+  "typing_extensions==4.16.0"
+]
+
+# Operational installation remains scripts/install.py against a selected checkout.
+# No entrypoints, services, credentials or runtime migration are installed here.
+[tool.setuptools]
+packages = ["ato_cli"]
+py-modules = [
+  "acp_bridge",
+  "acp_outcome",
+  "agent_native_events",
+  "agent_registry",
+  "agents",
+  "appserver",
+  "ato_config",
+  "ato_core",
+  "budget",
+  "codex_legacy",
+  "codex_session_adapter",
+  "completion_notifications",
+  "control",
+  "control_store",
+  "coordination",
+  "delegation",
+  "execution_state",
+  "failure_attention",
+  "host_budget",
+  "host_recheck",
+  "hub_queue_gate",
+  "interaction",
+  "local_session_adapter",
+  "message_bus",
+  "notification_state",
+  "notifications",
+  "permissions",
+  "pi_acp_exec",
+  "pi_acp_worker",
+  "pi_coordinator_exec",
+  "pi_session_coordinator",
+  "pi_session_profile",
+  "progress",
+  "recovery",
+  "runner",
+  "session_router",
+  "task_trace",
+  "transport",
+  "workflow",
+  "workflow_closure",
+  "workflow_lineage"
+]

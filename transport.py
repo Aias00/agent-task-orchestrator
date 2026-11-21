@@ -3,9 +3,14 @@
 An adapter runs only after the mailbox's durable dispatch barrier. It owns
 native session identity verification, file-only tool guards, and lifecycle.
 """
+import ato_config
+import ato_core as primitives
+import ato_core as runner
+import execution_state
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
+from ato_core import private_save as _private_save
 from message_bus import MessageBus, EndpointCredential
 
 
@@ -138,30 +143,7 @@ def dispatch_registered(bus: MessageBus, credential: EndpointCredential, owner_t
 
 def managed_bus():
     """The existing mailbox, at an explicit ATO-owned private state location."""
-    import interaction
-    return MessageBus(interaction.directory()/'mailbox'/'state.sqlite')
-
-
-def _private_save(path, value):
-    import json
-    import os
-    import secrets
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(path.name+'.'+secrets.token_hex(8)+'.tmp')
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        with os.fdopen(fd, 'w') as stream:
-            json.dump(value, stream, ensure_ascii=False, allow_nan=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        temporary.unlink(missing_ok=True)
+    return MessageBus(ato_config.ensure_interaction_directory()/'mailbox'/'state.sqlite')
 
 
 def host_endpoint(bus, *, kind, native_id, project, source):
@@ -173,12 +155,11 @@ def host_endpoint(bus, *, kind, native_id, project, source):
     import hashlib
     import json
     from pathlib import Path
-    import recovery
     identity = json.dumps([kind, native_id, str(Path(project).resolve())], separators=(',', ':'))
     identifier = 'endpoint-'+hashlib.sha256(identity.encode()).hexdigest()
     path = bus.path.parent/'private'/(identifier+'.json')
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with recovery.locked(path.with_suffix('.lock')):
+    with primitives.locked(path.with_suffix('.lock')):
         if path.exists():
             if path.is_symlink() or path.stat().st_mode & 0o077:
                 raise ValueError('endpoint credential must be a private regular file')
@@ -251,8 +232,6 @@ def observe_managed(projection, events):
     """
     import json
     from pathlib import Path
-    import runner
-    import recovery
     import session_router
     from message_bus import IdentityError
     bus = managed_bus()
@@ -282,7 +261,7 @@ def observe_managed(projection, events):
         if ((task/'STOP').exists() or (task/'user-closure.json').exists()
                 or state.get('contract_hash') != message['contract_hash']
                 or runner.digest(runner.read(task/'contract.json')) != message['contract_hash']
-                or recovery.generation(task, state) != gen):
+                or execution_state.generation(task, state) != gen):
             return project_managed(projection)  # History cannot settle this execution.
     credential = host_endpoint(bus, kind=endpoint['kind'], native_id=endpoint['session_id'],
                                project=endpoint['project'], source=endpoint['source'])
@@ -308,7 +287,6 @@ def dispatch_managed(projection, *, home_dir=None, cwd=None):
     import json
     import os
     import session_router
-    import recovery
     bus = managed_bus()
     bus.recover()
     message = bus.message(projection['mailbox_id'])
@@ -317,7 +295,6 @@ def dispatch_managed(projection, *, home_dir=None, cwd=None):
     endpoint = bus.endpoint(message['target'])
     def guard():
         from pathlib import Path
-        import runner
         from message_bus import IdentityError
         target = projection['target']
         if session_router.is_reference(target):
@@ -342,7 +319,7 @@ def dispatch_managed(projection, *, home_dir=None, cwd=None):
                     or state['status'] == 'completed' and not message['kind'].startswith('followup')
                     or state['contract_hash'] != message['contract_hash']
                     or runner.digest(contract) != message['contract_hash']
-                    or recovery.generation(task, state) != json.loads(message['generation'])):
+                    or execution_state.generation(task, state) != json.loads(message['generation'])):
                 sender_ep = bus.endpoint(message['sender'])
                 sender = host_endpoint(bus, kind=sender_ep['kind'], native_id=sender_ep['session_id'],
                     project=sender_ep['project'], source=sender_ep['source'])
@@ -352,7 +329,7 @@ def dispatch_managed(projection, *, home_dir=None, cwd=None):
     credential = host_endpoint(bus, kind=endpoint['kind'], native_id=endpoint['session_id'],
                                project=endpoint['project'], source=endpoint['source'])
     path = bus.path.parent/'private'/(credential.endpoint_id+'.owner.json')
-    with recovery.locked(path.with_suffix('.lock')):
+    with primitives.locked(path.with_suffix('.lock')):
         owner = None
         if path.exists():
             saved = json.loads(path.read_text())

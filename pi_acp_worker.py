@@ -3,6 +3,7 @@
 The profile never accepts a command, environment, or import path from a plan.
 It fails closed when the pinned source, optional SDK, or OS sandbox is absent.
 """
+import ato_core as runner
 import argparse
 import os
 from pathlib import Path
@@ -37,7 +38,6 @@ def main():
 
 def invoke(args):
     import agents
-    import runner
     import acp_bridge
     directory = Path(args.directory).resolve()
     repo = Path(runner.read(directory/'state.json')['repo']).resolve()

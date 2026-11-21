@@ -18,10 +18,10 @@ def sha(path):
 def inputs():
     # Explicit portable source groups only: no task state, databases, logs or secrets.
     groups = [ROOT.glob('*.py'), ROOT.glob('*.mjs'), (ROOT/'docs').glob('*.md'),
-              (ROOT/'skills/codex-long-task').rglob('*.md'), (ROOT/'tests/fixtures').glob('*.py')]
+              (ROOT/'skills/codex-long-task').rglob('*.md'), (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'ato_cli').glob('*.py')]
     files = {p for group in groups for p in group if p.is_file()}
     files.update(ROOT/name for name in (
-        'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py',
+        'pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py',
         'build/agent-abstraction/validation-report.md',
         'tests/test_agent_registry_contract.py', 'tests/test_agent_neutral_e2e.py',
         'tests/test_agent_lifecycle_contract.py', 'tests/test_agent_transport_contract.py'))
@@ -41,6 +41,12 @@ def main():
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--baseline', type=Path, default=BASELINE)
     args = parser.parse_args()
+    missing = [str(path) for path in (args.baseline,) if not path.is_file()]
+    if missing:
+        print('Historical internal qualification packaging script; not source installation or daily tests.\n'
+              'Required operator-evidence inputs are missing:\n  '+'\n  '.join(missing)+
+              '\nSupply the original private qualification inputs explicitly; no runtime was activated.', file=sys.stderr)
+        return 2
     expected = build(args.baseline)
     if args.check:
         actual = json.loads(OUTPUT.read_text())

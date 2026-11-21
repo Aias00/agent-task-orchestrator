@@ -10,13 +10,14 @@ import subprocess
 import sys
 import time
 
+import control_store
 import interaction
 import notifications
 import recovery
 import session_router
 import runner as core
 
-TERMINAL = {'resolved', 'stale', 'stopped', 'completed', 'superseded'}
+from control_store import TERMINAL
 
 
 def directory():
@@ -27,36 +28,16 @@ def directory():
 
 @contextlib.contextmanager
 def database():
-    con = sqlite3.connect(directory()/'state.sqlite', timeout=20)
-    con.row_factory = sqlite3.Row
-    con.execute('pragma journal_mode=WAL')
-    con.execute('pragma synchronous=FULL')
-    con.executescript('''
-      create table if not exists actions(id text primary key, body text not null);
-      create table if not exists events(seq integer primary key autoincrement,
-        key text unique not null, at real not null, action_id text, kind text not null, body text not null);
-      create table if not exists outbox(key text primary key, body text not null);
-      create table if not exists workflows(path text primary key, body text not null);
-    ''')
-    try:
+    with control_store.database(directory()) as con:
         yield con
-    finally:
-        con.close()
 
 
 def event(con, key, identifier, kind, body):
-    con.execute('insert or ignore into events(key,at,action_id,kind,body) values(?,?,?,?,?)',
-                (key, core.now(), identifier, kind, json.dumps(body, ensure_ascii=False)))
+    return control_store.event(con, key, identifier, kind, body, clock=core.now)
 
 
 def put(con, action, kind=None):
-    old = con.execute('select body from actions where id=?', (action['id'],)).fetchone()
-    if old and json.loads(old[0]) == action:
-        return
-    action['updated_at'] = core.now()
-    con.execute('insert into actions values(?,?) on conflict(id) do update set body=excluded.body',
-                (action['id'], json.dumps(action, ensure_ascii=False)))
-    event(con, core.digest([action['id'], action]), action['id'], kind or 'action_updated', action)
+    return control_store.put(con, action, kind, clock=core.now)
 
 
 def settings():
@@ -75,7 +56,7 @@ def enable(source, reminder_seconds=900, max_reminders=3):
         prior = settings()
         if prior and prior['hub_thread'] != hub['thread_id']:
             process = directory()/'process.json'
-            if prior['enabled'] or (process.exists() and recovery.alive(core.read(process).get('pid'))):
+            if prior['enabled'] or (process.exists() and recovery.pid_alive(core.read(process))):
                 raise ValueError('stop the controller and wait for exit before binding another hub')
         cfg = dict(enabled=True, hub_thread=hub['thread_id'], source=source,
                    reminder_seconds=reminder_seconds, max_reminders=max_reminders,

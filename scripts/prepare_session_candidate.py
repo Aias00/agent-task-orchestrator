@@ -20,7 +20,7 @@ BUILD = ROOT/'build/session-decoupling'
 OUTPUT = BUILD/'candidate.json'
 ARCHIVE = BUILD/'candidate.tar.gz'
 SEED = BUILD/'stage-start.json'
-PATTERNS = ('*.py', '*.mjs', 'README.md', 'AGENTS.md', 'bin/*', 'scripts/*.py',
+PATTERNS = ('ato_cli/**/*.py', 'pyproject.toml', 'requirements-acp.lock', '*.py', '*.mjs', 'README.md', 'AGENTS.md', 'bin/*', 'scripts/*.py',
             'docs/**/*.md', 'skills/**/*.md', 'tests/**/*.py', 'tests/**/*.json',
             'integrations/pi-acp/package.json', 'integrations/pi-acp/package-lock.json')
 FORBIDDEN = {'.git', '.codex', 'node_modules', 'private', '__pycache__', '.aws', '.ssh'}
@@ -120,6 +120,12 @@ def main():
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--archive', action='store_true', help='also write/check deterministic source tar.gz')
     args = parser.parse_args()
+    missing = [str(path) for path in (BASELINE, SEED,) if not path.is_file()]
+    if missing:
+        print('Historical internal qualification packaging script; not source installation or daily tests.\n'
+              'Required operator-evidence inputs are missing:\n  '+'\n  '.join(missing)+
+              '\nSupply the original private qualification inputs explicitly; no runtime was activated.', file=sys.stderr)
+        return 2
     expected = build()
     if args.check:
         if json.loads(OUTPUT.read_text()) != expected:

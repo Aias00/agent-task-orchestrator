@@ -51,3 +51,10 @@ def interaction_directory():
         namespace = hashlib.sha256(str(codex_home()).encode()).hexdigest()
         return root/'contexts'/namespace
     return root
+
+
+def ensure_interaction_directory():
+    """Create only the existing ATO-owned namespace; no registration or services."""
+    path = interaction_directory()
+    path.mkdir(parents=True, exist_ok=True)
+    return path

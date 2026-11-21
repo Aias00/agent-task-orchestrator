@@ -3,6 +3,8 @@
 Legacy UUID compatibility dispatch is owned by this router and its trusted
 adapter. This module never discovers sessions, loads plugins or grants tools.
 """
+import ato_config
+import ato_core as runner
 import os
 import json
 from pathlib import Path
@@ -21,13 +23,11 @@ def is_reference(value):
 def _path(reference):
     if not is_reference(reference):
         raise ValueError('invalid agent session reference')
-    import interaction
-    return interaction.directory() / 'agent-sessions' / (reference + '.json')
+    return ato_config.ensure_interaction_directory() / 'agent-sessions' / (reference + '.json')
 
 
 def register(kind, identity, project, source):
     """Register only after the trusted adapter verifies the exact session/project."""
-    import runner
     if not all(isinstance(x, str) and x.strip() for x in (kind, identity, source)):
         raise ValueError('session registration requires kind, identity and source')
     project = str(Path(project).resolve(strict=True))
@@ -50,7 +50,6 @@ def register_v2(identity):
     This is an additive entry point. ``register`` and its v1 on-disk shape stay
     available for callers that still consume ``kind/identity/project`` rows.
     """
-    import runner
     if not isinstance(identity, agent_registry.SessionIdentity):
         raise ValueError('register_v2 requires a versioned session identity')
     project_path = Path(identity.project).resolve(strict=True)
@@ -80,7 +79,6 @@ def _row_identity(row):
 
 def resolve_v2(reference, project=None, capability=None):
     """Resolve either stored format into the neutral v2 contract."""
-    import runner
     row = runner.read(_path(reference))
     if row.get('reference') != reference:
         raise ValueError('invalid stored session reference')
@@ -230,7 +228,6 @@ def load_or_resume_v2(reference, checkpoint, *, actor, workflow_id, contract_has
     workflow_path = Path(workflow_id)
     if workflow_path.is_absolute():
         import recovery
-        import runner
         state = runner.read(workflow_path/'state.json')
         lockfile = Path(state['repo'])/'.codex/tasks/.worker.lock'
         with recovery.locked(lockfile, blocking=False):
@@ -265,7 +262,6 @@ def load_or_resume_v2(reference, checkpoint, *, actor, workflow_id, contract_has
 
 
 def resolve(reference, project=None, capability='session_verify'):
-    import runner
     row = runner.read(_path(reference))
     if row.get('version') not in (1, 2) or row.get('reference') != reference:
         raise ValueError('invalid stored session reference')

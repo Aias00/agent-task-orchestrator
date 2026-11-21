@@ -3,6 +3,7 @@
 The legacy public module is a forwarding shim. All indexes are read-only,
 all lookups use exact IDs, and native receipt/rollout parsing lives here.
 """
+import ato_config
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,6 @@ def identity(value):
 
 
 def home():
-    import ato_config
     return ato_config.codex_home()
 
 

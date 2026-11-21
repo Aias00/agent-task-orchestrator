@@ -3,6 +3,7 @@
 The bridge imports the ACP SDK only in its child invocation. A profile owns its
 command and its native-receipt protocol; plans cannot select paths or commands.
 """
+import ato_core as runner
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
 import io
@@ -125,7 +126,6 @@ async def invoke(command, directory, label, schema_path, output, prompt, *, envi
     import acp
     from acp.schema import TextContentBlock, RequestPermissionResponse, DeniedOutcome
     import agents
-    import runner
     import task_trace
     from acp_outcome import Outcome
 

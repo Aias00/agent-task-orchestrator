@@ -1,4 +1,5 @@
 """CLI worker adapters. Codex remains the default; external CLIs are bounded workers."""
+import ato_core as core
 import argparse
 import json
 import os
@@ -263,7 +264,6 @@ def sandbox_profile(repo, runtime, mode, kind=None):
 
 
 def invoke(args):
-    import runner as core
     directory = Path(args.directory).resolve()
     repo = Path(core.read(directory/'state.json')['repo']).resolve()
     output = Path(args.output).resolve()

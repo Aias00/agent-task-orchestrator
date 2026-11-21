@@ -19,7 +19,7 @@ import agent_registry as registry
 
 KIND = 'local_cli'
 SOURCE = 'private local CLI mailbox admission; not human receipt or approval'
-HUB_BINDING = 'local-cli-hub-binding-v2'
+HUB_BINDING = registry.LOCAL_CLI_HUB_BINDING
 MAX_FILE = 65536
 
 

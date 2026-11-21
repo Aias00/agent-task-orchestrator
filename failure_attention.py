@@ -4,7 +4,7 @@ from pathlib import Path
 
 import interaction
 import recovery
-import runner as core
+import ato_core as core
 
 
 def policy():
@@ -79,7 +79,7 @@ def current(action):
 
 
 def observe(row, d, state, contract):
-    import control
+    import control_store as control
     settings = policy()
     # Do not flood the hub with old historical tasks when opting into this policy.
     if not settings.get('enabled') or row.get('registered_at', 0) < settings['configured_at']:

@@ -4,9 +4,9 @@ from pathlib import Path
 import subprocess
 
 import interaction
-import recovery
+import ato_core as recovery
 import session_router
-import runner as core
+import ato_core as core
 
 
 def sha(path):

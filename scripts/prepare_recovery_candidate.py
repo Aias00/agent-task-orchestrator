@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,8 @@ def build():
         if sha(ROOT/name) != digest:
             raise ValueError('inherited test changed: '+name)
     files = {}
-    for name in sorted(set(baseline['files']) | EXTRA):
+    runtime_sources = {p.name for p in ROOT.glob('*.py')} | {p.relative_to(ROOT).as_posix() for p in (ROOT/'ato_cli').glob('*.py')} | {'pyproject.toml', 'requirements-acp.lock'}
+    for name in sorted(set(baseline['files']) | EXTRA | runtime_sources):
         relative = Path(name)
         path = ROOT/relative
         if relative.is_absolute() or '..' in relative.parts or '.codex' in relative.parts or not path.is_file() or not path.resolve().is_relative_to(ROOT):
@@ -37,6 +39,12 @@ def build():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument('--check', action='store_true'); args = parser.parse_args()
+    missing = [str(path) for path in (OPS/'baseline.json', OPS/'incident.json',) if not path.is_file()]
+    if missing:
+        print('Historical internal qualification packaging script; not source installation or daily tests.\n'
+              'Required operator-evidence inputs are missing:\n  '+'\n  '.join(missing)+
+              '\nSupply the original private qualification inputs explicitly; no runtime was activated.', file=sys.stderr)
+        return 2
     data = build()
     if args.check:
         if json.loads(OUTPUT.read_text()) != data:
@@ -49,4 +57,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, KeyError) as exc:
+        print('Historical internal qualification packaging script (not installation or daily tests): '+str(exc), file=sys.stderr)
+        raise SystemExit(1)

@@ -10,6 +10,9 @@ import re
 from typing import FrozenSet, Mapping, Protocol
 import sys
 
+# Stable actor-proof contract shared by the passive CLI endpoint and its router.
+LOCAL_CLI_HUB_BINDING = 'local-cli-hub-binding-v2'
+
 
 @dataclass(frozen=True)
 class ExecutionRequest:

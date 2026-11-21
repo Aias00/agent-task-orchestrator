@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,9 +31,9 @@ def build():
     inputs = set(FILES)
     for group in (ROOT.glob('*.py'), ROOT.glob('*.mjs'), (ROOT/'tests').glob('test*.py'),
                   (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'docs').glob('*.md'),
-                  (ROOT/'skills/codex-long-task').rglob('*.md')):
+                  (ROOT/'skills/codex-long-task').rglob('*.md'), (ROOT/'ato_cli').glob('*.py')):
         inputs.update(p.relative_to(ROOT).as_posix() for p in group if p.is_file())
-    inputs.update(('README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py'))
+    inputs.update(('pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py'))
     for name in sorted(inputs):
         path = ROOT/name
         if not path.is_file() or not path.resolve().is_relative_to(ROOT):
@@ -49,6 +50,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
+    missing = [str(path) for path in (OPS/'baseline.json', OPS/'real-pi-replay.json',) if not path.is_file()]
+    if missing:
+        print('Historical internal qualification packaging script; not source installation or daily tests.\n'
+              'Required operator-evidence inputs are missing:\n  '+'\n  '.join(missing)+
+              '\nSupply the original private qualification inputs explicitly; no runtime was activated.', file=sys.stderr)
+        return 2
     expected = build()
     if args.check:
         if json.loads(OUTPUT.read_text()) != expected:
@@ -60,4 +67,8 @@ def main():
         print('candidate manifest prepared; runtime not activated')
 
 if __name__ == '__main__':
-    main()
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, KeyError) as exc:
+        print('Historical internal qualification packaging script (not installation or daily tests): '+str(exc), file=sys.stderr)
+        raise SystemExit(1)

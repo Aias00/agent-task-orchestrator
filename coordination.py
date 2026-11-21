@@ -9,7 +9,7 @@ import sys
 
 import interaction
 import recovery
-import runner as core
+import ato_core as core
 
 MARKER = 'host-handoff:'
 MAX_BYTES = 2 * 1024 * 1024
@@ -82,8 +82,8 @@ def prepare(directory, state, contract, target, key, material):
             if path.is_symlink() or path.stat().st_mode & 0o077 or core.read(path) != record:
                 raise ValueError('immutable handoff material changed')
         else:
-            import transport
-            transport._private_save(path, record)
+            from ato_core import private_save
+            private_save(path, record)
     # Retain the exact correlation marker, not task/authorization/host prose.
     return notice
 
