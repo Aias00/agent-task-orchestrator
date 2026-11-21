@@ -16,7 +16,7 @@ installed launchers, migrate task records or grant execution permissions.
 | Durable messaging, turn correlation and traces | `message_bus.py`, `transport.py`, `acp_bridge.py`, `task_trace.py` |
 | ATO/native state-root separation | `ato_config.py` |
 | Managed Pi coordinator and bounded Pi file worker | `pi_session_coordinator.py`, `pi_session_profile.py`, `pi_acp_worker.py` |
-| Compact private host material and once-only completion policy | `coordination.py`, `completion_notifications.py`, `notifications.py`, `hub_queue_gate.py` |
+| Compact private host/failure material and once-only completion policy | `coordination.py`, `failure_notice.py`, `completion_notifications.py`, `notifications.py`, `hub_queue_gate.py` |
 | CLI entrypoints and optional conversation integration | `bin/`, `scripts/install.py`, `skills/codex-long-task/` |
 
 The structural source refactor preserves the protected core filenames and public

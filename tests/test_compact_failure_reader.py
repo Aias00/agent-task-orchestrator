@@ -74,6 +74,7 @@ class CompactFailureReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'compact notice bound'):
                 control.send(self.key, HUB, 'private fixture', workflow=str(self.d))
         sent.assert_not_called()
+        self.assertFalse((failure_notice.payload_directory()/(self.action['id']+'.json')).exists())
         with control.database() as con:
             self.assertIsNone(con.execute('select body from outbox where key=?', (self.key,)).fetchone())
 

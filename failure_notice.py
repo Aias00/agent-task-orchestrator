@@ -56,6 +56,14 @@ def prepare(key, target, workflow, material, *, reader_command=None):
         raise ValueError('failure notice route mismatch')
     if not isinstance(material, str) or len(material.encode()) > MAX_BYTES:
         raise ValueError('failure material bound exceeded')
+    # The controller supplies coordination.reader_command; direct callers use
+    # that same configuration primitive, re-exported by coordination.
+    command = (default_reader_command if reader_command is None else reader_command)()
+    notice = (f'[ctask-followup id={identifier} reminder=0]\n'
+              f'{command} {identifier}\n'
+              'Stale/handled:silent; current:one brief notice; no new authority.')
+    if len(notice.encode()) >= 300:
+        raise ValueError('failure reader path exceeds compact notice bound')
     record = dict(version=1, id=identifier, target=target, workflow=action['workflow'],
                   generation=action['baseline_generation'], failure_evidence=action['failure_evidence'],
                   material=material, material_sha256=hashlib.sha256(material.encode()).hexdigest())
@@ -66,14 +74,6 @@ def prepare(key, target, workflow, material, *, reader_command=None):
                 raise ValueError('immutable failure material changed')
         else:
             core.private_save(path, record)
-    # The controller supplies coordination.reader_command; direct callers use
-    # that same configuration primitive, re-exported by coordination.
-    command = (default_reader_command if reader_command is None else reader_command)()
-    notice = (f'[ctask-followup id={identifier} reminder=0]\n'
-              f'{command} {identifier}\n'
-              'Stale/handled:silent; current:one brief notice; no new authority.')
-    if len(notice.encode()) >= 300:
-        raise ValueError('failure reader path exceeds compact notice bound')
     return notice
 
 
