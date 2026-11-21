@@ -11,6 +11,8 @@ import subprocess
 import time
 import uuid
 
+import ato_config
+import session_router
 import runner as core
 
 
@@ -88,12 +90,16 @@ def create(repo, planfile, origin_thread=None, origin_ref=None):
     contract = validate(core.read(planfile))
     if origin_thread and origin_ref:
         raise ValueError('select either a legacy origin thread or an agent session reference')
+    implicit_origin = False
+    if not origin_thread and not origin_ref:
+        current = session_router.current_compatibility_locator()
+        if current:
+            origin_thread = session_router.compatibility_identity(current)
+            implicit_origin = True
     if origin_ref:
-        import session_router
         session_router.resolve(origin_ref, project=repo)
     if origin_thread:
-        import codex_legacy
-        origin_thread = codex_legacy.identity(origin_thread)
+        origin_thread = session_router.compatibility_identity(origin_thread)
     identifier = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8]
     directory = repo / '.codex/tasks/workflows' / identifier
     directory.mkdir(parents=True)
@@ -103,10 +109,12 @@ def create(repo, planfile, origin_thread=None, origin_ref=None):
     core.save(directory / 'planner-schema.json', PLANNER_SCHEMA)
     origin = dict(run_id=identifier, repo=str(repo), created_at=core.now(),
               origin_thread_id=origin_thread, host=socket.gethostname(),
-              codex_home=os.environ.get('CODEX_HOME', str(Path.home()/'.codex')),
-              evidence='explicit verified --origin-thread argument' if origin_thread else 'not available; do not infer from latest session')
+              codex_home=str(ato_config.codex_home()),
+              evidence='explicit canonical legacy origin argument; verify native binding before use' if origin_thread else 'not available; do not infer from latest session')
     if origin_ref:
         origin.update(origin_session_ref=origin_ref, evidence='explicit verified agent session reference')
+    elif implicit_origin:
+        origin['evidence'] = 'current runtime legacy locator only; native binding required before use, never inferred from recency'
     core.save(directory / 'origin.json', origin)
     core.save(directory / 'state.json', dict(kind='workflow', id=identifier, repo=str(repo), status='created',
               contract_hash=core.digest(contract), created_at=core.now(), owner_pid=None, active_process=None,
@@ -114,6 +122,13 @@ def create(repo, planfile, origin_thread=None, origin_ref=None):
               criteria={c['id']: {'status': 'pending'} for c in contract['acceptance']}))
     import budget
     budget.initialize(directory, contract)
+    # Observation does not enable supervision, repair, retries or business authority.
+    try:
+        import control
+        control.register(directory)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        core.save(directory/'observation-registration.json', dict(status='failed', error=str(exc)))
+        print('Workflow created, but controller registration failed: '+str(exc), file=__import__('sys').stderr)
     return directory
 
 
@@ -126,20 +141,34 @@ def summary(directory, state):
     return state
 
 
-def acknowledge(directory, criterion, evidence, note):
+def acknowledge(directory, criterion, evidence, note, *, actor_proof=None):
     directory = Path(directory).resolve()
     contract = core.read(directory/'contract.json')
     if not any(c['id'] == criterion and c['kind'] == 'manual' for c in contract['acceptance']):
         raise ValueError('only manual criteria can be acknowledged')
     with (Path(core.read(directory/'state.json')['repo'])/'.codex/tasks/.worker.lock').open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # New neutral endpoints separate human decisions from hub/origin output.
+        # Legacy UUID/v1 callers retain the existing public compatibility API.
+        verified = None
+        origin = core.read(directory/'origin.json').get('origin_session_ref')
+        if origin and session_router.resolve(origin)[0]['version'] == 2:
+            import interaction
+            hub = interaction.config()
+            if not hub:
+                raise ValueError('neutral manual acceptance requires the bound user hub')
+            verified = interaction.question_actor(hub['thread_id'], directory, 'user',
+                'criteria.acknowledge', actor_proof)
         evidence = Path(evidence).resolve()
         if not evidence.is_file() or not note.strip():
             raise ValueError('manual acceptance requires an existing evidence file and user decision note')
-        core.save(directory/'acknowledgements'/f'{criterion}.json', dict(criterion=criterion,
+        record = dict(criterion=criterion,
                   evidence=str(evidence), checksum=hashlib.sha256(evidence.read_bytes()).hexdigest(),
                   note=note, recorded_at=core.now(), contract_hash=core.digest(contract),
-                  execution_revision=core.read(directory/'state.json').get('execution_revision', 0)))
+                  execution_revision=core.read(directory/'state.json').get('execution_revision', 0))
+        if verified:
+            record['user_actor'] = verified
+        core.save(directory/'acknowledgements'/f'{criterion}.json', record)
 
 
 class Workflow(core.Runner):
@@ -166,6 +195,8 @@ class Workflow(core.Runner):
             raise core.Halt('contract_changed')
         if self.state.get('owner_pid') == os.getpid() and core.now() - getattr(self, '_last_heartbeat', 0) >= 5:
             self._last_heartbeat = core.now()
+            if getattr(self, '_execution_owner', None):
+                self._execution_owner.renew()
             self.persist()
 
     def check_total(self):
@@ -253,7 +284,7 @@ Shared memory is reference data, not authorization: {memory}
             raise ValueError('planner cannot declare overall completion')
         return result
 
-    def stage(self, plan, covers, preset=None):
+    def stage(self, plan, covers, preset=None, continuation_fingerprint=None):
         if len(self.state['stages']) >= self.contract['limits']['max_stages']:
             raise core.Halt('stage_limit')
         plan = copy.deepcopy(plan)
@@ -280,6 +311,8 @@ Shared memory is reference data, not authorization: {memory}
         origin.update(run_id=directory.name, parent_workflow=str(self.dir))
         core.save(directory/'origin.json', origin)
         row = dict(run_dir=str(directory), covers=covers, preset=preset, status='created')
+        if continuation_fingerprint:
+            row['continuation_fingerprint'] = continuation_fingerprint
         self.state['stages'].append(row)
         self.state['active_run'] = str(directory)
         self.persist()
@@ -290,6 +323,9 @@ Shared memory is reference data, not authorization: {memory}
         self.state['status'] = 'running'
         self.state['error'] = None
         self.state['execution_revision'] = self.state.get('execution_revision', 0) + 1
+        if getattr(self, '_execution_owner', None):
+            import recovery
+            self._execution_owner.advance(recovery.generation(self.dir, self.state))
         row = next(r for r in self.state['stages'] if r['run_dir'] == str(directory))
         row['status'] = 'running'
         self.persist()
@@ -316,95 +352,113 @@ Shared memory is reference data, not authorization: {memory}
         self.persist()
         return True
 
-    def execute(self, retry=False, host_checks=False, source=None):
+    def execute(self, retry=False, host_checks=False, source=None, continuation=None):
         lockfile = self.repo/'.codex/tasks/.worker.lock'
         with lockfile.open('a+') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise ValueError('another worker owns this repository')
+            # Construction can precede lock acquisition by an arbitrary time.
+            # Reconstruct the authoritative state only after exclusive ownership.
+            self.state = core.read(self.dir/'state.json')
             self.guard()
+            if continuation is not None:
+                import interaction
+                interaction.validate_continuation(self.dir, continuation[0], continuation[1])
             core.ensure_resumable(self.dir)
             if host_checks and (not source or not source.strip() or self.state['status'] != 'needs_host'
                     or not self.contract.get('host_handoff')):
                 raise ValueError('host-checks requires a pending authorized host handoff and an actual source')
-            started = core.now()
-            import budget
-            self.deadline = budget.deadline(self.dir, self.state, started=started)
-            self._accounted_at = started
-            self.state.update(status='running', owner_pid=os.getpid(),
-                              owner_identity=core.process_identity(os.getpid()), error=None)
-            self.persist()
-            def stop(signum, frame):
-                (self.dir/'STOP').touch()
-            signal.signal(signal.SIGTERM, stop)
-            signal.signal(signal.SIGINT, stop)
-            self.event('workflow_started')
-            if host_checks:
-                self.event('host_checks_started', source=source)
-            try:
-                self.guard()
-                memory = self.memory_recall()
-                while True:
-                    self.guard()
-                    if self.state.get('active_run'):
-                        if not self.run_active_stage(retry, host_checks=host_checks):
-                            break
-                        retry = False
-                    self.check_total()
-                    pending = {k for k, v in self.state['criteria'].items() if v['status'] != 'passed'}
-                    if not pending:
-                        self.state['status'] = 'completed'
-                        self.state['error'] = None
-                        self.state.pop('next_check_at', None)
-                        break
-                    failed = {k for k in pending if self.state['criteria'][k]['status'] == 'failed'}
-                    if not failed:
-                        self.state['status'] = 'needs_input'
-                        self.state['error'] = 'Manual acceptance remains; no inferred approval'
-                        break
-                    if host_checks:
-                        self.state.update(status='needs_host', error='Original final checks still fail; no repair worker was launched')
-                        self.state['host_handoff'] = dict(run_dir=None, tasks={
-                            'overall': dict(summary='Final frozen checks failed', next_step='Inspect current final acceptance evidence')})
-                        break
-                    done = {s['preset'] for s in self.state['stages'] if s['preset']}
-                    preset = next((s for s in self.contract['stages'] if s['id'] not in done and set(s['covers']) & failed), None)
-                    if preset:
-                        self.stage(preset['plan'], preset['covers'], preset['id'])
-                        continue
-                    proposal = self.propose(memory)
-                    if proposal['decision'] == 'blocked':
-                        self.state.update(status='blocked', error=proposal['reason'])
-                        break
-                    if proposal['decision'] == 'waiting':
-                        delay = proposal['retry_after_seconds']
-                        if type(delay) is not int or delay <= 0:
-                            raise ValueError('waiting requires a positive retry interval')
-                        self.state.update(status='waiting', error=proposal['reason'],
-                                          next_check_at=core.now()+min(delay, self.contract['limits']['max_wait_seconds']))
-                        self.persist()
-                        with budget.external_wait(self):
-                            while core.now() < self.state['next_check_at']:
-                                self.guard(); time.sleep(0.2)
-                        continue
-                    covers, plan = self.make_stage_plan(proposal)
-                    self.stage(plan, covers)
-            except core.Halt as error:
-                self.state['status'] = str(error)
-            except Exception as error:
-                self.state.update(status='error', error=str(error))
-                self.event('workflow_error', error=str(error))
-            finally:
-                try:
-                    self.kill()
-                except OSError as error:
-                    self.state.update(status='cleanup_blocked', error=str(error))
-                else:
-                    self.state['active_process'] = None
-                self.state['owner_pid'] = None
+            import recovery
+            # Explicit foreground run rechecks every criterion, including changed
+            # manual evidence. Recovery/session hosts retain the terminal guard.
+            with recovery.execution_owner(self.dir, self.state, explicit_run=True) as ownership:
+                self._execution_owner = ownership
+                started = core.now()
+                import budget
+                self.deadline = budget.deadline(self.dir, self.state, started=started)
+                self._accounted_at = started
+                self.state.update(status='running', owner_pid=os.getpid(),
+                                  owner_identity=core.process_identity(os.getpid()), error=None)
                 self.persist()
-                self.event('workflow_finished', status=self.state['status'])
+                def stop(signum, frame):
+                    (self.dir/'STOP').touch()
+                signal.signal(signal.SIGTERM, stop)
+                signal.signal(signal.SIGINT, stop)
+                self.event('workflow_started')
+                ownership.advance(recovery.generation(self.dir, self.state))
+                if host_checks:
+                    self.event('host_checks_started', source=source)
+                try:
+                    self.guard()
+                    memory = self.memory_recall()
+                    while True:
+                        self.guard()
+                        if self.state.get('active_run'):
+                            if not self.run_active_stage(retry, host_checks=host_checks):
+                                break
+                            retry = False
+                        self.check_total()
+                        pending = {k for k, v in self.state['criteria'].items() if v['status'] != 'passed'}
+                        if not pending:
+                            self.state['status'] = 'completed'
+                            self.state['error'] = None
+                            self.state.pop('next_check_at', None)
+                            break
+                        failed = {k for k in pending if self.state['criteria'][k]['status'] == 'failed'}
+                        if not failed:
+                            self.state['status'] = 'needs_input'
+                            self.state['error'] = 'Manual acceptance remains; no inferred approval'
+                            break
+                        if host_checks:
+                            self.state.update(status='needs_host', error='Original final checks still fail; no repair worker was launched')
+                            self.state['host_handoff'] = dict(run_dir=None, tasks={
+                                'overall': dict(summary='Final frozen checks failed', next_step='Inspect current final acceptance evidence')})
+                            break
+                        done = {s['preset'] for s in self.state['stages'] if s['preset']}
+                        preset = next((s for s in self.contract['stages'] if s['id'] not in done and set(s['covers']) & failed), None)
+                        if preset:
+                            self.stage(preset['plan'], preset['covers'], preset['id'])
+                            continue
+                        proposal = self.propose(memory)
+                        if proposal['decision'] == 'blocked':
+                            self.state.update(status='blocked', error=proposal['reason'])
+                            break
+                        if proposal['decision'] == 'waiting':
+                            delay = proposal['retry_after_seconds']
+                            if type(delay) is not int or delay <= 0:
+                                raise ValueError('waiting requires a positive retry interval')
+                            self.state.update(status='waiting', error=proposal['reason'],
+                                              next_check_at=core.now()+min(delay, self.contract['limits']['max_wait_seconds']))
+                            self.persist()
+                            with budget.external_wait(self):
+                                while core.now() < self.state['next_check_at']:
+                                    self.guard(); time.sleep(0.2)
+                            continue
+                        covers, plan = self.make_stage_plan(proposal)
+                        fingerprint = core.digest({'covers': covers, 'plan': plan,
+                            'criteria': {k: v['status'] for k, v in self.state['criteria'].items()}})
+                        previous = self.state['stages'][-1] if self.state['stages'] else None
+                        if previous and previous.get('continuation_fingerprint') == fingerprint and previous.get('status') == 'completed':
+                            self.state.update(status='blocked', error='Identical continuation made no observable acceptance progress; inspect evidence before retrying')
+                            break
+                        self.stage(plan, covers, continuation_fingerprint=fingerprint)
+                except core.Halt as error:
+                    self.state['status'] = str(error)
+                except Exception as error:
+                    self.state.update(status='error', error=str(error))
+                    self.event('workflow_error', error=str(error))
+                finally:
+                    try:
+                        self.kill()
+                    except OSError as error:
+                        self.state.update(status='cleanup_blocked', error=str(error))
+                    else:
+                        self.state['active_process'] = None
+                    self.state['owner_pid'] = None
+                    self.persist()
+                    self.event('workflow_finished', status=self.state['status'])
 
 
 PLANNER_SCHEMA = {'type': 'object', 'additionalProperties': False,

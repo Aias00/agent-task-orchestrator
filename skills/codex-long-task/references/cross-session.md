@@ -8,8 +8,6 @@
 
 使用 `workflow-create` 时程序已保存总任务 `origin.json`；核实会话 UUID 后通过 `--origin-thread` 提供，不覆盖已有来源。总任务自动创建的阶段通过 `parent.json` 关联 WORKFLOW_DIR；跨窗口续办优先定位总任务并查完整剩余条件，而不是只恢复某个阶段。
 
-候选运行时还允许可信代码注册、验证过工程与身份的 `--origin-ref REF`，与旧 `--origin-thread` 互斥；旧字段及固化合约不被改写。内置 Claude/Pi 尚无原生会话注册、投递或创建实现，不能拿它们的临时 worker session_id 冒充来源。第三方适配器能力、迁移与实际验证范围见 `docs/agent-abstraction.md` 和 `docs/agent-abstraction-migration.md`。
-
 - `run_id`、`repo`、`created_at`：实际任务编号、仓库绝对路径、带时区的记录时间。
 - `origin_thread_id`：创建/协调该任务的原会话 UUID；不是后台 worker 的会话 ID，也不是任务编号。
 - `codex_home`、`host`：会话所在本地 Codex 数据目录与机器标识，不保存凭据。
@@ -90,4 +88,4 @@
 
 当notification-policy为user_input_only时，原会话将进度、部分样本、普通完成等无需用户介入的结果写入原任务evidence；不得绕过controller直接用codex queue向hub发送状态。真正需要用户决定、授权、补充信息或人工验收时使用ctask ask/needs_input，保持canonical问题/代次/原会话检查。
 
-源分发提供可选Codex投递入口guard（hub_queue_gate.py，须由用户明确安装后才生效）：仅对当前user_input_only hub的queue生效；普通消息元数据记为recorded_only，不生成Queued message，不投递。其它命令和其它目标仍exec原生程序，原生二进制未修改。不能将recorded_only误读为queued/accepted/恢复；不能用伪造question前缀绕过canonical校验。显式调用包内原生二进制或其它app-server客户端不经过该launcher，仍必须遵守禁止向hub投递普通状态的规则。
+本机~/.local/bin/codex已加投递入口guard：仅对当前user_input_only hub的queue生效；普通消息元数据记为recorded_only，不生成Queued message，不投递。其它命令和其它目标仍exec原生程序，原生二进制未修改。不能将recorded_only误读为queued/accepted/恢复；不能用伪造question前缀绕过canonical校验。显式调用包内原生二进制或其它app-server客户端不经过该launcher，仍必须遵守禁止向hub投递普通状态的规则。

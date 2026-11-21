@@ -20,55 +20,10 @@ needs a specific human decision, information, authorization or acceptance.
 Normal operational delivery to the original task session is unchanged.
 Origin replies are stored with `delivery.state=recorded_only`, not a fabricated
 queue receipt. Existing sent/ambiguous receipts are retained without replay.
-Previously queued messages are not automatically removed by this policy.
-Inspect supported queue-list/delete operations if old pending notifications
-must be removed; never delete a user's messages or valid questions in bulk.
-Already displayed messages remain in conversation history. Non-intervention
-arrivals should be processed silently, without claiming they were presented.
-User-initiated status queries continue to receive answers.
-
-## Direct queue ingress
-
-An origin calling native `codex queue` directly bypasses the controller. It
-must store ordinary progress in its own task evidence instead of sending it
-to the hub. Use `ctask ask` for actual human decisions or acceptance.
-
-`hub_queue_gate.py` is an optional local Codex launcher guard. It only gates
-queue submissions to the currently bound `user_input_only` hub; other commands
-and recipients execute the native CLI with unchanged arguments. Valid pending
-ctask question IDs are checked against canonical state, contract, generation,
-STOP and sender before delivery. Operational status only creates a bounded
-0600 metadata audit; it never emits a fabricated `Queued message` receipt.
-
-The regular installer does not replace a Codex launcher. To opt in, first
-verify and retain the original launcher target, ensure Python 3.12 is available,
-then configure a wrapper that invokes this script with the original argv.
-Set `CTASK_NATIVE_CODEX` to the verified native executable if it is not the
-standalone package default. It must not point back to the guard or wrapper.
-Keep a reversible backup of the launcher; no native binary is modified.
-Other app-server clients or direct native paths bypass a launcher guard and
-must follow the same source-session policy. Recheck after launcher upgrades.
+Messages already queued before the policy was activated cannot be recalled;
+the hub should process non-intervention arrivals silently, without claiming
+they were presented. User-initiated status queries continue to receive answers.
 
 This policy prevents chat interruptions; it does not fix the separate logical
 host-handoff identity/generation or successor-linking issues. It does not add
 automatic recovery, a new observer window or business execution authority.
-
-## Project silence, once-only questions and diagnostic follow-through
-
-An explicitly muted project's pending questions remain in the inbox without
-waking the hub. The same project check applies at the optional direct queue guard,
-not just controller delivery. This is not an answer, acknowledgement or closure.
-
-With controller max_reminders set to zero, the question and followup channels
-share the first delivery claim. A pending but already queued/dispatching/unknown
-question cannot be replayed as a new followup. The initial canonical ask is still
-allowed while its own durable delivery state is dispatching; status messages do
-not become human questions by adding a prefix.
-
-The separate recovery upgrade adds bounded diagnostic ownership and validated
-successor projection; it does not loosen this routing policy. A verified handler
-may use operational-disposition to ask for a specific real decision, authority,
-missing information, handler assignment or human acceptance, with pinned evidence
-and tried steps. Such a canonical question follows the normal once-only and
-answer/accept guards. A timeout or no-output event alone grants no extra repair
-or permission. See [recovery and successor linkage](recovery-escalation.md).

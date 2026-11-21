@@ -1,35 +1,42 @@
 # Agent Task Orchestrator
 
-面向多种编码 Agent 的可恢复长任务编排器，支持持久化任务、独立验收、过程追踪、有限接管和统一人工交互。核心使用 Python 3.12 标准库，显式选用 ACP 时另装锁定依赖，不使用 goal。由当前对话完成需求访谈与任务规划，后台进程完成执行、独立验收和有限重试。
+ATO 是面向多种 Agent 的可恢复长任务编排器。它管理完整目标、阶段、权限、独立验收、执行记录和有限接管；Agent 适配器负责具体执行与通信。`ctask` 命令和 `codex-long-task` 对话集成保持兼容。
 
-执行时长可设为 `advisory`：按实测估时、记录耗时和超估预警，但不因时间额度耗尽停工或反复要求追加分钟数；同一本机策略同时覆盖旧任务与新任务，权限、人工停止、最终验收和重复失败保护保留。也支持显式选择有界弹性额度；命令、账本与迁移见 [预算机制](docs/adaptive-budgets.md)。
+本次主线整理的是已在本机使用的运行代码：通用会话引用、独立 ATO_HOME、受控本地 CLI 协调端、Pi 受管协调端、任务处置和失败观察、一次性完成通知及紧凑宿主交接。能力和资格范围见 [源码与能力地图](docs/source-map.md)，未完成候选见 [开发状态](docs/development-status.md)。源码发布不会替换本机运行进程，也不自动开启模型、通知或业务。
 
-实现包含完整目标与阶段依赖、有限异常接管、统一用户入口、持久化主控待办，以及 Codex / Claude Code / Pi CLI worker 适配。架构、状态流与实现边界见 [设计方案](docs/architecture.md)，验证方法和已知限制见 [验证说明](docs/validation.md)。
+## 安装
 
-执行端通过受信任的 Agent 注册表接入，包含可选 ACP Pi worker、持久化工具时间线和原生结果校验。Claude/Pi 的原生协调会话与 hub 仍不支持，明确的能力矩阵见 [Agent 抽象](docs/agent-abstraction.md)。
-
-阻塞处理提供只读 `takeover-status`、有界的原会话诊断跟进，以及不依赖代答的 `workflow-link`。旧任务状态与后继交付分别展示；STOP、修复次数、独立验收、未知投递和静默规则保留，见 [接管与后继关联](docs/recovery-escalation.md)。
-
-## 安装与接入
-
-需要 Python 3.12+、Git，以及已经配置可用模型的 Codex CLI。当前完整测试环境为 macOS；Claude Code/Pi worker 还要求系统提供 `sandbox-exec`。核心运行时只使用 Python 标准库；可选 ACP 路线需要 `requirements-acp.lock` 中的 Python SDK 和 `integrations/pi-acp` 中的锁定适配器。
+需要 Python 3.12+、Git。完整本地验收环境为 macOS；受限 Claude Code/Pi 执行及部分协议测试需要 `sandbox-exec`。核心调度只依赖标准库；ACP 使用固定的可选依赖。
 
 ```sh
 git clone https://github.com/Aias00/agent-task-orchestrator.git
 cd agent-task-orchestrator
-python3.12 scripts/install.py
-# 可选：同时安装对话 skill；已有同名入口/skill 时先检查，再显式使用 --force
-python3.12 scripts/install.py --skills-dir "$HOME/.codex/skills" --force
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements-acp.lock
+npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp
+.venv/bin/python scripts/install.py --helpers
 ctask --help
 ```
 
-项目名称与仓库地址已更新；现有 `ctask` 命令、本地目录和任务记录保留兼容。
+安装对话 skill 可另加 `--skills-dir "$HOME/.codex/skills"`。已有同名入口时安装器会拒绝覆盖；检查后可显式使用 `--force`。安装不启动 controller，不迁移账号或任务，不复制凭据。入口引用所选 checkout，移动它后须重新安装。也可直接运行 `python3.12 runner.py` 或 `./bin/ctask`。
 
-安装器只写命令入口和显式选择的 skill，不启动服务，不迁移账号、知识库或会话。请将 `~/.local/bin` 加入 PATH。也可以直接运行 `python3.12 runner.py` 或 `./bin/ctask`；后者通过 `CTASK_PYTHON` 选择 Python，默认 `python3.12`。安装后的入口引用当前 checkout，因此移动或删除 checkout 后需重新安装。
+## 配置和使用边界
 
-在需要集中交互的 Codex 会话中核实真实 `CODEX_THREAD_ID` 后，按用户授权配置 `ctask hub` 和 `ctask control start`。长任务按下文建立完整 workflow，记录 origin 并启用监督。`supervise` 在 controller 已启用时登记观察；已有问题也会被 controller 扫描登记。仅安装 CLI/skill 不会把所有旧会话自动变成后台任务。首次配置和各类状态查询不应混同于恢复或新的业务授权。
+- `ATO_HOME` 定位 ATO 自有状态；`CODEX_HOME` 只定位 Codex 原生数据。未设置 ATO_HOME 时保留历史兼容布局。切换环境变量不会迁移或授权已有状态。
+- Codex 旧会话兼容适配仍校验原生身份与工程；显式注册的本地 CLI origin/hub 不依赖 Codex 服务。Pi 受管协调端、文件 worker 和原生恢复是分别声明的能力。参见 [中立 CLI 操作](docs/session-decoupling/neutral-cli.md)。
+- Pi 的受限生产 profile 仍要求 Pi1.5.2、固定 Node24.22.1 路径及 macOS sandbox；缺少前置条件会拒绝运行，不声称任意机器即装即用。真实云端资格与离线协议验证分开记录。
+- 普通进度和宿主交接可静默；必要问题、真实无人处理失败和完成通知按本机显式策略处理。紧凑交接使用私有材料和读取前有效性校验，不把内部完整合约刷进会话。
+- 代码提交不包含 `.codex/tasks`、本机 hub、认证、原生会话、队列数据库和私有操作证据。历史资格文档中的 `OPERATOR_EVIDENCE`/`OPERATOR_SOURCE` 是本机外部材料占位符，不是远端已附带的文件。
 
-仓库只保存可复用源码、文档和测试。业务 `.codex/tasks/`、本机 hub/controller 状态、模型认证及共享记忆正文各自保留在目标机，不随源码提交。
+## 验证与源码管理
+
+```sh
+.venv/bin/python scripts/run_tests.py
+```
+
+测试使用隔离状态和本地 fixture；原生安装、真实模型调用及最终用户验收分别判断。主线验收结果与分发适配见 [本次源码整理](docs/publication-20261120.md)。后续流程以 GitHub 源分支为入口，运行目录只保存明确版本的部署快照。
+
+架构见 [设计](docs/architecture.md)、[会话适配](docs/agent-transports.md) 与 [源码地图](docs/source-map.md)。
 
 ## 总任务与阶段
 
@@ -67,7 +74,7 @@ ctask resume /absolute/path/to/repo/.codex/tasks/workflows/WORKFLOW_ID
 - 未完成项没有待执行阶段时，只读 Codex 规划器根据完整合约、失败证据和已完成阶段生成下一阶段。生成任务必须引用已有验收 ID；程序使用合约中的原检查 argv，不执行规划器临时提供的任意验收命令。
 - 合约与每个阶段计划分别固化并校验哈希；不能通过缩小目标、删验收或调低检查来获得完成。超出原范围的工作返回明确阻塞。合约改变需要重新整理并创建新总任务，不修改旧合约。
 - 只有所有最终条件通过才标 `completed`。`needs_input` 表示人工验收未完成；`waiting` 表示有具体外部条件，有限等待后再检查；`blocked` 表示需处理前置条件；`stage_limit`、`planning_limit`、`limit` 表示预算到达边界，均不是完成。
-- 外部权限与业务决策不由规划器放行。worker 仍采用既有 sandbox 和禁止自动提交/推送/部署的边界；确需宿主环境的验收必须事先写进已授权合约。宿主检查会执行命令，宜使用只读验收；合约不能作为不可信输入直接运行。
+- 外部权限与业务决策不由规划器放行。执行端遵守任务明确的 sandbox、提交、推送和部署授权边界；确需宿主环境的验收必须事先写进已授权合约。宿主检查会执行命令，宜使用只读验收；合约不能作为不可信输入直接运行。
 - 每个总任务的合约默认时长参考为 2 小时；`budget-policy` 的 `advisory` 策略使其仅用于估时，不是停工点。12 阶段、12 次规划、每次外部等待最多 300 秒；阶段沿用 3 次尝试、单次 worker 1800 秒、检查 120 秒。可在合约 `limits` 中设置各项参数；恢复保留累计耗时，单次卡死和无进展重试保护独立于总时长策略。
 - `stop` 作用于总任务和当前阶段；恢复会处理未完成阶段并重新核对全部条件。存在未清理的子进程组时拒绝直接恢复。仓库锁覆盖总任务的所有阶段与规划，避免两个执行器并行修改同一仓库。
 
@@ -211,7 +218,7 @@ ctask hub --thread VERIFIED_HUB_UUID --source '用户要求全部在此会话交
 ctask hub
 ```
 
-绑定存于 CODEX_HOME/ctask-interaction/hub.json。新旧本机工作流都使用此默认入口，origin 不变；未配置时保留原会话提问。Codex 会话须在当前本机存储精确核实；受管 Claude/Pi 使用显式注册的 endpoint ID 和 host capability。不能从最新会话或迁移笔记猜测。
+绑定存于 ATO_HOME/ctask-interaction/hub.json；未设置 ATO_HOME 时沿用 CODEX_HOME 下的旧位置。指定不同 ATO_HOME 不会自动迁移旧状态。ATO_HOME 仅定位 ATO 状态，CODEX_HOME 继续定位 Codex 原生索引和 rollout；两者都不是会话授权。新旧本机工作流都使用此默认入口，origin 不变；未配置时保留原会话提问。Codex 会话须在当前本机存储精确核实；受管 Claude/Pi 使用显式注册的 endpoint ID 和 host capability。不能从最新会话或迁移笔记猜测。
 
 执行会话发起问题：
 
@@ -219,7 +226,7 @@ ctask hub
 ctask ask WORKFLOW_DIR --question '需要用户决定的具体事项' --recommendation '推荐方案和原因' --context '必要背景'
 ```
 
-自动接管使用 `takeover --state needs_input --note '具体问题' --recommendation '推荐方案'` 时会自动转送问题。发送结果保存在 CODEX_HOME/ctask-interaction/questions/，包含 workflow、合约哈希、原会话、入口、问题 ID 与两次投递回执；不复制完整日志或凭据。
+自动接管使用 `takeover --state needs_input --note '具体问题' --recommendation '推荐方案'` 时会自动转送问题。发送结果保存在 ATO_HOME/ctask-interaction/questions/（未设置 ATO_HOME 时沿用 CODEX_HOME 的旧位置），包含 workflow、合约哈希、原会话、入口、问题 ID 与两次投递回执；不复制完整日志或凭据。
 
 统一入口收到通知后核实问题仍有效、向用户提问，实际收到答复后转交：
 
@@ -245,7 +252,7 @@ ctask presented QUESTION_OR_ACTION_ID --source '已在本会话向用户说明�
 ctask control stop
 ```
 
-controller 是独立本机进程，每5秒确定性读取状态和执行端流，不调用模型。SQLite/WAL保存在 `CODEX_HOME/ctask-interaction/control/state.sqlite`，同一事务记录待办投影和事件；消息先写唯一 outbox claim 再发送。多进程共用锁和唯一键。未知投递/发送中崩溃保留不确定性，不自动重发或改一个ID重试。进程日志、PID、心跳在同目录。默认15分钟提醒一次，每个待办最多额外3次；达到提醒上限仍保留未解决状态。`control start` 可显式调整 `--reminder-seconds`（至少60秒）与 `--max-reminders`。定时检查不耗模型token，通知唤醒会话后的诊断/回复会消耗。
+controller 是独立本机进程，每5秒确定性读取状态和执行端流，不调用模型。SQLite/WAL保存在 `ATO_HOME/ctask-interaction/control/state.sqlite`（未设置 ATO_HOME 时沿用 CODEX_HOME 的旧位置），同一事务记录待办投影和事件；消息先写唯一 outbox claim 再发送。多进程共用锁和唯一键。未知投递/发送中崩溃保留不确定性，不自动重发或改一个ID重试。进程日志、PID、心跳在同目录。默认15分钟提醒一次，每个待办最多额外3次；达到提醒上限仍保留未解决状态。`control start` 可显式调整 `--reminder-seconds`（至少60秒）与 `--max-reminders`。定时检查不耗模型token，通知唤醒会话后的诊断/回复会消耗。
 
 `followups`只读取，不自动标记已说明。问题投递、实际向用户说明、用户答复、原会话接收和真实执行分别记录；accepted不是恢复成功。真实workflow启动事件或执行代次推进只关闭该次恢复待办，不能证明总任务完成。已登记workflow继续被观察，即使原业务supervisor因额度/等待输入退出。新的问题、阻塞及最终完成结果会形成待办；完成结果要实际向用户报告后用`presented`登记。STOP/失效记录停止提醒，不称为完成。读取/解析失败保持可见异常，不按健康处理。
 
@@ -293,37 +300,37 @@ ctask delegation-status /absolute/project/.codex/tasks/delegations/DELEGATION_ID
 
 原生输出、stderr、调用信息和session/usage元数据在checkpoints/<attempt>.agent-runtime，目录0700。只接受成功终态的完整JSON，partial、错误、工具输出或截断不能冒充完成；缺认证返回blocked，不反复尝试。STOP/超时按同一进程组管理bridge、CLI及子进程，仓库锁/累计预算/独立验收保持原机制。
 
-上述阶段 worker/只读 planner 按完整合约和检查点重启；原生会话字段只作调用元数据。Claude/Pi 原生协调端和 hub 尚未实现；注册表拒绝不支持的能力。独立的消息账本 API 不会自动迁移或接管旧 JSON 交互记录，见 [消息与传输边界](docs/message-protocol.md)。
+上述 agents.py 阶段 worker/只读 planner 每次按完整合约和检查点重启；Claude worker 不持久化会话，Pi worker 保留本次 session。通信协调端使用另一套 message_adapters.py：Claude stream-json/精确 resume、Pi RPC/精确 session，支持多轮上下文和显式受管 origin/hub。第三方使用 origin_endpoint_id，不覆盖旧 origin_thread_id。协调端默认无工具，由可信 host 执行有权限的状态转换；模型结构化提问/接收事件不授予 shell、额外预算或业务执行许可。不支持注入任意既有交互窗口。
 
 验证分别报告：fixture CLI协议/进程测试，实际安装Pi+本地模拟模型端点（真实路径guard、write工具及独立验收），以及云端模型调用。前两者通过不证明账号额度或云端模型效果。缺少Claude登录或Pi provider凭据时是认证阻塞；真实云端验收需在目标机独立配置。开发环境另外验证过Pi真实provider调用和两阶段workflow，不能推广为每台机器已有登录或任意模型都同样可靠。仓库不携带node_modules、认证或会话；目标机独立安装CLI。非macOS暂不执行第三方worker。
 
 官方依据：[Claude headless](https://code.claude.com/docs/en/headless)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[Pi JSON](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md)。已按安装版本--help核对，升级需复验。
 
-## Agent 注册、过程与接管诊断
+持久化消息适配器同一受管会话串行接收后续消息。协议与混合 origin/hub 使用独立进程 fixture 验证；真实 Claude 2.1.325/Pi 1.5.2 曾由外部宿主通过本地 provider 双轮验证，后续源码变更须重新原生验收。worker 的 socket/nested sandbox 限制不等于宿主失败，也不能用旧证据宣称当前完整目标通过。未验证云端账号。接口与证据见 [agent-transports](docs/agent-transports.md) 和 [交付验证](docs/message-delivery-validation.md)。
 
-- [注册适配器](docs/agent-adapter-guide.md)：由受信任代码声明能力，不从计划加载插件或命令。
-- [ACP 过程与可信结果](docs/acp-process.md)：显式选择 `acp_pi`，过程可用 `ctask trace RUN --json` 查询；原生结果、传输结束和宿主验收分别判定。
-- [接管与后继关联](docs/recovery-escalation.md)：`takeover-status`、有界诊断归属、必要人工问题与观察型 `workflow-link`。
 
-## User-intervention-only hub notifications
+### Agent-neutral workflow routing (feature checkout)
 
-Use `ctask notification-policy set --mode user_input_only --source 'actual user instruction'` from the verified hub to keep ordinary status and handoff records out of the conversation. Real pending user questions still notify through `ask`/`needs_input`; task state, origin handoffs and historical evidence are preserved. `notification-policy status` reads the policy.
+`interaction`, `control`, `recovery` and `delegation` deliver through the shared
+persistent mailbox and transport adapters. Managed Claude/Pi origins use explicit
+`mailbox-register` and `workflow-create --origin-endpoint`; existing Codex UUIDs,
+JSON outboxes, authorization sources and accumulated limits remain valid.
+Managed models can emit structured questions; actual sourced user answers return
+through the existing hub and origin-acceptance flow. A foreground `mailbox-pump`
+processes one managed native turn with tools disabled. No installed runtime is
+activated by this checkout. See [managed host interfaces](docs/agent-transports.md)
+and [workflow guards and compatibility](docs/message-protocol.md).
 
-Direct origin calls to native `codex queue` are a separate entry point. The optional `hub_queue_gate.py` guard supports the same policy for the local launcher; normal installation does not replace Codex. See [notification routing and queue-ingress boundaries](docs/notification-policy.md).
 
-For a repaired failed stage, `ctask host-recheck WORKFLOW --task TASK_ID --source 'actual repair evidence'` executes only that task's frozen checks while retaining attempt counts and old failures. It does not create repair attempts or bypass STOP and manual acceptance.
+### Offline upgrade and rollback
 
-## 本次运行版与复现验证
-
-本次源码同步包含已在本机验收的 Agent 抽象、ACP 过程与阻塞接管升级。GitHub 源码发布不会自动替换已安装入口、重启 controller 或迁移业务状态。安装与回滚边界见 [迁移说明](docs/recovery-escalation-migration.md)。
-
-在隔离环境运行完整离线测试（不调用真实模型，不投递真实用户消息）：
-
-```sh
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements-acp.lock
-npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp
-.venv/bin/python scripts/run_tests.py
-```
-
-Node.js 20+ 用于锁定的 pi-acp 协议 fixture；完整 CI 使用 Node.js 24。`run_tests.py` 使用临时配置目录，避免本机 hub、时间策略或投递记录影响回归。运行版验收与源码发布验证的范围分别记录在 [发布说明](docs/recovery-release.md)。
+`scripts/upgrade_runtime.py --dry-run --runtime /path/to/old-runtime` only reads
+source fingerprints and prints a plan. `--stage /new/private/stage --runtime
+/path/to/old-runtime` prepares an independent runtime; it never updates the old
+runtime, launcher, native config or hub. Optional explicit `--offline --state-root`
+snapshots and `--restore ... --destination NEW_DIR --offline` support temporary
+migration/rollback rehearsals. Legacy JSON/controller tables need no conversion;
+the mailbox is additive and unknown old deliveries are never imported as new sends.
+See [upgrade procedure](docs/runtime-upgrade.md) for operator activation prerequisites,
+current-ledger preservation and managed-origin rollback limits. Live installation
+is a separate authorized operation.

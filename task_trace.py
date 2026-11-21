@@ -14,10 +14,10 @@ from pathlib import Path
 
 MAX_EVENTS = 4096
 MAX_QUERY = 4096
-KINDS = frozenset({'attempt_started', 'transport_completed', 'transport_error',
+KINDS = frozenset({'attempt_started', 'transport_completed', 'transport_error', 'approval',
     'native_success', 'native_error', 'native_unverified', 'tool', 'progress',
     'check_started', 'check_passed', 'check_failed', 'attempt_finished', 'output_truncated'})
-STATES = frozenset({'pending', 'in_progress', 'completed', 'failed', 'cancelled', 'timeout'})
+STATES = frozenset({'pending', 'in_progress', 'completed', 'failed', 'cancelled', 'timeout', 'unknown'})
 SOURCES = frozenset({'scheduler', 'acp', 'native'})
 
 def opaque(value):
@@ -68,6 +68,8 @@ def append(directory, kind, *, event_id, task=None, attempt=None, source='schedu
             event[name] = opaque(value)
     if state in STATES:
         event['state'] = state
+    elif kind in ('tool', 'approval'):
+        event['state'] = 'unknown'
     if target and workspace:
         safe = target_path(target, workspace)
         if safe:
@@ -121,9 +123,15 @@ def query(directory, task=None):
                 events.append(event)
         tools = {(e.get('task'), e.get('attempt'), e.get('native_session'), e.get('turn'), e['tool_id'])
                  for e in events if e.get('kind') == 'tool' and e.get('tool_id')}
-        latest = next((e for e in reversed(events) if e.get('attempt') and e.get('task')), None)
+        # A delayed old observation must not select the current attempt. The
+        # scheduler's start record is the authority; legacy traces may lack it.
+        latest = next((e for e in reversed(events) if e['kind'] == 'attempt_started' and e.get('attempt') and e.get('task')), None)
+        if latest is None:
+            latest = next((e for e in reversed(events) if e.get('attempt') and e.get('task')), None)
         current = ([e for e in events if e.get('task') == latest['task']
-                    and e.get('attempt') == latest['attempt']] if latest else [])
+                    and e.get('attempt') == latest['attempt']
+                    and e['sequence'] >= latest['sequence']] if latest and latest['kind'] == 'attempt_started' else
+                   [e for e in events if e.get('task') == latest['task'] and e.get('attempt') == latest['attempt']] if latest else [])
         def last_kind(prefix):
             return next((e['kind'] for e in reversed(current) if e['kind'].startswith(prefix)), None)
         last_tool = next((e for e in reversed(current) if e['kind'] == 'tool'), None)

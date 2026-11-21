@@ -1,6 +1,6 @@
-# Agent execution and session abstraction
+# Local agent abstraction candidate
 
-This source release does not install or activate a runtime. `agent_registry.py` is a trusted in-process registry: plans choose a registered kind, never an import path, executable, or plugin. Its version-1 execution request, session reference, creation result and correlated events are the boundary between scheduling and adapter code. `agents.py` supplies the built-in execution adapters. `runner.py` and `workflow.py` negotiate worker and planner capabilities before creating their subprocess commands; independent acceptance checks, attempts, cancellation and frozen contract hashes remain scheduler responsibilities.
+This is an isolated candidate, not an installed runtime. `agent_registry.py` is a trusted in-process registry: plans choose a registered kind, never an import path, executable, or plugin. Version-1 execution/session contracts remain compatible; additive version-2 identity, capability, activity, event, and actor contracts form the neutral session boundary. `agents.py` supplies the built-in execution adapters. `runner.py` and `workflow.py` negotiate worker and planner capabilities before creating their subprocess commands; independent acceptance checks, attempts, cancellation and frozen contract hashes remain scheduler responsibilities.
 
 ## Coupling audit and current boundaries
 
@@ -13,7 +13,7 @@ This source release does not install or activate a runtime. `agent_registry.py` 
 | Recovery | `recovery.py` checks origin and contract, requires explicit authorization and adapter observation/transport, and observes correlated events before accepting progress. A queue receipt is not a resumed process. Limits, evidence, STOP and attempt history remain intact. |
 | Delegation | `delegation.py` asks the selected trusted adapter to create and prove a session with the requested project, sandbox and approval policy. It persists the creation barrier first and requires explicit acceptance before the existing dispatcher starts the exact workflow. `codex_legacy.py` contains the legacy app-server protocol, UUID conversion, exact index/rollout lookup, queue parsing and rollout decoding. The legacy fields and paths remain readable. |
 
-`interaction.py`, `control.py`, and `recovery.py` still retain narrow compatibility branches for old Codex state and its rollout offsets. `CODEX_HOME` remains the historical local ledger root, including for opted-in registered references; this is a compatibility location, not proof that another agent is Codex. `appserver.py` remains the Codex-specific protocol implementation. No arbitrary native session ID is converted to a Codex UUID.
+`interaction.py`, `control.py`, and `recovery.py` still retain narrow compatibility branches for old Codex state and its rollout offsets. ATO-owned ledgers use `ATO_HOME` when set; without it, they keep the historical `CODEX_HOME` location. `CODEX_HOME` continues to locate Codex-native indexes and rollouts. Both are path locators, not actor proof or session authorization. `appserver.py` remains the Codex-specific protocol implementation. No arbitrary native session ID is converted to a Codex UUID.
 
 ## Capability matrix
 
@@ -26,4 +26,6 @@ This source release does not install or activate a runtime. `agent_registry.py` 
 
 All capabilities describe implementations, not guarantees about installed CLI versions, authentication or cloud providers. External workers do not inherit additional writable roots, arbitrary shell/MCP tools or full access. Explicit unsupported capabilities fail before dispatch. A transport result of `delivered` means a transport receipt, not model acceptance or user approval. No untrusted plan can register an adapter; no arbitrary TTY injection or native session discovery is implemented.
 
-The candidate does not start a new polling service or migrate active state. The old notification mute/once behavior, advisory timing and host-recheck paths continue to apply. The fixture tests exercise isolated data and do not prove native provider/session compatibility; see [release validation](recovery-release.md) for checks and limitations.
+The v2 registry reports Codex session creation as supported, its current load/resume API as unsupported, and actor authentication as unknown. Claude and Pi are explicitly unsupported for session creation, transport, observation, activity, cancellation, load/resume, and actor authentication; their worker/planner registrations do not imply coordinator support. These code declarations remain separate from CLI installation and provider readiness.
+
+The candidate does not start a new polling service or migrate active state. The old notification mute/once behavior, advisory timing and host-recheck paths continue to apply. The fixture tests exercise isolated data and do not prove native provider/session compatibility; see `build/agent-abstraction/validation-report.md` for actual checks and the host limitations.

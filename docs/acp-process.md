@@ -1,6 +1,6 @@
-# ACP process capture and result validation
+# ACP process candidate
 
-The runtime registers `agent.kind: "acp_pi"` through the existing trusted
+The candidate registers `agent.kind: "acp_pi"` through the existing trusted
 adapter registry. A plan can select the registered kind and an optional model
 identifier; it cannot supply a command, environment, module path, or native
 receipt. Other registered adapters remain the default for their existing plans.
@@ -42,8 +42,7 @@ Trace write failures are best effort and do not decide the verdict. Missing
 traces are explicitly unavailable. Event timestamps are not process-liveness
 proof. Observability adds no notifications or polling daemon.
 
-The runtime has been validated with isolated subprocess fixtures; a separately
-recorded real Pi run supplied the error/end-turn regression case. These are not
-new provider/authentication tests for another machine. The source release ships
-a redacted regression sample, never native sessions or credentials. See
-[profile setup](acp-process-migration.md) and [offline demo](acp-process-demo.md).
+This is an isolated candidate, not a deployed or live-validated route. Its
+fixture evidence and the recorded Pi evidence are distinct from a new live
+provider test, which was not authorized or run. See the migration and demo
+documents for constraints and reproducibility.

@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 model = {'provider': 'offline', 'id': 'fixture', 'name': 'fixture'}
-replay = Path(__file__).with_name('pi-error-end-turn.json')
+replay = Path(__file__).parent/'pi-error-end-turn.json'
 
 def emit(value):
     print(json.dumps(value), flush=True)

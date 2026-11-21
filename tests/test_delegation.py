@@ -25,7 +25,7 @@ import runner
 import workflow
 from test_workflow import PLANNER
 
-HUB = '00000000-0000-4000-8000-000000000001'
+HUB = '11111111-1111-4111-8111-000000000002'
 
 
 class DaemonFixture:

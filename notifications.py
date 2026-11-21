@@ -3,6 +3,11 @@
 MODES = ('all', 'user_input_only')
 
 
+def configure_failure_alerts(source):
+    import failure_attention
+    return failure_attention.configure(source)
+
+
 def status():
     import interaction
     import runner as core
@@ -17,7 +22,7 @@ def status():
     return dict(mode='all', configured=False, hub_thread=hub.get('thread_id'))
 
 
-def configure(mode, source):
+def configure(mode, source, *, completion=None):
     import interaction
     import recovery
     import runner as core
@@ -25,9 +30,19 @@ def configure(mode, source):
     if not hub or not source or not source.strip() or mode not in MODES:
         raise ValueError('notification policy requires a verified hub, mode and user source')
     interaction.actor(hub['thread_id'])
-    policy = dict(mode=mode, hub_thread=hub['thread_id'], source=source,
-                  configured_at=core.now())
+    if completion is not None and completion not in ('once', 'silent'):
+        raise ValueError('completion must be once or silent')
     with recovery.locked(interaction.directory()/'notification-policy.lock'):
+        prior = status()
+        policy = dict(mode=mode, hub_thread=hub['thread_id'], source=source, configured_at=core.now())
+        if prior.get('hub_thread') == hub['thread_id']:
+            for key in ('completion', 'completion_since', 'completion_source'):
+                if key in prior:
+                    policy[key] = prior[key]
+        if completion is not None:
+            if prior.get('completion') != completion or 'completion_since' not in prior:
+                policy['completion_since'] = core.now()
+            policy.update(completion=completion, completion_source=source)
         core.save(interaction.directory()/'notification-policy.json', policy)
     return status()
 
@@ -110,9 +125,19 @@ def disposition(action, channel='followup'):
     if mute:
         return dict(mode=policy['mode'], notify=False, source=mute['source'],
                     project=mute['repo'], reason='project notifications silenced by user; recorded only')
+    notify = False
+    if channel == 'followup' and action.get('kind') == 'failure_attention':
+        import failure_attention
+        notify = failure_attention.pending(action)
+        return dict(mode=policy['mode'], notify=notify, source=action.get('policy_source'),
+                    reason='once-only unhandled failure notice' if notify else 'failure already presented, stale, or being handled')
+    if channel == 'followup' and action.get('kind') == 'workflow_result' and policy.get('completion') == 'once':
+        import completion_notifications
+        notify = completion_notifications.eligible(action)
+        return dict(mode=policy['mode'], notify=notify, source=policy.get('completion_source'),
+                    reason='verified final workflow completion; once only' if notify else 'completion already claimed, historical, muted, or not fully verified')
     if policy['mode'] == 'all':
         return dict(mode='all', notify=True, reason='all notifications enabled')
-    notify = False
     if channel == 'followup' and action.get('kind') == 'question' and action.get('state') in ('unpresented', 'needs_user'):
         import interaction
         import runner as core

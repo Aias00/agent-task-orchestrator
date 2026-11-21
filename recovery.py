@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 
+import session_router
 import runner as core
 
 ACTIVE = {'running', 'planning', 'verifying', 'waiting'}
@@ -45,8 +46,7 @@ def alive(pid):
 
 def session_path(home, thread):
     """Read only the exact thread index; never infer from the latest session."""
-    import codex_legacy
-    return codex_legacy.session_path(home, thread)
+    return session_router.compatibility_path(home, thread)
 
 
 def origin_reference(origin):
@@ -65,21 +65,8 @@ def enable(directory, source, max_requests=3, same_blocker_limit=2,
         if type(n) is not int or n < 1:
             raise ValueError('supervision limits must be positive integers')
     origin = core.read(d/'origin.json')
-    thread = origin.get('origin_session_ref')
     home = Path(origin['codex_home']).resolve()
-    if thread:
-        if origin.get('origin_thread_id'):
-            raise ValueError('ambiguous origin identity')
-        import session_router
-        _, adapter = session_router.resolve(thread, project=state['repo'], capability='session_observe')
-        if not callable(getattr(adapter, 'observe_session', None)) or not callable(getattr(adapter, 'session_cursor', None)):
-            raise ValueError('adapter has no session observation implementation')
-        session_router.preflight(thread)
-        rollout = None
-    else:
-        import codex_legacy
-        thread = codex_legacy.identity(origin['origin_thread_id'])
-        rollout = session_path(home, thread)
+    thread, rollout = session_router.recovery_binding(origin, state['repo'])
     contract = core.read(d/'contract.json')
     if core.digest(contract) != state['contract_hash']:
         raise ValueError('workflow contract has changed')
@@ -123,11 +110,17 @@ def summary(directory):
     r = core.read(d/'recovery.json')
     watch = core.read(d/'supervisor.json') if (d/'supervisor.json').exists() else {}
     latest = r['requests'][-1] if r['requests'] else None
+    state = core.read(d/'state.json')
+    try:
+        handler = handler_status(d, state, r['thread_id'])
+    except (ValueError, OSError, KeyError, TypeError):
+        handler = 'activity_unknown'
     return dict(enabled=r['enabled'], status=r['status'], requests=len(r['requests']),
                 max_requests=r['max_requests'], deadline=r['deadline'],
+                handler=handler,
                 supervisor_pid=watch.get('pid'), supervisor_alive=alive(watch.get('pid')),
                 heartbeat=watch.get('heartbeat'), last_error=watch.get('error'),
-                latest={k: latest.get(k) for k in ('id', 'state', 'message_id', 'sent_at',
+                latest={k: latest.get(k) for k in ('id', 'state', 'mailbox_state', 'message_id', 'sent_at',
                        'responded_at', 'resumed_at', 'note', 'notification')} if latest else None)
 
 
@@ -145,6 +138,124 @@ def generation(d, state):
             if event.get('event') == 'workflow_started':
                 last = event['time']
     return [last, state.get('execution_revision', 0)]
+
+
+def execution_resource(project):
+    return 'repository:'+str(Path(project).resolve())
+
+
+def execution_available(directory, state, bus, *, explicit_run=False):
+    """Validate the exact previous owner before replacing its expired token.
+
+    A repository flock is still required by the caller. Lease expiry fences a
+    credential; it does not prove that native host work or orphan children ended.
+    """
+    import workflow_closure
+    d = Path(directory).resolve()
+    if ((d/'STOP').exists() or (d/'user-closure.json').exists()
+            or (state.get('status') in ('completed', 'stopped') and not explicit_run)):
+        raise ValueError('STOP, closure or completion forbids execution ownership')
+    if workflow_closure.active_execution(state):
+        raise ValueError('existing execution is active or unverified')
+    if state.get('active_run'):
+        if workflow_closure.active_execution(core.read(Path(state['active_run'])/'state.json')):
+            raise ValueError('existing stage execution is active or unverified')
+    previous = bus.execution_lease(execution_resource(state['repo']))
+    if not previous or previous['state'] != 'active' or previous['lease_until'] > bus.clock():
+        return
+    previous_dir = Path(previous['task_id'])
+    if not previous_dir.is_absolute():
+        raise ValueError('expired ownership requires its exact prior workflow')
+    previous_state = core.read(previous_dir/'state.json')
+    if (previous_state['repo'] != state['repo']
+            or (previous_state.get('contract_hash') or previous_state.get('plan_hash')) != previous['contract_hash']):
+        raise ValueError('expired ownership binding cannot be verified')
+    if workflow_closure.active_execution(previous_state):
+        raise ValueError('expired ownership still has active or unknown process activity')
+    if previous_state.get('active_run'):
+        if workflow_closure.active_execution(core.read(Path(previous_state['active_run'])/'state.json')):
+            raise ValueError('expired ownership still has active or unknown stage activity')
+    if previous['role'] in ('origin', 'session_host'):
+        origin = core.read(previous_dir/'origin.json')
+        target = session_router.bind_origin(origin, previous_state['repo'])
+        if session_router.activity(target, generation=previous_state.get('execution_revision', 0)) != 'idle':
+            raise ValueError('expired origin/session-host lease still has active or unknown native activity')
+
+
+@contextlib.contextmanager
+def execution_owner(directory, state, *, role='worker', explicit_run=False):
+    """Called only inside the existing repository flock, never by a model.
+
+    The flock excludes live processes even after a lease deadline; the durable
+    fence excludes stale origin/worker/session-host renewals after a crash.
+    Nested stage workers inherit their workflow's ownership and parent guard.
+    """
+    import transport
+    d = Path(directory).resolve()
+    bus = transport.managed_bus()
+    if explicit_run and role != 'worker':
+        raise ValueError('only an explicit foreground run may revalidate completed work')
+    execution_available(d, state, bus, explicit_run=explicit_run)
+    gen = generation(d, state)
+    resource = execution_resource(state['repo'])
+    token, fence = bus.acquire_execution(resource, project=state['repo'], task_id=str(d),
+        contract_hash=state.get('contract_hash') or state['plan_hash'], generation=gen,
+        role=role, owner='process:'+str(os.getpid()), source='verified foreground repository lock')
+    owner = transport.ExecutionOwnership(bus, resource, token, fence, gen)
+    try:
+        yield owner
+    finally:
+        if role == 'session_host':
+            # Adapter return/EOF is not evidence that native work ended. Keep
+            # the durable quarantine when a host exits with active/unknown
+            # activity; expiry still requires exact idle reconciliation.
+            try:
+                target = session_router.bind_origin(core.read(d/'origin.json'), state['repo'])
+                idle = session_router.activity(target, generation=state.get('execution_revision', 0)) == 'idle'
+            except (ValueError, OSError, KeyError, TypeError):
+                idle = False
+        else:
+            idle = True
+        try:
+            if idle:
+                owner.release()
+        except ValueError:
+            pass  # A stale owner cannot release its successor's lease.
+
+
+def origin_lease(d, state, request, *, release=False):
+    """Retain origin work across CLI calls without sharing its secret with models."""
+    import transport
+    resource = execution_resource(state['repo'])
+    bus = transport.managed_bus()
+    name = core.digest([str(d), request['id']])
+    path = bus.path.parent/'private'/('origin-'+name+'.json')
+    seconds = request['expires_at']-core.now()
+    if seconds <= 0:
+        raise ValueError('origin request lease expired')
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+            raise ValueError('origin ownership credential must be private')
+        saved = core.read(path)
+        if release:
+            bus.release_execution(resource, saved['token'], saved['fence'], generation=request['generation'])
+            path.unlink()
+        else:
+            bus.renew_execution(resource, saved['token'], saved['fence'], generation=request['generation'],
+                                lease_seconds=seconds)
+    elif not release:
+        execution_available(d, state, bus)
+        token, fence = bus.acquire_execution(resource, project=state['repo'], task_id=str(d),
+            contract_hash=state['contract_hash'], generation=request['generation'], role='origin',
+            owner=request['id'], source='authenticated existing recovery takeover', lease_seconds=seconds)
+        transport._private_save(path, dict(token=token, fence=fence))
+
+
+def current_execution_owner(state):
+    import transport
+    bus = transport.managed_bus()
+    lease = bus.execution_lease(execution_resource(state['repo']))
+    return lease if lease and lease['state'] == 'active' and lease['lease_until'] > bus.clock() else None
 
 
 def snapshot(d):
@@ -165,20 +276,45 @@ def snapshot(d):
 
 
 def observe_response(r, request):
-    if not r['rollout']:
-        import session_router
-        events, cursor = session_router.observe(r['thread_id'], request['id'], request.get('event_cursor'))
-        request['event_cursor'] = cursor
-        for event in events:
-            if event.kind == 'received' and event.turn_id:
-                request.update(seen_in_session=True, observed_turn=event.turn_id)
-            elif request.get('seen_in_session') and event.turn_id == request.get('observed_turn') and event.kind == 'responded':
-                request.setdefault('responded_at', core.now())
-            elif request.get('seen_in_session') and event.turn_id == request.get('observed_turn') and event.kind == 'completed':
-                request.setdefault('turn_completed_at', core.now())
-        return
-    import codex_legacy
-    codex_legacy.observe_recovery(r['rollout'], request, core.now)
+    return session_router.observe_recovery(r, request, core.now)
+
+
+def handler_status(directory, state, origin):
+    """Read-only handler classification, without extending any recovery grant.
+
+    Unknown activity remains unknown. A dead/expired request is history, not an
+    effective handler; unknown delivery is never permission to replay work.
+    """
+    import workflow_closure
+    d = Path(directory).resolve()
+    if (d/'STOP').exists() or state.get('status') == 'stopped':
+        return 'stopped'
+    if (d/'user-closure.json').exists() or state.get('status') == 'completed':
+        return 'closed'
+    if workflow_closure.active_execution(state):
+        return 'worker_active'
+    if state.get('active_run') and workflow_closure.active_execution(core.read(Path(state['active_run'])/'state.json')):
+        return 'worker_active'
+    if current_execution_owner(state):
+        return 'execution_owned'
+    try:
+        activity = session_router.activity(origin, generation=state.get('execution_revision', 0))
+    except (ValueError, OSError, KeyError, TypeError):
+        activity = 'unknown'
+    if activity != 'idle':
+        return 'origin_active' if activity == 'active' else 'activity_unknown'
+    ledger = core.read(d/'recovery.json') if (d/'recovery.json').exists() else {}
+    latest = (ledger.get('requests') or [{}])[-1]
+    if (ledger.get('enabled') and ledger.get('thread_id') == origin
+            and ledger.get('contract_hash') == state.get('contract_hash')
+            and latest.get('generation') == generation(d, state)
+            and latest.get('expires_at', 0) > core.now()
+            and (latest.get('mode') == 'report' or ledger.get('deadline', 0) > core.now())):
+        if latest.get('state') in ('queued', 'working', 'repaired', 'resuming', 'resume_launching'):
+            return 'recovery_pending'
+        if latest.get('state') in ('dispatching', 'delivery_unknown'):
+            return 'delivery_unknown'
+    return 'unhandled'
 
 
 def message(d, r, request, state, reason):
@@ -220,6 +356,8 @@ def takeover_status(directory, request_id, *, check_repo_lock=True):
         reasons.append('disabled')
     if (d/'STOP').exists():
         reasons.append('stopped')
+    if (d/'user-closure.json').exists() or current['status'] in ('completed', 'stopped'):
+        reasons.append('workflow_closed')
     if request is None:
         reasons.append('unknown_request')
     else:
@@ -235,6 +373,20 @@ def takeover_status(directory, request_id, *, check_repo_lock=True):
             reasons.append('generation_changed')
         if episode != request.get('episode') and gen == request.get('generation'):
             reasons.append('status_changed')
+        delivery = request.get('delivery') or {}
+        if delivery.get('authority') == 'managed_mailbox':
+            try:
+                import transport
+                bus = transport.managed_bus()
+                bus.recover()
+                envelope = bus.message(delivery['mailbox_id'])
+                if (envelope['canonical_id'] != request_id or envelope['task_id'] != str(d)
+                        or envelope['contract_hash'] != r['contract_hash']
+                        or json.loads(envelope['generation']) != request.get('generation')
+                        or envelope['state'] not in ('delivered', 'accepted', 'responded', 'turn_completed')):
+                    reasons.append('canonical_delivery_unavailable')
+            except (ValueError, OSError, KeyError):
+                reasons.append('canonical_delivery_unavailable')
     try:
         if origin_reference(core.read(d/'origin.json')) != r['thread_id']:
             reasons.append('binding_changed')
@@ -245,6 +397,27 @@ def takeover_status(directory, request_id, *, check_repo_lock=True):
         reasons.append('contract_changed')
     if alive(current.get('owner_pid')):
         reasons.append('owner_active')
+    import workflow_closure
+    if current.get('active_run') and workflow_closure.active_execution(
+            core.read(Path(current['active_run'])/'state.json')):
+        reasons.append('stage_active')
+    if workflow_closure.active_execution(dict(current, owner_pid=None)):
+        reasons.append('process_active')
+    lease = current_execution_owner(current)
+    if lease and (not request or lease['owner'] != request['id']):
+        reasons.append('execution_lease_active')
+    if session_router.is_reference(r['thread_id']):
+        try:
+            row, _ = session_router.resolve(r['thread_id'])
+            if row['version'] == 2:
+                activity = session_router.activity_v2(r['thread_id'], generation=current.get('execution_revision', 0))
+                if activity.state.value == 'unknown':
+                    reasons.append('origin_activity_unknown')
+                elif activity.state.value == 'active' and (not request or not activity.turn_id
+                        or activity.turn_id != request.get('observed_turn')):
+                    reasons.append('origin_other_turn_active')
+        except (ValueError, OSError, KeyError):
+            reasons.append('origin_activity_unknown')
     lock_path = Path(current['repo'])/'.codex/tasks/.worker.lock'
     try:
         # Do not create a lock file as a side effect of a read-only query.
@@ -272,7 +445,6 @@ def takeover(directory, request_id, state, note, evidence=None, recommendation='
         raise ValueError('takeover requires state working/repaired/needs_input/blocked and a note')
     with locked(d/'recovery.lock'):
         r = core.read(d/'recovery.json')
-        import session_router
         if session_router.is_reference(r['thread_id']):
             session_router.actor(r['thread_id'])
         diagnostic = takeover_status(d, request_id)
@@ -289,6 +461,10 @@ def takeover(directory, request_id, state, note, evidence=None, recommendation='
                     raise ValueError('repair requires actual evidence and a repair-mode request')
                 request['repair_evidence'] = str(Path(evidence).resolve())
                 request['repair_checksum'] = hashlib.sha256(Path(evidence).read_bytes()).hexdigest()
+            if state == 'working':
+                origin_lease(d, current, request)
+            else:
+                origin_lease(d, current, request, release=True)
             request.update(state=state, note=note, acknowledged_at=core.now())
             if state == 'working':
                 request.setdefault('responded_at', core.now())
@@ -314,7 +490,7 @@ def tick(directory):
             r['status'] = status
             r['updated_at'] = core.now()
             core.save(d/'recovery.json', r)
-            if status in ALERT_STATES and r['requests']:
+            if status in ALERT_STATES and r['requests'] and not r['requests'][-1].get('notification'):
                 import interaction
                 request = r['requests'][-1]
                 try:
@@ -327,15 +503,22 @@ def tick(directory):
             return keep
         if not r['enabled'] or (d/'STOP').exists():
             return finish('disabled' if not r['enabled'] else 'stopped')
+        if (d/'user-closure.json').exists():
+            return finish('user_closed')
         state, status, gen, episode, fingerprint, reason = snapshot(d)
         if (core.digest(core.read(d/'contract.json')) != r['contract_hash']
+                or state.get('contract_hash') != r['contract_hash']
                 or origin_reference(core.read(d/'origin.json')) != r['thread_id']):
             return finish('binding_changed')
         latest = r['requests'][-1] if r['requests'] else None
         if latest:
-            observe_response(r, latest)
             if gen != latest['generation'] and latest['state'] not in ('resumed', 'completed'):
-                latest.update(state='resumed', resumed_at=core.now())
+                if (gen[0] or 0) > (latest['generation'][0] or 0):
+                    latest.update(state='resumed', resumed_at=core.now())
+                else:
+                    latest.update(state='superseded', superseded_at=core.now())
+            elif gen == latest['generation']:
+                observe_response(r, latest)
         if status == 'completed':
             if latest and latest['state'] == 'resumed':
                 latest['state'] = 'completed'
@@ -350,6 +533,17 @@ def tick(directory):
                 return finish('watching', True)
         if alive(state.get('owner_pid')):
             return finish('watching', True)
+        lease = current_execution_owner(state)
+        if lease and (not latest or lease['owner'] != latest['id']):
+            return finish('execution_owned', True)
+        # v2 activity is explicit evidence. A worker-capable adapter or an
+        # unobservable session must never be mistaken for an idle origin.
+        if session_router.is_reference(r['thread_id']):
+            session_row, _ = session_router.resolve(r['thread_id'])
+            if session_row['version'] == 2:
+                activity = session_router.activity(r['thread_id'], generation=state.get('execution_revision', 0))
+                if activity != 'idle' and (not latest or latest['state'] == 'repaired'):
+                    return finish('origin_'+activity, True)
         if latest and latest['episode'] == episode:
             if latest['state'] in ('needs_input', 'blocked', 'stalled', 'delivery_unknown', 'send_failed', 'resume_failed'):
                 return finish(latest['state'])
@@ -400,46 +594,35 @@ def tick(directory):
         try:
             with locked(Path(state['repo'])/'.codex/tasks/.worker.lock', blocking=False):
                 report = status in REPORT or bool(escalation)
-                if not r['rollout']:
-                    import session_router
-                    session_router.preflight(r['thread_id'])
-                    event_cursor = session_router.cursor(r['thread_id'])
-                else:
-                    event_cursor = None
+                checkpoint = session_router.delivery_checkpoint(r['thread_id'], r['codex_home'])
                 request = dict(id='recover-'+uuid.uuid4().hex[:16], episode=episode,
                                fingerprint=fingerprint, generation=gen, state='dispatching',
                                mode='report' if report else 'repair', escalation=escalation,
                                sent_at=core.now(), expires_at=(core.now()+r['response_seconds'] if report
                                    else min(r['deadline'], core.now()+r['response_seconds'])),
-                               rollout_offset=Path(r['rollout']).stat().st_size if r['rollout'] else None)
-                if event_cursor is not None:
-                    request['event_cursor'] = event_cursor
+                               rollout_offset=checkpoint.get('rollout_offset'))
+                if 'event_cursor' in checkpoint:
+                    request['event_cursor'] = checkpoint['event_cursor']
                 request['message'] = message(d, r, request, state, reason)
+                import transport
+                if session_router.managed_delivery_supported(r['thread_id']):
+                    request['delivery'] = transport.prepare_managed(r['thread_id'], request['message'],
+                        canonical_id=request['id'], phase='recovery', task_id=str(d),
+                        contract_hash=r['contract_hash'], generation=gen, project=state['repo'],
+                        source=r['source'], home_dir=r['codex_home'], expires_at=request['expires_at'])
                 r['requests'].append(request)
                 finish('dispatching')  # Durable BEFORE sending, including crash windows.
-                if not r['rollout']:
-                    import session_router
+                if request.get('delivery'):
+                    request['delivery'] = transport.dispatch_managed(request['delivery'],
+                        home_dir=r['codex_home'], cwd=state['repo'])
+                    request.update({k: request['delivery'][k] for k in ('state', 'message_id')})
+                else:
                     try:
-                        result = session_router.send(r['thread_id'], request['message'])
-                        request.update(state={'delivered': 'queued', 'failed': 'send_failed',
-                                              'delivery_unknown': 'delivery_unknown'}[result.state],
-                                       message_id=result.external_id)
+                        result = session_router.send(r['thread_id'], request['message'],
+                            home_dir=r['codex_home'], cwd=state['repo'])
+                        request.update(session_router.delivery_fields(result))
                     except Exception:
                         request['state'] = 'delivery_unknown'
-                    return finish(request['state'], request['state'] == 'queued')
-                try:
-                    import codex_legacy
-                    result, receipt_id = codex_legacy.queue(r['codex_home'], r['thread_id'],
-                                                            request['message'], cwd=state['repo'])
-                    request['receipt'] = (result.stdout + result.stderr)[-4000:]
-                    if receipt_id:
-                        request.update(state='queued', message_id=receipt_id)
-                    else:
-                        request['state'] = 'delivery_unknown'
-                except subprocess.TimeoutExpired:
-                    request['state'] = 'delivery_unknown'
-                except OSError as exc:
-                    request.update(state='send_failed', receipt=str(exc))
                 return finish(request['state'], request['state'] == 'queued')
         except BlockingIOError:
             return finish('repository_busy', True)

@@ -16,3 +16,10 @@ dist/
 auth.json
 models.json
 node_modules/
+
+.ato/
+.pi/
+operator-evidence/
+*.pem
+*.key
+node_modules

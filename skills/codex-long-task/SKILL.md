@@ -5,7 +5,7 @@ description: 自动识别需要多阶段实现、依赖调度、持续验证或�
 
 # Codex 长任务执行
 
-本机入口 `~/.local/bin/ctask`。完整计划格式与命令见 `CTASK_SOURCE/README.md`，首次创建计划前读取；安装时替换为选定的候选源码路径。
+本机入口 `~/.local/bin/ctask`。完整计划格式与命令见 `CTASK_SOURCE/README.md`，首次创建计划前读取。
 
 ## 完整目标与阶段边界
 
@@ -27,7 +27,7 @@ description: 自动识别需要多阶段实现、依赖调度、持续验证或�
 
 - 用户指定Claude Code或Pi执行时先 `ctask agent-doctor` 检查安装/认证，新plan/contract显式设置 `agent.kind=claude|pi`，模型放 `agent.model`。默认仍Codex，不改既有固化任务。接口与限制见执行器README的“CLI 执行端”。
 - 第一版第三方只承担受限文件工具worker和只读planner，构建测试由宿主原checks执行；不擅自开放shell/MCP/子agent。外部worker要求macOS sandbox-exec，不可用时报告阻塞。
-- 内置Claude/Pi适配器目前只支持受限worker/planner，不提供原生origin、hub、接管或会话创建；第三方worker的session_id只是元数据。可信代码显式注册且能核实身份、工程、权限与投递能力的适配器可使用版本化 `session-register` 引用；这不意味着任意现有会话可注入，也不自动创建会话或扩大权限。未知能力在副作用前拒绝，发送结果未知不自动重发。详见候选仓库 `docs/agent-abstraction.md` 和 `docs/agent-adapter-guide.md`。
+- origin/hub仍是已核实Codex会话；第三方session_id仅作本次调用元数据，不能覆盖origin。恢复从完整合约、当前文件和前次反馈重启CLI，不声称接续其原生聊天历史或管理已有第三方交互窗口。
 - 安装、fixture协议测试、真实CLI本地模拟端点与云端认证调用分别报告。缺登录/key先完成可验证工作，再让用户在本机原生CLI登录/配置，凭据不进入任务记录/共享记忆。
 
 ## 自动判断执行方式
@@ -47,7 +47,7 @@ description: 自动识别需要多阶段实现、依赖调度、持续验证或�
 
 1. 保留用户已确认的目标、边界和默认项。需求尚有关键缺口时使用 grill-me；已确认事项不要重复访谈。
 2. 在目标工程按现有文档约定整理需求、验收和任务依赖。每个任务用明确 prompt、depends_on 和实际有效的 checks（argv 数组）。模型负责提出相关异常验收，不能用空检查或永远成功的命令冒充验证。外部服务、网络、SSH 和写入路径应按实际 worker 环境核对；当前窗口可访问不代表 worker 沙箱也可访问。无法提前核验的条件作为明确前置检查，不反复重试已知环境阻塞。
-3. 使用已经授权的计划直接推进。默认仅本地修改与验证，不自动提交、推送、部署或发消息。说明估时和当前时长策略，不因常规参数反复请求确认。
+3. 使用已经授权的计划直接推进。按当前任务目标和已有授权完成必要的验证、Git 提交、推送或 PR 操作，不再以“默认仅本地修改、不自动提交推送”为由重复请求确认；具体任务要求仅本地交付时遵从。部署和发送消息仍按各自任务授权处理。说明估时和当前时长策略，不因常规参数反复请求确认。
 4. 总任务执行 `ctask workflow-validate CONTRACT`、`ctask workflow-create --repo REPO --plan CONTRACT`；已核实原会话 UUID 时加 `--origin-thread UUID`。记录返回的 WORKFLOW_DIR，按 [原会话关联与跨窗口续办](references/cross-session.md) 补充紧凑交接，再用 `ctask start WORKFLOW_DIR` 启动。单独阶段才使用 `validate/create`；无法确定会话 ID 时记录缺失，不因此阻止已明确授权的任务。
 5. 检查 `ctask status RUN_DIR` 和 worker.log，确认状态已进入 running 或完成；只得到 launching/PID 不能保证启动成功。不要在同一工作区另起修改代码的进程。
 6. 向用户报告运行目录、当前状态和查询/停止方式。后台任务启动后可以结束当前回复；不要声称尚未验收的任务完成。机器休眠/关机期间不运行，没有开机自启。
@@ -76,7 +76,7 @@ description: 自动识别需要多阶段实现、依赖调度、持续验证或�
 
 - 用户要求持续集中管理、或处理 `ctask-followup` / `ctask-origin-reply` 时，读取 [主控持续跟进](references/controller.md)。使用独立controller持久化跟进“已通知/已说明/已答复/原会话接收/实际恢复/结果已报告”，不依赖对话记忆；查询不算已说明，轮次结束不算整体完成。controller不扩大业务supervisor额度或原权限。
 
-- 用户要求集中到指定会话交互时，核实该会话 ID 后使用 `ctask hub --thread UUID --source "用户指令来源"` 设定旧 Codex 入口；可信适配器实际提供已验证引用时可使用 `--session-ref REF`。保持各任务的 origin 不变。复制记忆/迁移包不复制会话绑定。
+- 用户要求集中到指定会话交互时，核实该会话 ID 后使用 `ctask hub --thread UUID --source "用户指令来源"` 设定本机入口；保持各任务的 origin 不变。复制记忆/迁移包不复制会话绑定。
 - 执行会话需要用户决定、授权、凭据说明或人工验收时先查 `ctask hub`。已配置时用 `ctask ask WORKFLOW_DIR --question "具体问题" --recommendation "推荐与原因" --context "必要背景"`，不要求用户切回执行会话。`takeover --state needs_input --note "问题" --recommendation "建议"` 会自动路由；路由失败查看返回结果，用同 request 重试登记，不重复接管或假称已通知。
 - 统一入口收到 `[ctask-question]` 后用 `ctask inbox` 核实未过期，标明任务、问题和建议再向用户提问；不代答或并行修改业务代码。收到实际答复后用 `ctask answer QUESTION_ID --answer "实际答复" --source "用户答复来源"`；多个问题映射不清时先澄清，不能把一般的“好”扩大为批准全部任务。
 - 原会话收到 `[ctask-user-answer]` 后先 `ctask accept-answer QUESTION_ID`；拒绝意味着已处理/已停止/合约或问题已变化，不执行迟到动作。核对用户答复与原授权后继续处理，解决输入后恢复同一总任务并核实真实运行；不要对已关闭的 needs_input 接管请求重复 working，不重置预算、不从转发消息推导额外权限。

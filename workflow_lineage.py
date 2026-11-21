@@ -5,6 +5,7 @@ import subprocess
 
 import interaction
 import recovery
+import session_router
 import runner as core
 
 
@@ -49,9 +50,7 @@ def _validate(predecessor, successor, proof, source, check_actor):
         raise ValueError('a current verified hub is required')
     interaction.verify_target(hub['thread_id'])
     if check_actor:
-        import codex_legacy
-        import session_router
-        actor = session_router.current() or codex_legacy.current()
+        actor = session_router.current_actor_locator()
         if actor not in (origin, hub['thread_id']):
             raise ValueError('link requires the bound origin or current hub')
     if old == new or Path(os['repo']).resolve() != Path(ns['repo']).resolve() or origin != new_origin:
@@ -135,6 +134,10 @@ def link(predecessor, successor, evidence, source):
 
 def delivery(directory, state):
     d = Path(directory).resolve()
+    import workflow_closure
+    closure = workflow_closure.projection(d, state)
+    if closure is not None:
+        return closure
     result = dict(raw_status=state['status'], effective_status=state['status'], successor=None,
                   validation='unlinked', historical=dict(stop=(d/'STOP').exists()))
     path = d/'workflow-lineage.json'

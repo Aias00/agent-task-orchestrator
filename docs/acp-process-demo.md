@@ -1,15 +1,13 @@
 # Reproducing the offline ACP timeline
 
 The retained demo is a real foreground run in a separate scratch Git repository,
-created through the source runner and its trusted offline fixture bootstrap.
+created through the candidate runner and its trusted offline fixture bootstrap.
 It launches a local ACP subprocess, writes a fixture file, runs an independent
 host command, and saves the resulting run and trace. It does not contact a
 provider or modify the assigned task's scheduler-owned directory.
 
-First create a new demo with `python scripts/create_acp_process_demo.py` using the
-SDK interpreter. Generated runs are private local artifacts, not Git files.
-The run path is then recorded relative to this repository in
-`build/acp-process/demo.json`. From the checkout root, print its public
+The run path is recorded relative to this repository in
+`build/acp-process/demo.json`. From the candidate root, print its public
 timeline with:
 
 ```sh
@@ -24,7 +22,7 @@ events and `tool_call_count: 1`. The trace is metadata, not the model's body or
 an authorization to execute anything. `scripts/create_acp_process_demo.py`
 creates a new demo only when `build/acp-process/demo-repo` does not exist; it
 refuses to overwrite the retained run. Use the Python ACP SDK interpreter to
-run it. To make a fresh copy, choose a clean checkout rather than
+run it. To make a fresh copy, choose a clean candidate workspace rather than
 deleting the retained evidence.
 
 The failure fixture separately feeds the immutable recorded Pi native auth

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import uuid
 import agent_registry as registry
+from codex_session_adapter import CodexSessionAdapter
 
 KINDS = ('codex', 'claude', 'pi')
 MANAGED = Path.home()/'.local/share/ctask-agent-clis/node_modules/.bin'
@@ -37,6 +38,12 @@ def doctor():
     rows = []
     for kind in KINDS:
         row = dict(kind=kind, installed=False, authentication='not checked; version is not proof of authentication')
+        capabilities = registry.get(kind).capabilities
+        row['capabilities'] = sorted(capabilities)
+        row['native_resume'] = 'supported' if 'native_resume' in capabilities else 'unsupported'
+        row['session_capabilities'] = {entry.name: entry.state.value
+            for entry in registry.session_capabilities(kind).entries}
+        row['readiness'] = 'unknown; installation and authentication are separate checks'
         try:
             binary = executable(kind)
             result = subprocess.run([binary, '--version'], capture_output=True, text=True, timeout=15)
@@ -76,9 +83,10 @@ def command(plan, directory, label, schema, output, sandbox=None):
     return registry.get(kind, 'planner' if request.planner else 'worker').command(request)
 
 
-class _CodexAdapter:
+class _CodexAdapter(CodexSessionAdapter):
     kind = 'codex'
-    capabilities = frozenset({'worker', 'planner', 'legacy_model', 'explicit_permissions', 'session_create', 'progress'})
+    capabilities = (frozenset({'worker', 'planner', 'legacy_model', 'explicit_permissions', 'progress'})
+                    | CodexSessionAdapter.session_capabilities)
 
     def progress_path(self, directory, label, log):
         return log
@@ -86,10 +94,6 @@ class _CodexAdapter:
     def normalize_progress(self, row):
         import agent_native_events
         return agent_native_events.codex(row)
-
-    def create_session(self, repo, contract, name, identifier, persist):
-        import codex_legacy
-        return codex_legacy.create_session(repo, contract, name, identifier, persist)
 
     def command(self, request):
         import permissions
@@ -116,6 +120,11 @@ class _FileWorkerAdapter:
 
     def __init__(self, kind):
         self.kind = kind
+        reason = f'{kind} adapter implements bounded worker/planner execution only'
+        self.session_capabilities_v2 = {
+            name: {'state': 'unsupported', 'evidence': reason}
+            for name in registry.SESSION_CAPABILITY_NAMES
+        }
 
     def command(self, request):
         argv = [sys.executable, str(Path(__file__).resolve()), '_invoke', '--kind', self.kind,
@@ -137,6 +146,10 @@ class _PiACPAdapter:
     """Explicit opt-in profile; no plan-controlled executable or environment."""
     kind = 'acp_pi'
     capabilities = frozenset({'worker', 'planner', 'acp_process'})
+    session_capabilities_v2 = {
+        name: {'state': 'unsupported', 'evidence': 'ACP profile is a bounded worker, not a managed coordinator session'}
+        for name in registry.SESSION_CAPABILITY_NAMES
+    }
 
     def command(self, request):
         argv = [sys.executable, str(Path(__file__).with_name('pi_acp_worker.py')),
@@ -150,6 +163,16 @@ class _PiACPAdapter:
 
 
 registry.register(_PiACPAdapter())
+
+# The ACP worker is deliberately distinct from this foreground coordinator.
+# Importing/registering it starts no CLI, socket, provider or background job.
+from pi_session_coordinator import PiSessionAdapter
+registry.register(PiSessionAdapter())
+
+# Passive human/origin CLI endpoints use the same router and durable mailbox.
+# Registration performs no I/O and provisions no identities or credentials.
+from local_session_adapter import LocalCLIAdapter
+registry.register(LocalCLIAdapter())
 
 
 def validate_result(result, schema):

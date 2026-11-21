@@ -37,7 +37,7 @@ for line in sys.stdin:
         if 'fixture-native-error' in text or ('fixture-success-then-error' in text and admission > 1):
             # Replay the actual Pi error/end_turn pair; neither the source nor its
             # evidence is modified, and the fixture never contacts a provider.
-            replay = Path(__file__).with_name('pi-error-end-turn.json')
+            replay = Path(__file__).parent/'pi-error-end-turn.json'
             record = json.loads(replay.read_bytes())
             reason = record['actual_native_first_stop_reason']
             assert record['raw_acp_first_stop_reason'] == 'end_turn'

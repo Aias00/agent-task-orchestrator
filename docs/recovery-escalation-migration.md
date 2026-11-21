@@ -1,36 +1,9 @@
-# Runtime cutover and rollback
+# Migration and rollback (not performed)
 
-Source publication does not install, restart or migrate a running task service.
-An operator needs the user's explicit installation/cutover authority for the
-exact target and must validate the selected revision before activation.
+The candidate is source only. Before any later authorized cutover, independently run all four frozen host categories against the exact pinned candidate and examine the results; verify the live runtime, current configuration, active owners, ACP SDK interpreter and local paths. Do not infer approval to deploy from successful tests.
 
-Use a durable versioned source directory. Run the full isolated tests and inspect
-current launcher, controller identity/heartbeat, live workers, pending questions,
-ambiguous outboxes, STOP and config. Preserve the previous runtime/interpreter,
-launcher, Codex ingress guard and canonical data. Stop only the approved controller
-through `control stop` and verify exit before changing entries or starting its
-replacement. Existing immutable workers may finish on their previous runtime;
-do not kill them or rewrite their contracts as a deployment shortcut.
+Create a new versioned directory by copying the exact candidate sources and checking every manifest SHA-256, including ACP bridge/adapter files and installed SDK environment references. Preserve the current versioned ACP runtime directory, launcher, controller configuration, hub policy and project mutes. Stop the existing controller only after recording its PID/configuration and confirming a safe idle cutover; do not stop workers, alter workflow/task files, or change STOP, counters, windows, contracts, or sessions. Switch only the explicitly authorized versioned launcher/controller to the verified copy, keeping the current ACP SDK interpreter and local adapter paths. Verify default Codex/Pi routes, opt-in ACP, controller identity, quiet policy and existing state before enabling further observation. Do not run the candidate's fixtures against real workflow homes.
 
-The optional `hub_queue_gate.py` is a template, not an automatically installed
-Codex wrapper. Its source default references this checkout and the user's native
-Codex package. Before explicitly installing a copy, pin `RUNTIME` to the durable
-approved runtime and verify `NATIVE`. Keep the wrapper's interpreter compatible.
-Both ingress and controller must load the same validation revision, including
-controller-escalation evidence checks. Verify canonical pending questions,
-changed-evidence rejection, ordinary commands, quiet status suppression and
-project mutes without contacting real recipients.
+The existing Codex ingress guard loads its configured old runtime and admits only pending canonical `[ctask-question id=question-…]` records from the bound origin or hub. This candidate uses that existing envelope and does not add a new ingress exception or edit installed wrappers. The older guard validates its own older schema and cannot enforce the new evidence hash rule; the candidate validates evidence again when processing the question. Consequently a later deployment must explicitly assess this version skew and the window between ingress and candidate validation; do not claim the old guard enforces the new evidence checks. Project mute and notification policy still apply. An ACP session reference uses its registered adapter; if origin activity cannot be independently established the operational handoff remains pending rather than guessing.
 
-Atomically replace only approved launchers, then start one controller with the
-original hub/reminder/mute/time settings. Check actual command identity, advancing
-heartbeat, source hashes, old status readability and ACP trace behavior. Preserve
-all task state, attempts, failure logs, recovery windows and pending/unknown sends.
-An observation-only workflow-link may register a genuinely completed successor;
-it never clears the predecessor's STOP or changes its raw completion state.
-
-Rollback switches approved entries/controller back to the exact retained runtime.
-Do not restore an old SQLite/inbox/outbox snapshot over newer receipts. Reconcile
-new-format pending questions before running an older validator; do not replay
-unknown delivery or silently weaken evidence guards. Retain source, receipts and
-lineage history. The local verified rollout and this source release have separate
-validation scopes, summarized in [release validation](recovery-release.md).
+Rollback, if later authorized, stops only the candidate controller after confirming ownership, restores the previously recorded launcher and controller configuration pointing to the untouched ACP-live version, then verifies its PID, policy and adapter paths. Keep the candidate directory and immutable evidence for audit. Never delete or rewrite recovery ledgers, outbox receipts, lineage metadata, STOP files or real tasks as a rollback shortcut. The older runtime does not understand the added lineage projection or controller escalation evidence validation; existing canonical questions remain subject to its original guards. Reconcile any pending new-format questions and deliveries before switching rather than replaying them. No runtime, wrapper, launcher or controller has been changed by this candidate work.

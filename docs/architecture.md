@@ -116,7 +116,7 @@ watchdog 仅观察模型 worker；安静的构建/宿主验收不按模型停滞
 | 可复用实现、设计、测试、skill | 本仓库 | 是 |
 | workflow、阶段、合约、检查证据 | 目标工程 `.codex/tasks/` | 否，包含任务上下文 |
 | recovery 请求/额度/进程状态 | 对应 workflow 目录 | 否 |
-| hub、问题、答复 | `CODEX_HOME/ctask-interaction/` | 否，本机会话绑定 |
+| hub、问题、答复 | `ATO_HOME/ctask-interaction/`；未设置时回退 `CODEX_HOME` | 否，本机会话绑定 |
 | controller 事件/投影/outbox | 上述目录 `control/state.sqlite` | 否 |
 | 可复用长期知识 | 可选 Basic Memory `shared` | 单独管理，不提交正文 |
 | 模型账号与 key | 原生 CLI 配置/受信任环境 | 否 |

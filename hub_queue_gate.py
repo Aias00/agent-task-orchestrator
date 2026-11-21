@@ -86,7 +86,8 @@ def pending_user_question(text, target):
 
 
 def suppression(options):
-    folder = Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex')))/'ctask-interaction'
+    import ato_config
+    folder = ato_config.interaction_directory()
     hub_path = folder/'hub.json'; policy_path = folder/'notification-policy.json'
     if not hub_path.exists() or not policy_path.exists():
         return None
@@ -97,7 +98,32 @@ def suppression(options):
         return None
     if pending_user_question(options['--message'], hub['thread_id']):
         return None
+    if pending_failure_notice(options['--message'], hub['thread_id']):
+        return None
     return dict(folder=folder, hub=hub['thread_id'], source=policy.get('source'))
+
+
+def pending_failure_notice(text, target):
+    match = re.match(r'^\[ctask-followup id=(failure-[0-9a-f]{20}) reminder=0\](?:\n|$)', text)
+    if not match:
+        return False
+    sys.path.insert(0, RUNTIME)
+    import control
+    import failure_attention
+    import notifications
+    try:
+        with control.database() as con:
+            found = con.execute('select body from actions where id=?', (match[1],)).fetchone()
+            sent = con.execute('select body from outbox where key=?', ('followup:'+match[1]+':0',)).fetchone()
+        if not found or not sent:
+            return False
+        action, claim = json.loads(found[0]), json.loads(sent[0])
+        return (action['hub'] == target and os.environ.get('CODEX_THREAD_ID') in (action['origin'], target)
+                and not notifications.project_suppression(action) and failure_attention.pending(action)
+                and claim['state'] == 'dispatching' and claim['target'] == target
+                and claim.get('message_sha256') == hashlib.sha256(text.encode()).hexdigest())
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def record(options, rule):

@@ -18,8 +18,8 @@ import time
 import uuid
 
 
-SCHEMA_VERSION = 1
-TERMINAL = frozenset({'replied', 'completed', 'failed', 'expired', 'cancelled'})
+SCHEMA_VERSION = 2
+TERMINAL = frozenset({'replied', 'completed', 'turn_completed', 'failed', 'expired', 'cancelled'})
 
 
 class MailboxError(ValueError):
@@ -62,6 +62,20 @@ def _number(value, label):
     return value
 
 
+def _newer_generation(current, previous):
+    """Only supported durable generation formats can advance, never rewind."""
+    if previous is None:
+        return current is not None
+    if type(current) is int and type(previous) is int:
+        return current > previous >= 0
+    if (isinstance(current, list) and isinstance(previous, list)
+            and len(current) == len(previous) == 2
+            and type(current[1]) is int and type(previous[1]) is int):
+        return (current[1] >= previous[1] >= 0
+                and (current[0] or 0) >= (previous[0] or 0) and current != previous)
+    return False
+
+
 class MessageBus:
     """An explicit database path prevents accidental access to live hub data.
 
@@ -82,7 +96,7 @@ class MessageBus:
             os.close(descriptor)
         with closing(self._connect()) as con:
             version = con.execute('pragma user_version').fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise MailboxError('unsupported mailbox schema version: '+str(version))
             con.execute('pragma journal_mode=WAL')
             con.executescript('''
@@ -130,8 +144,31 @@ class MessageBus:
                     endpoint_id text not null, receipt_id text not null, body text not null,
                     primary key(endpoint_id,receipt_id),
                     foreign key(endpoint_id,receipt_id) references receipts(endpoint_id,receipt_id));
+                create table if not exists execution_leases(
+                    resource text primary key, project text not null, task_id text not null,
+                    contract_hash text not null, generation text not null, role text not null,
+                    owner text not null, token_hash text, fence integer not null,
+                    lease_until real not null, state text not null, source text not null);
             ''')
+            # Additive migration: old rows retain v1 semantics and exact IDs.
+            # BEGIN IMMEDIATE also makes concurrent first-open migrations safe.
+            con.execute('begin immediate')
+            for table, columns in {
+                'endpoints': {'generation': 'integer not null default 0'},
+                'bindings': {'generation': "text not null default 'null'",
+                             'route_generation': 'integer not null default 0'},
+                'messages': {'protocol': 'integer not null default 1',
+                    'generation': "text not null default 'null'",
+                    'route_generation': 'integer not null default 0',
+                    'endpoint_generation': 'integer', 'turn_id': 'text',
+                    'canonical_id': 'text', 'authority_source': 'text'},
+            }.items():
+                present = {r[1] for r in con.execute('pragma table_info('+table+')')}
+                for name, definition in columns.items():
+                    if name not in present:
+                        con.execute('alter table '+table+' add column '+name+' '+definition)
             con.execute('pragma user_version='+str(SCHEMA_VERSION))
+            con.commit()
 
     def _connect(self):
         con = sqlite3.connect(self.path, timeout=20, isolation_level=None)
@@ -202,11 +239,21 @@ class MessageBus:
             ep = self._endpoint(con, endpoint_id)
         return {k: v for k, v in ep.items() if k not in ('token_hash', 'owner_token')}
 
-    def bind_route(self, *, sender, target, task_id, contract_hash, source, cross_project=False):
+    def authenticate(self, credential):
+        """Validate a host-held credential without exposing its hash."""
+        with self._transaction() as con:
+            self._authenticate(con, credential)
+        return self.endpoint(credential.endpoint_id)
+
+    def bind_route(self, *, sender, target, task_id, contract_hash, source, cross_project=False,
+                   generation=None, route_generation=0, advance=False):
         """Trusted host API: explicit routing permission, never business/budget permission."""
         for value, label in [(task_id, 'task_id'), (contract_hash, 'contract_hash'), (source, 'source')]:
             _text(value, label)
         now = self.clock()
+        generation = _json(generation)
+        if type(route_generation) is not int or route_generation < 0:
+            raise MailboxError('invalid route generation')
         with self._transaction() as con:
             a, b = self._endpoint(con, sender), self._endpoint(con, target)
             if a['state'] != 'active' or b['state'] != 'active':
@@ -216,12 +263,24 @@ class MessageBus:
             old = con.execute('''select * from bindings where sender=? and target=? and
                 task_id=? and contract_hash=?''', (sender, target, task_id, contract_hash)).fetchone()
             if old:
-                if old['state'] != 'active' or old['source'] != source:
+                if (advance and old['state'] == 'active' and old['source'] == source
+                        and old['generation'] != generation
+                        and _newer_generation(json.loads(generation), json.loads(old['generation']))):
+                    con.execute('''update bindings set generation=?,route_generation=route_generation+1,
+                        updated_at=? where id=?''', (generation, now, old['id']))
+                    self._event(con, 'route_generation_advanced', binding_id=old['id'], source=source)
+                    self._recover(con)
+                    return dict(con.execute('select * from bindings where id=?', (old['id'],)).fetchone())
+                if (old['state'] != 'active' or old['source'] != source
+                        or old['generation'] != generation
+                        or not advance and old['route_generation'] != route_generation):
                     raise ConflictError('existing route cannot be rebound or reauthorized implicitly')
                 return dict(old)
             identifier = 'route-'+uuid.uuid4().hex
-            con.execute('insert into bindings values(?,?,?,?,?,?,?, ?,?)',
-                        (identifier, sender, target, task_id, contract_hash, source, 'active', now, now))
+            con.execute('''insert into bindings(id,sender,target,task_id,contract_hash,source,state,
+                created_at,updated_at,generation,route_generation) values(?,?,?,?,?,?,?,?,?,?,?)''',
+                        (identifier, sender, target, task_id, contract_hash, source, 'active', now, now,
+                         generation, route_generation))
             self._event(con, 'route_bound', binding_id=identifier, source=source,
                         sender=sender, target=target, cross_project=a['project'] != b['project'])
             return dict(con.execute('select * from bindings where id=?', (identifier,)).fetchone())
@@ -235,7 +294,32 @@ class MessageBus:
     def _valid(self, con, message):
         binding = self._binding(con, message['binding_id'])
         return (binding['state'] == 'active'
+                and (message.get('protocol', 1) == 1 or
+                     (message['generation'] == binding['generation']
+                      and message['route_generation'] == binding['route_generation']))
                 and all(self._endpoint(con, message[k])['state'] == 'active' for k in ('sender', 'target')))
+
+    def advance_route(self, binding_id, *, generation, source):
+        """Trusted host fencing after an independently verified execution advance.
+
+        STOP/supersession is irreversible for this route. A generation change
+        cancels old envelopes and preserves possible native effects as busy.
+        """
+        _text(source, 'source')
+        encoded = _json(generation)
+        if generation is None:
+            raise MailboxError('concrete generation required')
+        with self._transaction() as con:
+            binding = self._binding(con, binding_id)
+            if binding['state'] != 'active':
+                raise ConflictError('inactive routes cannot advance')
+            if binding['generation'] != encoded:
+                if not _newer_generation(generation, json.loads(binding['generation'])):
+                    raise ConflictError('execution generation cannot rewind')
+                con.execute('''update bindings set generation=?,route_generation=route_generation+1,
+                    updated_at=? where id=?''', (encoded, self.clock(), binding_id))
+                self._event(con, 'route_generation_advanced', binding_id=binding_id, source=source)
+                self._recover(con)
 
     def set_binding_state(self, binding_id, state, *, source):
         if state not in ('paused', 'stopped', 'superseded'):
@@ -271,7 +355,7 @@ class MessageBus:
             if ep['owner_token'] and ep['owner_until'] > self.clock():
                 raise ConflictError('endpoint is already owned')
             token = secrets.token_urlsafe(24)
-            con.execute('update endpoints set owner=?,owner_token=?,owner_until=? where id=?',
+            con.execute('update endpoints set owner=?,owner_token=?,owner_until=?,generation=generation+1 where id=?',
                         (owner, token, self.clock()+lease_seconds, ep['id']))
             self._event(con, 'owner_acquired', endpoint=ep['id'], owner=owner)
             return token
@@ -318,7 +402,8 @@ class MessageBus:
             return self._message(con, identifier)
 
     def _enqueue(self, con, credential, *, binding_id, target, kind, body, idempotency_key,
-                 task_id, contract_hash, correlation_id=None, reply_to=None, expires_at=None):
+                 task_id, contract_hash, correlation_id=None, reply_to=None, expires_at=None,
+                 protocol=1, generation=None, canonical_id=None, authority_source=None):
         ep = self._authenticate(con, credential)
         for value, label in [(target, 'target'), (kind, 'kind'), (idempotency_key, 'idempotency_key')]:
             _text(value, label)
@@ -329,6 +414,13 @@ class MessageBus:
         if correlation_id is not None:
             _text(correlation_id, 'correlation_id')
         binding = self._binding(con, binding_id)
+        if protocol not in (1, 2):
+            raise MailboxError('unsupported message protocol')
+        if protocol == 2:
+            _text(canonical_id, 'canonical_id')
+            _text(authority_source, 'authority_source')
+            if generation is None or binding['generation'] != _json(generation):
+                raise IdentityError('execution generation does not match route')
         expected = (binding['sender'], binding['target'])
         if reply_to:
             parent = self._message(con, reply_to)
@@ -339,9 +431,13 @@ class MessageBus:
         if ((ep['id'], target) != expected or binding['task_id'] != task_id
                 or binding['contract_hash'] != contract_hash):
             raise IdentityError('sender, target, task or contract does not match the verified route')
-        fingerprint = _hash(_json(dict(binding_id=binding_id, sender=ep['id'], target=target, kind=kind,
+        contents = dict(binding_id=binding_id, sender=ep['id'], target=target, kind=kind,
             body=body, task_id=task_id, contract_hash=contract_hash, correlation_id=correlation_id,
-            reply_to=reply_to, expires_at=expires_at)))
+            reply_to=reply_to, expires_at=expires_at)
+        if protocol == 2:
+            contents.update(protocol=protocol, generation=generation, canonical_id=canonical_id,
+                            authority_source=authority_source)
+        fingerprint = _hash(_json(contents))
         old = con.execute('select id,fingerprint from messages where sender=? and idempotency_key=?',
                           (ep['id'], idempotency_key)).fetchone()
         if old:
@@ -361,15 +457,21 @@ class MessageBus:
                     (identifier, ep['id'], target, binding_id, kind, correlation_id or identifier, reply_to,
                      task_id, contract_hash, idempotency_key, fingerprint, now, now, expires_at))
         con.execute('insert into bodies values(?,?)', (identifier, body))
+        con.execute('''update messages set protocol=?,generation=?,route_generation=?,
+            canonical_id=?,authority_source=? where id=?''',
+            (protocol, _json(generation), binding['route_generation'], canonical_id, authority_source, identifier))
         self._event(con, 'enqueued', message=identifier, endpoint=ep['id'])
         return self._message(con, identifier)
 
     def enqueue(self, credential, *, binding_id, target, kind, body, idempotency_key,
-                task_id, contract_hash, correlation_id=None, expires_at=None):
+                task_id, contract_hash, correlation_id=None, expires_at=None, protocol=1,
+                generation=None, canonical_id=None, authority_source=None):
         with self._transaction() as con:
             return self._enqueue(con, credential, binding_id=binding_id, target=target, kind=kind,
                                  body=body, idempotency_key=idempotency_key, task_id=task_id,
-                                 contract_hash=contract_hash, correlation_id=correlation_id, expires_at=expires_at)
+                                 contract_hash=contract_hash, correlation_id=correlation_id, expires_at=expires_at,
+                                 protocol=protocol, generation=generation, canonical_id=canonical_id,
+                                 authority_source=authority_source)
 
     def _state(self, con, message, state, *, busy=None, **data):
         con.execute('update messages set state=?,updated_at=?,busy=? where id=?',
@@ -378,7 +480,8 @@ class MessageBus:
 
     def _recover(self, con):
         now = self.clock()
-        rows = con.execute('select * from messages where state not in (?,?,?,?,?)', tuple(TERMINAL)).fetchall()
+        rows = con.execute('select * from messages where state not in ('+
+                           ','.join('?' for _ in TERMINAL)+')', tuple(TERMINAL)).fetchall()
         for row in rows:
             message = dict(row)
             if not self._valid(con, message):
@@ -400,7 +503,7 @@ class MessageBus:
             self._recover(con)
             return con.execute('select count(*) from events where seq>?', (before,)).fetchone()[0]
 
-    def claim(self, credential, owner_token, *, lease_seconds=30):
+    def claim(self, credential, owner_token, *, lease_seconds=30, message_id=None):
         self._ttl(lease_seconds)
         with self._transaction() as con:
             self._recover(con)
@@ -411,6 +514,8 @@ class MessageBus:
                               (ep['id'],)).fetchone()
             if row is None:
                 return None
+            if message_id is not None and row['id'] != message_id:
+                return None  # A specific caller cannot bypass endpoint FIFO.
             token = secrets.token_urlsafe(24)
             con.execute("""update messages set state='claimed',busy=1,claim_token=?,claim_until=?,
                 claim_owner=?,updated_at=? where id=?""",
@@ -429,7 +534,8 @@ class MessageBus:
                     or (message['expires_at'] is not None and message['expires_at'] <= self.clock())):
                 raise ConflictError('claim lost, expired or invalidated before send')
             attempt = 'attempt-'+uuid.uuid4().hex
-            con.execute('update messages set attempt_id=?,external_possible=1 where id=?', (attempt, message_id))
+            con.execute('''update messages set attempt_id=?,external_possible=1,endpoint_generation=?
+                where id=?''', (attempt, ep['generation'], message_id))
             self._state(con, message, 'dispatching')
             return self._message(con, message_id)
 
@@ -450,14 +556,20 @@ class MessageBus:
             # Keep native receipt identity even when acceptance or cancellation
             # won the race; recording evidence must not regress message state.
             con.execute('update messages set external_id=? where id=?', (external_id, message_id))
-            if message['state'] in ('dispatching', 'delivery_unknown'):
+            ep = self._endpoint(con, message['target'])
+            current = (message['protocol'] == 1 or (ep['generation'] == message['endpoint_generation']
+                and ep['owner_token'] == message['claim_owner'] and ep['owner_until'] > self.clock()
+                and message['claim_until'] > self.clock()))
+            if not current:
+                self._event(con, 'fenced_dispatch_receipt', message=message_id, attempt_id=attempt_id)
+            if current and message['state'] in ('dispatching', 'delivery_unknown'):
                 if state == 'failed':
                     con.execute('update messages set external_possible=0 where id=?', (message_id,))
                 self._state(con, message, state, busy=state != 'failed')
             return self._message(con, message_id)
 
     def queued_natively(self, credential, message_id):
-        """Codex's durable native queue owns subsequent turn serialization.
+        """A code-owned adapter capability delegates native turn serialization.
 
         Release the enqueue slot after the queue subprocess is reaped. An
         unknown receipt still forbids replay of this envelope; distinct enqueue
@@ -466,10 +578,23 @@ class MessageBus:
         Stream/RPC adapters retain their slot until a correlated turn finishes.
         """
         with self._transaction() as con:
-            message = self._receiver(con, credential, message_id)
             ep = self._authenticate(con, credential)
-            if ep['kind'] != 'codex' or message['state'] not in ('delivered', 'delivery_unknown'):
-                raise ConflictError('finished Codex enqueue attempt required')
+            message = self._message(con, message_id)
+            if message['target'] != ep['id']:
+                raise IdentityError('native queue release belongs to a different endpoint')
+            import agents
+            import agent_registry
+            try:
+                agent_registry.get(ep['kind'], 'native_queue_serialization')
+            except ValueError:
+                raise ConflictError('adapter has no verified native queue serialization') from None
+            if message['state'] not in ('delivered', 'delivery_unknown'):
+                raise ConflictError('finished native enqueue attempt required')
+            if message['protocol'] == 2 and (message['endpoint_generation'] != ep['generation']
+                    or message['claim_owner'] != ep['owner_token'] or ep['owner_until'] <= self.clock()):
+                raise ConflictError('native queue release ownership fenced')
+            if not message['busy']:
+                return  # Repeated release is not a second native receipt.
             con.execute('update messages set busy=0 where id=?', (message_id,))
             self._event(con, 'native_queue_slot_released', message=message_id, endpoint=ep['id'],
                         receipt_known=message['state'] == 'delivered')
@@ -513,7 +638,144 @@ class MessageBus:
         message = self._message(con, identifier)
         if message['target'] != ep['id']:
             raise IdentityError('receipt belongs to a different endpoint')
+        if message['protocol'] != 1:
+            raise IdentityError('v2 message requires a fully correlated receiver event')
         return message
+
+    def receive_correlated(self, credential, *, message_id, receipt_id, kind, source,
+                           project, session_id, correlation_id, generation, route_generation,
+                           endpoint_generation, attempt_id, turn_id, text=''):
+        """Apply one authenticated native event atomically with every fence.
+
+        Receiver events are transport evidence only. They cannot approve a user
+        decision or settle workflow criteria. Old owner evidence remains in the
+        audit log and cannot free a quarantined execution slot.
+        """
+        if kind not in ('accepted', 'responded', 'reply', 'completed', 'turn_completed'):
+            raise MailboxError('unsupported correlated receiver event')
+        _text(source, 'source')
+        _text(turn_id, 'turn_id')
+        with self._transaction() as con:
+            self._recover(con)
+            ep = self._authenticate(con, credential)
+            message = self._message(con, message_id)
+            if (message['protocol'] != 2 or message['target'] != ep['id']
+                    or ep['session_id'] != session_id or ep['project'] != project
+                    or message['correlation_id'] != correlation_id
+                    or message['generation'] != _json(generation)
+                    or type(route_generation) is not int or message['route_generation'] != route_generation
+                    or type(endpoint_generation) is not int or message['endpoint_generation'] != endpoint_generation
+                    or not attempt_id or message['attempt_id'] != attempt_id
+                    or message['turn_id'] is not None and message['turn_id'] != turn_id):
+                raise IdentityError('receiver event identity, turn or generation mismatch')
+            fingerprint = _hash(_json([message_id, kind, source, project, session_id,
+                correlation_id, generation, route_generation, endpoint_generation, attempt_id, turn_id, text]))
+            # Fenced receipts still have stable deduplication and safe audit bodies.
+            fresh = self._receipt(con, message, receipt_id, kind, fingerprint, body=text)
+            if not fresh:
+                return self._message(con, message_id)
+            self._event(con, 'native_event', message=message_id, endpoint=ep['id'],
+                source=source, session_id=session_id, project=project, correlation_id=correlation_id,
+                generation=generation, route_generation=route_generation,
+                endpoint_generation=endpoint_generation, attempt_id=attempt_id, turn_id=turn_id,
+                event_kind=kind, receipt_id=receipt_id)
+            if (message['state'] in TERMINAL or not self._valid(con, message)
+                    or ep['generation'] != endpoint_generation or not ep['owner_token']
+                    or ep['owner_token'] != message['claim_owner'] or ep['owner_until'] <= self.clock()):
+                self._event(con, 'fenced_receiver_event', message=message_id, receipt_id=receipt_id)
+                con.execute('update receipts set late=1 where endpoint_id=? and receipt_id=?',
+                            (ep['id'], receipt_id))
+                return self._message(con, message_id)
+            if kind == 'accepted':
+                if message['state'] not in ('dispatching', 'delivered', 'delivery_unknown', 'accepted', 'responded'):
+                    raise ConflictError('acceptance requires dispatched message')
+                if message['turn_id'] is None:
+                    con.execute('update messages set turn_id=?,accepted_at=? where id=?',
+                                (turn_id, self.clock(), message_id))
+                if message['state'] != 'responded':
+                    self._state(con, message, 'accepted')
+            else:
+                if message['state'] not in ('accepted', 'responded') or message['turn_id'] is None:
+                    raise ConflictError('event requires acceptance of the exact native turn')
+                done = kind in ('completed', 'turn_completed')
+                self._state(con, message, 'turn_completed' if done else 'responded', busy=not done)
+            return self._message(con, message_id)
+
+    def execution_lease(self, resource):
+        with self._transaction() as con:
+            row = con.execute('select * from execution_leases where resource=?', (resource,)).fetchone()
+            return {k: v for k, v in dict(row).items() if k != 'token_hash'} if row else None
+
+    def acquire_execution(self, resource, *, project, task_id, contract_hash, generation,
+                          role, owner, source, lease_seconds=30):
+        """Host-only lease; caller must hold the existing repository flock.
+
+        An expired lease alone never permits running past a held repository
+        lock. Tokens and increasing fences exclude old renew/release requests.
+        A session host owns transport lifecycle only, never workflow approval.
+        """
+        for value, label in ((resource, 'resource'), (owner, 'owner'), (source, 'source'),
+                             (task_id, 'task_id'), (contract_hash, 'contract_hash')):
+            _text(value, label)
+        if role not in ('origin', 'worker', 'session_host') or generation is None:
+            raise MailboxError('explicit execution role and generation required')
+        self._ttl(lease_seconds)
+        project = str(Path(project).resolve(strict=True))
+        token = secrets.token_urlsafe(32)
+        with self._transaction() as con:
+            old = con.execute('select * from execution_leases where resource=?', (resource,)).fetchone()
+            if old and old['state'] == 'active' and old['lease_until'] > self.clock():
+                raise ConflictError('execution resource is already owned')
+            if old and (old['project'] != project or (old['task_id'] == task_id
+                    and (old['contract_hash'] != contract_hash or old['generation'] != _json(generation)
+                         and not _newer_generation(generation, json.loads(old['generation']))))):
+                raise ConflictError('execution project, contract or generation cannot be replaced by stale work')
+            fence = old['fence']+1 if old else 1
+            con.execute('''insert into execution_leases values(?,?,?,?,?,?,?,?,?,?,?,?)
+                on conflict(resource) do update set project=excluded.project,task_id=excluded.task_id,
+                contract_hash=excluded.contract_hash,generation=excluded.generation,role=excluded.role,
+                owner=excluded.owner,token_hash=excluded.token_hash,fence=excluded.fence,
+                lease_until=excluded.lease_until,state=excluded.state,source=excluded.source''',
+                (resource, project, task_id, contract_hash, _json(generation), role, owner,
+                 _hash(token), fence, self.clock()+lease_seconds, 'active', source))
+            self._event(con, 'execution_acquired', resource=resource, role=role, owner=owner, fence=fence)
+        return token, fence
+
+    def renew_execution(self, resource, token, fence, *, generation, lease_seconds=30):
+        self._ttl(lease_seconds)
+        with self._transaction() as con:
+            self._execution_owner(con, resource, token, fence, generation)
+            con.execute('update execution_leases set lease_until=? where resource=?',
+                        (self.clock()+lease_seconds, resource))
+
+    def advance_execution(self, resource, token, fence, *, generation, next_generation):
+        """Fence a foreground owner's previous generation under the same flock.
+
+        This changes no task counters or grants. Old renew/release calls cannot
+        settle the newly started execution, even when they hold the old token.
+        """
+        if not _newer_generation(next_generation, generation):
+            raise ConflictError('execution generation must advance monotonically')
+        with self._transaction() as con:
+            self._execution_owner(con, resource, token, fence, generation)
+            con.execute('update execution_leases set generation=?,fence=? where resource=?',
+                        (_json(next_generation), fence+1, resource))
+            self._event(con, 'execution_advanced', resource=resource, fence=fence+1,
+                        generation=next_generation)
+        return fence+1
+
+    def _execution_owner(self, con, resource, token, fence, generation):
+        row = con.execute('select * from execution_leases where resource=?', (resource,)).fetchone()
+        if (not row or row['state'] != 'active' or row['fence'] != fence
+                or row['generation'] != _json(generation) or row['lease_until'] <= self.clock()
+                or not isinstance(token, str) or not hmac.compare_digest(row['token_hash'], _hash(token))):
+            raise ConflictError('execution lease lost or fenced')
+
+    def release_execution(self, resource, token, fence, *, generation):
+        with self._transaction() as con:
+            self._execution_owner(con, resource, token, fence, generation)
+            con.execute("update execution_leases set state='released',token_hash=null where resource=?", (resource,))
+            self._event(con, 'execution_released', resource=resource, fence=fence)
 
     def accept(self, credential, message_id, *, receipt_id):
         with self._transaction() as con:
@@ -591,6 +853,38 @@ class MessageBus:
             else:
                 con.execute('update messages set busy=0,updated_at=? where id=?', (self.clock(), message_id))
             self._event(con, 'reconciled', message=message_id, source=source, outcome=outcome)
+            return self._message(con, message_id)
+
+    def reconcile_correlated(self, credential, owner_token, message_id, *, source, outcome,
+                             generation, endpoint_generation):
+        """Current trusted host records verified native absence, without replay.
+
+        This is not a model event. The host must independently check its owned
+        native lifecycle, STOP and workflow authority before calling this API.
+        Even after reconciliation the original envelope is never queued again.
+        """
+        _text(source, 'source')
+        if outcome not in ('not_running', 'finished'):
+            raise MailboxError('native no-running-turn evidence required')
+        with self._transaction() as con:
+            self._recover(con)
+            ep = self._owner(con, credential, owner_token)
+            message = self._message(con, message_id)
+            binding = self._binding(con, message['binding_id'])
+            if (message['protocol'] != 2 or message['target'] != ep['id']
+                    or ep['generation'] != endpoint_generation or type(endpoint_generation) is not int
+                    or binding['generation'] != _json(generation)):
+                raise IdentityError('reconciliation endpoint or execution generation mismatch')
+            if message['state'] not in TERMINAL | {'delivery_unknown'}:
+                if (message['state'] not in ('delivered', 'accepted', 'responded')
+                        or message['claim_owner'] == owner_token):
+                    raise ConflictError('message is not quarantined from a lost owner')
+            if message['state'] not in TERMINAL:
+                self._state(con, message, 'turn_completed' if outcome == 'finished' else 'failed',
+                            busy=False, source=source, outcome=outcome)
+            else:
+                con.execute('update messages set busy=0 where id=?', (message_id,))
+            self._event(con, 'native_reconciled', message=message_id, endpoint=ep['id'], source=source, outcome=outcome)
             return self._message(con, message_id)
 
     def events(self, *, after=0, message_id=None):

@@ -1,34 +1,35 @@
-# Optional Pi ACP profile setup
+# ACP candidate staging and migration
 
-Core Codex/Claude/Pi routes keep their existing dependencies. `acp_pi` is an
-explicit opt-in worker profile; it does not enable another agent's coordinator
-or hub. Plans cannot supply commands, module paths or receipts.
+Nothing here installs a launcher, activates a runtime, migrates a task or
+changes a session binding. Existing Codex, Claude, Pi and legacy plans keep
+their adapter selections. Explicitly selecting `acp_pi` is required for a new
+candidate plan; deployment and any real provider run are separate decisions.
 
-Install isolated Python dependencies and the repository-local pinned adapter:
+The only Pi adapter source supported by this candidate is pi-acp 0.0.34, SHA256
+`324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2`, from
+the local validation package. `scripts/derive_pi_acp.py OUTPUT` verifies that
+hash before producing a new local adapter directory and dependency symlinks.
+It does not edit or activate the original. The patch replaces the hard-coded
+session-map directory with a required per-attempt directory; disables the
+upstream npm update probe; forwards a client
+turn nonce into the Pi session; observes native RPC assistant `message_end`
+stop reasons; emits a typed, correlated receipt after settling; and records
+native RPC prompt failure as a typed error. Native errors remain sticky. It
+does not parse public model text for errors or infer proof from a transcript.
 
-```sh
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements-acp.lock
-npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp
-.venv/bin/python scripts/run_tests.py
-```
+The bridge trusts receipt metadata only for a code-owned profile running this
+derived adapter. A generic third-party ACP server cannot be substituted as a
+trusted native evidence producer. Its ACP `end_turn`, tool output, model text,
+and old session records cannot prove a native result. Each attempt uses a new
+nonce and session; unknown delivery is never automatically replayed to obtain
+evidence. Native failure or missing proof prevents a successful checkpoint.
 
-`derive_pi_acp.py OUTPUT` verifies pi-acp 0.0.34 source SHA256
-`324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2`
-before deriving a copy, and resolves its nested or hoisted installed dependencies.
-It does not edit upstream code in node_modules or start Pi. The derived adapter
-uses an attempt-local state directory, disables npm update probing, carries the
-turn nonce and emits typed results from the actual native Pi RPC terminal stream.
-Native errors remain sticky; model text and ACP end_turn cannot prove success.
-
-The production profile remains deliberately host-pinned and macOS-only:
-`~/.local/bin/pi`, `~/.nvm/versions/node/v24.22.1/bin/node`, and
-`/usr/bin/sandbox-exec`. It was validated against Pi 1.5.2 on the original host;
-review these code-owned paths and the target configuration before use elsewhere.
-There is no arbitrary command override in a plan and no unsandboxed fallback.
-Native configuration is read-only; missing prerequisites fail closed. An offline
-fixture pass does not establish login, provider limits or model behavior.
-
-The redacted error/end_turn regression under tests/fixtures contains no native
-session IDs, credentials or raw provider logs. SDK import remains lazy, so merely
-using `ctask status` or a legacy route does not require installing ACP packages.
+The current pinned paths and Pi executable are local to this candidate and
+must be reviewed for another machine. The runtime uses the OS sandbox and the
+existing file-tool guard, with no unsandboxed fallback. The optional Python SDK
+must be installed in the invoking interpreter separately. The profile grants
+no write access to the native user configuration; configurations that require
+such writes fail rather than relaxing the boundary. Never copy credentials into
+the package or demo. Validate permissions and availability on the target host
+before any separately authorized activation. Offline fixture success does not
+prove authentication, model availability, or provider behavior.

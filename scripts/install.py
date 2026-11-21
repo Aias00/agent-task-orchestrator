@@ -12,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bin-dir', type=Path, default=Path.home()/'.local/bin')
     parser.add_argument('--skills-dir', type=Path, help='Optional Codex skills parent directory')
+    parser.add_argument('--helpers', action='store_true', help='Also install notification and compact-handoff readers; starts no services')
     parser.add_argument('--force', action='store_true', help='Replace an existing launcher or skill')
     args = parser.parse_args()
     if sys.version_info < (3, 12):
@@ -19,8 +20,22 @@ def main():
     root = Path(__file__).resolve().parents[1]
     launcher = args.bin_dir.expanduser().resolve()/'ctask'
     skill = args.skills_dir.expanduser().resolve()/'codex-long-task' if args.skills_dir else None
+    helpers = {}
+    if args.helpers:
+        helpers = {
+            launcher.with_name('ctask-notify'): (
+                'case "${1-}" in\n'
+                '  control|notification-policy|followups|presented) ;;\n'
+                '  *) echo "Usage: ctask-notify {control|notification-policy|followups|presented} ..." >&2; exit 2 ;;\n'
+                'esac\n'
+                'exec '+shlex.quote(sys.executable)+' '+shlex.quote(str(root/'runner.py'))+' "$@"\n'),
+            launcher.with_name('ato-read-handoff'): (
+                'exec '+shlex.quote(sys.executable)+' '+shlex.quote(str(root/'coordination.py'))+' "$@"\n'),
+        }
     if not args.force and (launcher.exists() or launcher.is_symlink() or (skill and skill.exists())):
         parser.error('target already exists; inspect it before explicitly using --force')
+    if not args.force and any(p.exists() or p.is_symlink() for p in helpers):
+        parser.error('helper already exists; inspect it before explicitly using --force')
     launcher.parent.mkdir(parents=True, exist_ok=True)
     temp = launcher.with_name('ctask.install-tmp-'+str(os.getpid()))
     try:
@@ -29,13 +44,22 @@ def main():
         os.replace(temp, launcher)
     finally:
         temp.unlink(missing_ok=True)
+    for path, body in helpers.items():
+        temp = path.with_name(path.name+'.install-tmp-'+str(os.getpid()))
+        try:
+            temp.write_text('#!/bin/sh\nset -eu\n'+body)
+            temp.chmod(0o755)
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
     if skill:
         skill.mkdir(parents=True, exist_ok=True)
         for p in (root/'skills/codex-long-task').rglob('*.md'):
             target = skill/p.relative_to(root/'skills/codex-long-task')
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(p.read_text().replace('CTASK_SOURCE', str(root)))
-    print(json.dumps(dict(launcher=str(launcher), source=str(root), skill=str(skill) if skill else None)))
+    print(json.dumps(dict(launcher=str(launcher), source=str(root), skill=str(skill) if skill else None,
+                         helpers=[str(p) for p in helpers])))
 
 
 if __name__ == '__main__':

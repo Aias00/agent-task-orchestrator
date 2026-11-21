@@ -60,6 +60,10 @@ async def invoke(command, directory, label, schema_path, output, prompt, *, envi
             self.progress_recorded = False
             self.native_result = None
         async def request_permission(self, **kwargs):
+            self.number += 1
+            task_trace.append(directory, 'approval', event_id=f'{label}:approval:{self.number}',
+                              task=task, attempt=attempt, session=self.session, turn=turn,
+                              source='acp', state='cancelled')
             return RequestPermissionResponse(outcome=DeniedOutcome(outcome='cancelled'))
 
         async def session_update(self, session_id, update, **kwargs):

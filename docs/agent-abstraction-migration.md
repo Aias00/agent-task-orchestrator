@@ -1,19 +1,9 @@
-# Agent abstraction compatibility and installation
+# Compatibility, staging and rollback
 
-Existing plans retain their chosen `agent.kind`, frozen contracts, legacy JSON
-layout, attempt/elapsed history and STOP semantics. Registered session references
-are explicit local bindings, not replacements for arbitrary native session IDs.
-A read-only query does not migrate records or prove another agent's identity.
+The candidate is inert. Legacy plans and contracts retain `agent.kind`/`model`, the `.codex/tasks` layout, existing contract hashes, attempt history and STOP semantics. Existing Codex `origin_thread_id`, `codex_home`, hub UUID and exact rollout references remain readable; a status read does not migrate or rewrite them. `origin_session_ref` is an explicit separate field for a newly created workflow and cannot coexist with a legacy origin thread. A verified reference must be registered on the same host before use; neither project paths, the latest session, worker output nor a copied history grants an identity.
 
-Run `python scripts/run_tests.py` after installing the optional test dependencies
-listed in the README. Tests create isolated temporary repositories and config
-homes. They do not prove provider authentication, model availability or native
-coordinator compatibility. The fixture adapter demonstrates an extension point;
-Claude/Pi coordinator and hub capabilities remain unavailable.
+For an offline review, copy only the files enumerated by `build/agent-abstraction/candidate.json` into an isolated staging checkout. Compare the manifest against the same external baseline and run `scripts/prepare_agent_candidate.py --check`; review the validation report and run the full inherited host suite with isolated temporary `ATO_HOME` and `CODEX_HOME` directories. Never point the tests at an actual hub, model account, provider or active workflow. Socket fixture failures inside restricted workers must be repeated on the authorized host, not bypassed by changing inherited assertions.
 
-Use a durable versioned checkout for an approved installation. Preserve the old
-launcher, controller configuration, unresolved receipts and all workflow data.
-Review live owner/process identities, STOP, queued/unknown delivery and pending
-answers before stopping only the authorized controller and replacing its entry.
-Starting from a new source checkout grants no new task permissions or recovery
-windows. See [runtime cutover](recovery-escalation-migration.md).
+Test opt-in using the explicit fixture bootstrap in the guide. In a future separately authorized staging environment, verify a real adapter's native identity and restrictions and register it in trusted code before selecting its kind. Configuration alone does not enable an unimplemented capability. Claude and Pi are still limited to their existing file-only workers and read-only planners; they do not currently manage native coordinator sessions. Codex legacy paths remain the default. No task receives additional tool, network or writable-root authority by selecting an adapter.
+
+This task authorizes no live switch. A deployment, binding migration, supervisor restart, external notification or production rollout would require a separate explicit decision and independently reviewed cutover procedure. For a future approved cutover, preserve the previous executable and its configuration, quiesce and audit affected processes under their existing ownership, snapshot non-secret state with authorization, verify restoration and then deploy atomically. Roll back by restoring that exact previous executable/configuration after stopping only the processes covered by the approved plan; do not rewrite active records or infer that unknown deliveries were absent. Check process identity, unresolved outboxes, pending user answers and STOP state before any restart. No such action has been performed here.

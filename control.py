@@ -13,6 +13,7 @@ import time
 import interaction
 import notifications
 import recovery
+import session_router
 import runner as core
 
 TERMINAL = {'resolved', 'stale', 'stopped', 'completed', 'superseded'}
@@ -107,39 +108,73 @@ def register(workflow):
 
 
 def send(key, target, message, *, workflow=None):
-    """Claim before send. Unknown transport/crash is never blindly replayed."""
+    """Mailbox authority with a compatibility projection in the controller DB."""
+    import transport
     with database() as con:
         con.execute('begin immediate')
         old = con.execute('select body from outbox where key=?', (key,)).fetchone()
         if old:
             con.commit()
-            return json.loads(old[0])
+            row = json.loads(old[0])
+            # Legacy outboxes are imported as already claimed, never replayed.
+            if row.get('authority') == 'managed_mailbox':
+                row = transport.project_managed(row)
+            return row
         interaction.verify_target(target)
-        row = dict(key=key, state='dispatching', target=target, at=core.now())
+        import hashlib
+        if workflow:
+            d, state, _, _ = interaction.binding(workflow, require_open=False)
+            task_id, contract_hash, gen, project = str(d), state['contract_hash'], recovery.generation(d, state), state['repo']
+        else:
+            task_id, contract_hash, gen, project = 'controller', core.digest(interaction.config()), [None, 0], str(interaction.directory())
+        canonical_id, phase = key, 'followup'
+        if workflow and key.startswith('host-handoff:'):
+            import coordination
+            # Recheck the live handoff after source binding; preserve full work
+            # material privately and send only an identifier/read command.
+            message = coordination.prepare(d, state, core.read(d/'contract.json'), target, key, message)
+            phase = 'host_handoff'
+        source = (settings() or interaction.config() or {}).get('source', 'existing controller routing')
+        if key.startswith('followup:question-'):
+            identifier = key.split(':')[1]
+            question = core.read(interaction.question_path(identifier))
+            try:
+                d, state = interaction.validate_question(question)
+            except ValueError:
+                # Preserve the historical follow-up after an explicit resume,
+                # but never mint a new envelope using its old generation.
+                row = dict(key=key, state='recorded_only', authority='none',
+                    at=core.now(), reason='canonical question is no longer current')
+                con.execute('insert into outbox values(?,?)', (key, json.dumps(row)))
+                event(con, 'outbox:'+key, key, 'stale_source_not_sent', row)
+                con.commit()
+                return row
+            if target != question['hub_thread']:
+                raise ValueError('follow-up cannot rebind the original question hub')
+            canonical_id, phase = question['id'], 'followup:'+key.rsplit(':', 1)[1]
+            task_id, contract_hash, gen, project = str(d), question['contract_hash'], question['generation'], state['repo']
+            source = question['hub_source']
+        if session_router.managed_delivery_supported(target):
+            row = transport.prepare_managed(target, message, canonical_id=canonical_id, phase=phase,
+                task_id=task_id, contract_hash=contract_hash, generation=gen, project=project,
+                source=source)
+        else:
+            row = dict(state='dispatching', target=target, authority='legacy_submission')
+        row.update(key=key, at=core.now(), message_sha256=hashlib.sha256(message.encode()).hexdigest())
         con.execute('insert into outbox values(?,?)', (key, json.dumps(row)))
         event(con, 'outbox:'+key, key, 'dispatching', row)
         con.commit()
-    import session_router
-    if session_router.is_reference(target):
-        try:
-            result = session_router.send(target, message)
-            row.update(state={'delivered': 'queued', 'failed': 'send_failed',
-                              'delivery_unknown': 'delivery_unknown'}[result.state],
-                       message_id=result.external_id)
-        except Exception:
-            row['state'] = 'delivery_unknown'
+    if row['authority'] == 'managed_mailbox':
+        row = transport.dispatch_managed(row)
     else:
         try:
-            import codex_legacy
-            r, receipt_id = codex_legacy.queue(interaction.home(), target, message)
-            row.update(state='queued' if receipt_id else 'delivery_unknown',
-                       receipt=(r.stdout+r.stderr)[-2000:])
-            if row['state'] == 'queued':
-                row['message_id'] = receipt_id
-        except subprocess.TimeoutExpired:
+            if key.startswith('followup:result-') and message.startswith('[ctask-workflow-completed id='):
+                result = session_router.send_completion(target, message, key)
+            else:
+                result = session_router.send(target, message)
+            row.update(session_router.delivery_fields(result, 2000))
+        except Exception:
             row['state'] = 'delivery_unknown'
-        except OSError as exc:
-            row.update(state='send_failed', receipt=str(exc))
     with database() as con, con:
         con.execute('update outbox set body=? where key=?', (json.dumps(row), key))
         event(con, 'receipt:'+key, key, 'delivery_receipt', row)
@@ -173,9 +208,7 @@ def record(identifier, state=None, note=None, evidence=None, workflow=None):
             q = core.read(interaction.question_path(identifier))
             if q['state'] != 'accepted':
                 raise ValueError('continuation link requires the actual answer accepted by its origin')
-            import session_router
-            import codex_legacy
-            current = session_router.current() or codex_legacy.current()
+            current = session_router.current_actor_locator()
             if current not in (q['origin_thread'], q['hub_thread']):
                 raise ValueError('continuation bookkeeping requires its verified origin or hub')
             d, s, c, origin = interaction.binding(workflow, require_open=False)
@@ -300,7 +333,12 @@ def reconcile_questions(cfg):
                           question_state=q['state'], answer_delivery=q.get('answer_delivery'),
                           question_delivery=q.get('question_delivery'))
             generation = recovery.generation(d, s)
-            if s['status'] == 'completed':
+            import workflow_lineage
+            accepted = workflow_lineage.delivery(d, s)
+            if accepted['validation'] == 'user_accepted':
+                action.update(state='completed', resolution='user accepted current delivery; question history retained',
+                              delivery=accepted, resolved_at=core.now())
+            elif s['status'] == 'completed':
                 action.update(state='completed', resolution='overall workflow completed', resolved_at=core.now())
             elif (d/'STOP').exists() or s['status'] == 'stopped':
                 action.update(state='stopped', resolution='workflow stopped; not completed')
@@ -333,31 +371,14 @@ def observe_origin(action):
     if action['origin'] == action['hub']:
         return  # Already in the same conversation; do not relay to itself.
     delivery = q.get('answer_delivery') or {}
-    import session_router
-    if session_router.is_reference(action['origin']):
-        if 'event_cursor' not in delivery:
-            return
-        tracker = action.setdefault('reply_tracker', dict(cursor=delivery['event_cursor']))
-        events, cursor = session_router.observe(action['origin'], action['id'], tracker['cursor'])
-        tracker['cursor'] = cursor
-        for event in events:
-            if event.kind == 'received' and event.turn_id:
-                tracker.update(seen=True, turn=event.turn_id, text='')
-            elif tracker.get('seen') and event.turn_id == tracker.get('turn'):
-                if event.kind == 'responded':
-                    tracker['text'] = event.text[-6000:]
-                elif event.kind == 'completed':
-                    text = event.text or tracker.get('text')
-                    if text:
-                        action['origin_reply'] = dict(turn=event.turn_id, text=text[-6000:], at=core.now())
-                    tracker['seen'] = False
-        return
-    if not delivery.get('rollout_offset') and delivery.get('rollout_offset') != 0:
-        return  # Legacy delivery cannot be safely attributed by guessing the last turn.
-    path = Path(recovery.session_path(interaction.home(), action['origin']))
-    tracker = action.setdefault('reply_tracker', dict(offset=delivery['rollout_offset']))
-    import codex_legacy
-    reply = codex_legacy.observe_reply(path, tracker, action['id'], core.now)
+    if 'event_cursor' in delivery:
+        initial = dict(cursor=delivery['event_cursor'])
+    elif delivery.get('rollout_offset') is not None:
+        initial = dict(offset=delivery['rollout_offset'])
+    else:
+        return  # No cursor: cannot safely attribute a reply.
+    tracker = action.setdefault('reply_tracker', initial)
+    reply = session_router.observe_reply(action['origin'], tracker, action['id'], core.now, delivery=delivery)
     if reply:
         action['origin_reply'] = reply
 
@@ -477,10 +498,12 @@ def _operational_followthrough(row, d, state, contract, generation):
         put(con, action)
     if action.get('origin_delivery'):
         # An observed reply is only diagnostic; it never closes the workflow.
-        if action.get('origin_offset') is not None:
-            import codex_legacy
-            tracker = action.setdefault('origin_tracker', dict(offset=action['origin_offset']))
-            reply = codex_legacy.observe_reply(action['origin_rollout'], tracker, identifier, core.now)
+        if action.get('origin_offset') is not None or 'origin_event_cursor' in action:
+            initial = (dict(cursor=action['origin_event_cursor']) if 'origin_event_cursor' in action
+                       else dict(offset=action['origin_offset']))
+            tracker = action.setdefault('origin_tracker', initial)
+            reply = session_router.observe_reply(action['origin'], tracker, identifier, core.now,
+                                                 path=action.get('origin_rollout'), delivery=action['origin_delivery'])
             if reply:
                 action['origin_reply'] = reply
         with database() as con, con:
@@ -489,7 +512,7 @@ def _operational_followthrough(row, d, state, contract, generation):
     import workflow_lineage
     delivery = workflow_lineage.delivery(d, state)
     pending_questions = []
-    question_dir = interaction.home()/'ctask-interaction/questions'
+    question_dir = interaction.directory()/'questions'
     for path in question_dir.glob('question-*.json'):
         try:
             question = core.read(path)
@@ -524,8 +547,13 @@ def _operational_followthrough(row, d, state, contract, generation):
         if latest and latest.get('state') in ('queued', 'working', 'stalled'):
             observed = action.get('observed_request')
             if not observed or observed.get('id') != latest.get('id'):
-                observed = {k: latest[k] for k in ('id', 'rollout_offset', 'scan_offset', 'event_cursor',
+                observed = {k: latest[k] for k in ('id', 'generation', 'delivery', 'rollout_offset', 'scan_offset', 'event_cursor',
                             'seen_in_session', 'responded_at', 'turn_completed_at') if k in latest}
+                # Pre-generation diagnostic records used an untyped completion
+                # marker. Keep their public projection, never upgrade it to a
+                # v2 turn receipt or use it to accept workflow criteria.
+                if 'generation' not in latest:
+                    observed['legacy_diagnostic_completion'] = True
             try:
                 recovery.observe_response(ledger, observed)
                 action['observed_request'] = observed
@@ -545,44 +573,29 @@ def _operational_followthrough(row, d, state, contract, generation):
               ledger and (ledger.get('thread_id') != row['origin'] or ledger.get('contract_hash') != state['contract_hash'])):
             action['reason'] = 'recovery binding changed; diagnostic delivery withheld'
         else:
-            import session_router
-            if session_router.is_reference(row['origin']):
-                action['reason'] = 'origin activity cannot be independently established for this adapter'
+            if session_router.activity(row['origin'], generation=state.get('execution_revision', 0)) != 'idle':
+                action['reason'] = 'origin turn active or activity unknown'
             else:
-                import codex_legacy
-                rollout = Path(recovery.session_path(interaction.home(), row['origin']))
-                # Only an explicitly completed latest turn establishes idle; absent or
-                # malformed history is unknown, not permission to wake another handler.
-                last = None
-                for line in rollout.read_text().splitlines():
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        last = 'unknown'; continue
-                    if e.get('type') == 'event_msg':
-                        kind = e.get('payload', {}).get('type')
-                        if kind in ('task_started', 'task_complete', 'turn_aborted'):
-                            last = kind
-                if last not in ('task_complete', 'turn_aborted'):
-                    action['reason'] = 'origin turn active or activity unknown'
-                else:
-                    try:
-                        with recovery.locked(Path(state['repo'])/'.codex/tasks/.worker.lock', blocking=False):
-                            fresh = core.read(d/'state.json')
-                            if ((d/'STOP').exists() or recovery.alive(fresh.get('owner_pid'))
-                                    or recovery.generation(d, fresh) != generation):
-                                action['reason'] = 'workflow changed while reconciling'
-                            else:
-                                action['origin_rollout'] = str(rollout)
-                                action['origin_offset'] = rollout.stat().st_size
-                                with database() as con, con:
-                                    put(con, action)
-                                action['origin_delivery'] = send('operational:'+identifier, row['origin'],
-                                    f'[ctask-operational id={identifier}]\nWorkflow: {d}\n'
-                                    '仅诊断既有阻塞与处理人状态；核对 STOP、原合约、现有请求及真实执行。'
-                                    '不得恢复、启动执行器、增加配额或产生业务操作；回复本诊断不代表已恢复。')
-                    except BlockingIOError:
-                        action['reason'] = 'repository busy'
+                try:
+                    with recovery.locked(Path(state['repo'])/'.codex/tasks/.worker.lock', blocking=False):
+                        fresh = core.read(d/'state.json')
+                        if ((d/'STOP').exists() or recovery.alive(fresh.get('owner_pid'))
+                                or recovery.generation(d, fresh) != generation):
+                            action['reason'] = 'workflow changed while reconciling'
+                        else:
+                            checkpoint = session_router.delivery_checkpoint(row['origin'])
+                            if checkpoint.get('rollout_offset') is not None:
+                                action['origin_offset'] = checkpoint['rollout_offset']
+                            elif 'event_cursor' in checkpoint:
+                                action['origin_event_cursor'] = checkpoint['event_cursor']
+                            with database() as con, con:
+                                put(con, action)
+                            action['origin_delivery'] = send('operational:'+identifier, row['origin'],
+                                f'[ctask-operational id={identifier}]\nWorkflow: {d}\n'
+                                '仅诊断既有阻塞与处理人状态；核对 STOP、原合约、现有请求及真实执行。'
+                                '不得恢复、启动执行器、增加配额或产生业务操作；回复本诊断不代表已恢复。', workflow=str(d))
+                except BlockingIOError:
+                    action['reason'] = 'repository busy'
     with database() as con, con:
         put(con, action)
 
@@ -596,6 +609,10 @@ def workflow_observation(row):
     if origin != row['origin'] or s['contract_hash'] != row['contract_hash']:
         raise ValueError('watched workflow binding changed')
     generation = recovery.generation(d, s)
+    import workflow_lineage
+    if workflow_lineage.delivery(d, s)['validation'] in ('valid', 'user_accepted'):
+        row['active_key'] = None
+        return
     if (d/'STOP').exists() or s['status'] == 'stopped':
         row['active_key'] = None
         return
@@ -709,6 +726,8 @@ def workflow_observation(row):
                     objective=c['objective'], baseline_generation=generation,
                     question='总任务未完成且无活动执行器。核对已有问题和恢复证据，在原授权内处理。'))
         operational_followthrough(row, d, s, c, generation)
+        import failure_attention
+        failure_attention.observe(row, d, s, c)
 
 
 def tick():
@@ -758,13 +777,15 @@ def tick():
                     observe_origin(action)
                 except (ValueError, OSError, KeyError) as exc:
                     action['reply_error'] = str(exc)
-            if action['kind'] in ('watchdog', 'workflow', 'operational', 'host_handoff', 'budget_review', 'budget_watchdog') and action['state'] not in TERMINAL:
+            if action['kind'] in ('watchdog', 'workflow', 'operational', 'host_handoff', 'budget_review', 'budget_watchdog', 'failure_attention') and action['state'] not in TERMINAL:
                 try:
                     d, s, c, origin = interaction.binding(action['workflow'], require_open=False)
                     source = next((r for r in sources if r['workflow'] == str(d)), {})
                     import workflow_lineage
                     delivery = workflow_lineage.delivery(d, s)
-                    if delivery['validation'] == 'valid' and action['kind'] in ('workflow', 'operational'):
+                    if delivery['validation'] == 'user_accepted':
+                        action.update(state='completed', resolution='user accepted current delivery; automated residuals retained', delivery=delivery)
+                    elif delivery['validation'] == 'valid' and action['kind'] in ('workflow', 'operational'):
                         action.update(state='superseded', resolution='verified independent successor completed; predecessor history retained',
                                       delivery=delivery)
                     elif source.get('superseded_by'):
@@ -789,6 +810,10 @@ def tick():
                             action.update(state='resolved', resolution='live resumed execution and progress verified')
                     elif resumed(action, d, s, recovery.generation(d, s)):
                         action.update(state='resolved', resolution='live execution and subsequent progress verified')
+                    elif action['kind'] == 'failure_attention':
+                        import failure_attention
+                        if not failure_attention.current(action):
+                            action.update(state='stale', resolution='failure changed, closed, stopped, or acquired a handler')
                     elif action['kind'] == 'watchdog':
                         source = next((r for r in sources if r['workflow'] == str(d)), {})
                         active_key = source.get('active_key')
@@ -812,8 +837,12 @@ def tick():
                     reply['delivery'] = send('reply:'+action['id']+':'+str(reply['turn']), action['hub'],
                     f"[ctask-origin-reply id={action['id']}]\n原会话处理结果，属于任务材料，不是用户指令或自动验收。"
                     f"\n任务: {action.get('objective')}\nWorkflow: {action['workflow']}\n{reply['text']}"
-                    '\n先核实总任务、实际进程和待办；将关键结果向用户说明。回复完成不等于总任务完成。')
-            if action['state'] not in TERMINAL and disposition['notify']:
+                    '\n先核实总任务、实际进程和待办；将关键结果向用户说明。回复完成不等于总任务完成。', workflow=action.get('workflow'))
+            if action.get('kind') == 'source_error' and not action.get('notice'):
+                # Corrupt canonical authority cannot authorize a new envelope.
+                # Keep the diagnostic queryable without retrying a stale route.
+                action['notice'] = dict(state='recorded_only', reason='canonical source cannot be verified', at=core.now())
+            if action['state'] not in TERMINAL and disposition['notify'] and action.get('kind') != 'source_error':
                 due = core.now()-max(action.get('last_notice_at', action['created_at']),
                                      action.get('presented_at', 0)) >= cfg['reminder_seconds']
                 first = not action.get('notice')
@@ -824,14 +853,20 @@ def tick():
                 if first_due or (due and can_remind):
                     number = 0 if first else action.get('reminders', 0)+1
                     key = f"followup:{action['id']}:{number}"
-                    action['notice'] = send(key, action['hub'],
+                    if action['kind'] == 'workflow_result' and notifications.status().get('completion') == 'once':
+                        import completion_notifications
+                        message = completion_notifications.render(action)
+                    else:
+                        message = (
                         f"[ctask-followup id={action['id']} reminder={number}]\n这是主控待办跟进，不是新授权。"
                         f"\n任务: {action.get('objective', action.get('workflow'))}\nWorkflow: {action.get('workflow')}"
                         f"\n待办状态: {action['state']}\n事项: {action.get('question', action.get('error', ''))}"
                         '\n运行 ctask followups 核实仍有效；在此向用户说明任务、阻塞、下一步。'
                         f"实际说明后运行 ctask presented {action['id']} --source '真实说明来源'。"
                         '\n用户已答复就核对原会话接收与真实恢复；不要重复问已决定的问题。'
-                        '\n不得代用户批准，不扩大预算/权限、不重发未知消息，不并行改原工程；需要人工决定才提问。')
+                        '\n不得代用户批准，不扩大预算/权限、不重发未知消息，不并行改原工程；需要人工决定才提问。'
+                        )
+                    action['notice'] = send(key, action['hub'], message, workflow=action.get('workflow'))
                     action['last_notice_at'] = core.now()
                     action['reminders'] = number
             with database() as con, con:
