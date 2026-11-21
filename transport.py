@@ -335,6 +335,8 @@ def dispatch_managed(projection, *, home_dir=None, cwd=None):
             stale_handoff = False
             try:
                 coordination.validate_envelope(task, state, contract, message)
+                import failure_notice
+                failure_notice.validate_envelope(message)
             except (ValueError, KeyError, TypeError):
                 stale_handoff = True
             if (stale_handoff or (task/'STOP').exists() or (task/'user-closure.json').exists()

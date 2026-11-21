@@ -73,6 +73,9 @@ def prepare(directory, state, contract, target, key, material):
 
 
 def read(identifier_value):
+    if re.fullmatch(r'failure-[0-9a-f]{20}', identifier_value):
+        import failure_notice
+        return failure_notice.read(identifier_value)
     if not re.fullmatch(r'host-handoff-[0-9a-f]{20}', identifier_value):
         raise ValueError('invalid handoff identifier')
     path = payload_directory()/(identifier_value+'.json')
