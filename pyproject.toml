@@ -53,6 +53,7 @@ py-modules = [
   "notification_state",
   "notifications",
   "permissions",
+  "pi_acp_compat",
   "pi_acp_exec",
   "pi_acp_worker",
   "pi_coordinator_exec",

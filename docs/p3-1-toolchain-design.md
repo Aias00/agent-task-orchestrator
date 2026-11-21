@@ -219,3 +219,45 @@ P3-1 实现完成。生产更新与 P3-2 保持独立边界。
 例如 group-writable 的挂载根不会被静默放宽。隔离测试复制同一源码至私有临时安装目录
 以验证准入，不修改本机挂载权限。发布包自身内容摘要不涵盖另行安装的 node_modules；
 依赖安装/lock integrity 和实际 provider 资格继续分别判断。
+
+## 10. 隔离实现说明（待用户验收）
+
+P3-1A 的工具链解析与启动材料保护已在 A2 单独提交。P3-1B 将基础 9 项与
+coordinator 5 项变换统一到 `pi_acp_compat.py`；`derive`、`derive_coordinator`、
+`replace_once` 及原派生脚本 CLI 保留门面。两个角色的派生产物与改造前逐字节一致，
+输出指纹分别为 worker `6dfbd37ca70ece07c4fe7242cf0c4389eafc7a6dc48102db43bb3f0c1b12d275`、
+coordinator `1f9eb67469862d835192f2ea86266ecf7a1d58eefd4dec4e77d5f35447790bc8`。
+
+后端验证完整角色/能力集合、包身份、输入与输出指纹后，才向私有临时目录写入产物；
+macOS 使用 `renamex_np(RENAME_EXCL)` 原子发布，Linux 的离线派生使用对应的
+`renameat2(RENAME_NOREPLACE)`。不支持原子且禁止覆盖的发布时拒绝，不回退为覆盖。
+该 Linux 派生路径不代表 Linux OS 沙箱已获资格。失败会清理临时目录，已有输出、
+native 状态、npm 依赖及 lock 保持原样。worker 继续经原脚本入口派生，coordinator
+调用同一生成器；二者不再自行维护源码替换。
+
+host 通过 `CTASK_NODE_BIN` / `CTASK_PI_BIN` 提供单个绝对可执行文件路径，或使用
+经过滤的 host PATH；不要在任务 JSON、项目环境文件或模型参数中提供这些定位值。
+显式配置或选中工具无效时拒绝启动。探测、ACP SDK 和 native 子进程均显式使用
+`PATH=/usr/bin:/bin`，不传入 Node 预加载、动态加载器、provider key 或其他宿主环境。
+工具选择后的实际路径固定在 `runtime/trusted/toolchain.json`，native wrapper 使用
+绝对 Python 路径与 `-E -s`，避免最小 PATH 使旧 Python shebang 选择系统解释器。
+
+`runtime/trusted/` 与 `runtime/adapter/` 均为 `0700`，描述与 adapter 为 `0600`，
+固定 launcher 为 `0700`。两类 OS profile 显式排除这两个子目录，并排除替换 runtime
+目录本身；真实 `sandbox-exec` fixture 验证写入、软链接、目录重命名与 runtime 替换
+被拒绝，正常工作区与 scratch 写入仍可执行。父 stderr 与 task_trace 继续只保留安全元数据。
+
+初始 Pi 准入依据 npm `@earendil-works/pi-coding-agent@1.5.2` 发布 tarball 的
+公开 integrity 校验与 1324 个自身文件逐一比对；不是把本机文件初次散列自动登记为准入。
+新增协议测试运行实际派生 JS 与 synthetic native RPC，核验 native identity、连续轮次
+nonce、receipt 与错误粘性；原全量套件继续核验 checks、STOP、取消、EOF 和未知不重放。
+启动通知可以晚于 new_session 到达，不能视为当前轮次成功证据；新增协议断言按
+new_session 中声明的精确 startupInfo 区分该通知，对当前轮次正文和 native receipt
+逐一校验 nonce。SDK 对拒绝返回通用错误码，测试不要求
+透传 native 错误正文。既有夹具仅有第 9 节列明的两处必要扩充，未删减安全断言。
+包指纹辅助函数同时拒绝外部所有者、可被他人写入的资源、符号链接及特殊文件，非阻塞
+打开后校验 regular file，避免损坏包中的 FIFO 阻塞准入；Node 稳定版本不接受前导零。
+
+本批仅交付源码与离线资格，未运行真实 Pi/provider，未激活本机安装或线上任务。
+最终测试数量、源码快照与 A2/B2 提交标识在交付报告及仓库外验收记录中列出；用户验收后
+才考虑 main 合入，P3-2 仍需独立任务。

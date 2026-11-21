@@ -39,7 +39,7 @@ def registry():
 
 
 def file_sha256(path, limit=256*1024*1024):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
@@ -67,7 +67,9 @@ def package_sha256(root):
             folders[:] = [name for name in folders if name != 'node_modules']
         for name in folders + names:
             path = Path(directory)/name
-            if path.is_symlink() or path.stat().st_mode & 0o022:
+            info = path.stat(follow_symlinks=False)
+            if (stat.S_ISLNK(info.st_mode) or info.st_mode & 0o022
+                    or info.st_uid not in (0, os.getuid())):
                 raise ToolchainError('unsafe Pi package contents')
         for name in names:
             path = Path(directory)/name
@@ -211,7 +213,7 @@ def _probe(command, *, home):
 
 
 def _node_version(version):
-    match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', version)
+    match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', version)
     if not match or int(match[1]) < 24:
         raise ToolchainError('stable Node >= 24 required')
 
@@ -254,7 +256,7 @@ class Toolchain:
 
 def _host_sources(project, runtime):
     forbidden = (project, runtime)
-    code = ('pi_toolchain.py', 'pi_acp_exec.py', 'pi_coordinator_exec.py',
+    code = ('pi_toolchain.py', 'pi_acp_compat.py', 'pi_acp_exec.py', 'pi_coordinator_exec.py',
             'pi-path-guard.mjs', 'pi-coordinator-guard.mjs')
     for path in (*(ROOT/name for name in code), REGISTRY, SOURCE):
         trusted_path(path, forbidden=forbidden)
@@ -329,7 +331,7 @@ def load_launch(runtime, project, role):
     for directory in (runtime, runtime/'trusted', runtime/'adapter'):
         _private_directory(directory)
     path = runtime/'trusted/toolchain.json'
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd) as stream:
         info = os.fstat(stream.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1

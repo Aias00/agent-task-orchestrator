@@ -32,7 +32,7 @@ class ToolchainTests(unittest.TestCase):
         # Exercise resolution from a protected installation, without changing
         # the host mount's permissions or weakening executable trust checks.
         host=self.base/'owned installation';host.mkdir()
-        for name in ('pi_toolchain.py','pi_acp_exec.py','pi_coordinator_exec.py',
+        for name in ('pi_toolchain.py','pi_acp_compat.py','pi_acp_exec.py','pi_coordinator_exec.py',
                      'pi-path-guard.mjs','pi-coordinator-guard.mjs'):
             shutil.copyfile(ROOT/name,host/name)
         source=host/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'
@@ -95,7 +95,7 @@ class ToolchainTests(unittest.TestCase):
         self.tools.node.parent.chmod(0o700)
 
     def test_selected_old_malformed_or_prerelease_node_does_not_search_again(self):
-        for version in ('v23.9.0','24.0.0','v24.0.0-rc.1','v24.0.0\ncredential'):
+        for version in ('v23.9.0','24.0.0','v24.0.0-rc.1','v024.0.0','v24.00.0','v24.0.00','v24.0.0\ncredential'):
             with self.subTest(version=version), self.assertRaisesRegex(ValueError,'Node >= 24'):
                 self.resolve(probe=lambda *args,**kw:version)
 
@@ -111,6 +111,29 @@ class ToolchainTests(unittest.TestCase):
                 probe.assert_not_called()
                 self.tools.pi.write_text(original);package.write_text(saved)
                 (self.tools.package_root/'extra.js').unlink(missing_ok=True)
+
+    def test_package_helpers_reject_special_files_links_writable_and_unowned_resources(self):
+        from types import SimpleNamespace
+        path = self.tools.package_root/'resource'
+        os.mkfifo(path)
+        with self.assertRaisesRegex(ValueError, 'invalid toolchain file'):
+            policy.package_sha256(self.tools.package_root)
+        path.unlink(); path.symlink_to(self.tools.pi)
+        with self.assertRaisesRegex(ValueError, 'unsafe Pi package contents'):
+            policy.package_sha256(self.tools.package_root)
+        path.unlink(); path.write_text('synthetic resource'); path.chmod(0o666)
+        with self.assertRaisesRegex(ValueError, 'unsafe Pi package contents'):
+            policy.package_sha256(self.tools.package_root)
+        path.chmod(0o600)
+        original = Path.stat
+        def resource_owner(candidate, *args, **kwargs):
+            info = original(candidate, *args, **kwargs)
+            if candidate == path:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid()+10000,
+                    st_size=info.st_size)
+            return info
+        with patch.object(Path, 'stat', resource_owner), self.assertRaisesRegex(ValueError, 'unsafe Pi package contents'):
+            policy.package_sha256(self.tools.package_root)
 
     def test_pi_version_probe_is_consistency_check_and_output_is_not_disclosed(self):
         secret='synthetic probe payload'
@@ -142,7 +165,7 @@ class ToolchainTests(unittest.TestCase):
         # A disposable code-owned installation has a synthetic registry, selected
         # by its fixed source location. No production environment override exists.
         host=self.base/('installation-'+role);host.mkdir()
-        for name in ('pi_toolchain.py','pi_acp_exec.py','pi_coordinator_exec.py',
+        for name in ('pi_toolchain.py','pi_acp_compat.py','pi_acp_exec.py','pi_coordinator_exec.py',
                      'pi-path-guard.mjs','pi-coordinator-guard.mjs'):
             shutil.copyfile(ROOT/name,host/name)
         source=host/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'

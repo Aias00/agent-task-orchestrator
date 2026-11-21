@@ -10,39 +10,17 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-import subprocess
-import sys
+import subprocess  # Retain the historic subprocess.run injection seam.
 from pi_toolchain import (ExecutableLocator, clean_environment, prepare_toolchain,
                           write_exclusions, write_launch)
 
+from pi_acp_compat import SOURCE, backend, derive_coordinator, derive_directory
+
 ROOT = Path(__file__).resolve().parent
-SOURCE = ROOT/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'
-ADAPTER_SHA256 = '324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2'
+ADAPTER_SHA256 = backend('coordinator')['source_sha256']
 PI = ExecutableLocator('pi')
 NODE = ExecutableLocator('node')
 SANDBOX = Path('/usr/bin/sandbox-exec')
-
-
-def derive_coordinator(raw):
-    from scripts.derive_pi_acp import derive, replace_once
-    text = derive(raw)
-    # Never fall back to an adapter-generated UUID and call it a native ID.
-    text = replace_once(text,
-        'const sessionId = typeof state?.sessionId === "string" ? state.sessionId : crypto.randomUUID();',
-        'if (typeof state?.sessionId !== "string" || !state.sessionId || !state.sessionFile) throw new Error("native identity required");\n    const sessionId = state.sessionId;')
-    text = replace_once(text, '    _meta: {\n        piAcp: {\n          startupInfo: preludeText || null',
-        '    _meta: {\n        atoIdentity: {nativeId: state.sessionId, project: params.cwd},\n        piAcp: {\n          startupInfo: preludeText || null')
-    # Every emitted active-turn update carries the host's nonce. Unsolicited
-    # startup/history emissions are not attributed to an active request.
-    text = replace_once(text,
-        '        sessionId: this.sessionId,\n        update\n',
-        '        sessionId: this.sessionId,\n        update: {...update, _meta: {...(update._meta ?? {}), ctaskTurn}}\n')
-    text = replace_once(text, '  emit(update) {\n    this.lastEmit',
-                        '  emit(update) {\n    const ctaskTurn = this.ctaskTurn;\n    this.lastEmit')
-    # Prevent project/user slash-command discovery in this restricted profile.
-    text = replace_once(text, 'function loadSlashCommands(cwd) {\n  const commands = [];',
-                        'function loadSlashCommands(cwd) {\n  return [];\n  const commands = [];')
-    return text
 
 
 @dataclass(frozen=True)
@@ -103,24 +81,14 @@ class LocalPiProfile:
             raise ValueError('coordinator runtime must be outside model workspace')
         if any(path.resolve().is_relative_to(project) for path in (ROOT, SOURCE)):
             raise ValueError('model workspace may not contain trusted coordinator code or executables')
-        raw = SOURCE.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != ADAPTER_SHA256:
-            raise ValueError('pinned adapter differs')
-        package = json.loads((SOURCE.parent.parent/'package.json').read_text())
-        if package.get('version') != '0.0.34':
-            raise ValueError('pinned adapter version differs')
         if not SANDBOX.is_file():
             raise ValueError('OS sandbox unavailable')
         tools = prepare_toolchain(project, runtime, node=NODE, pi=PI)
-        for name in ('home', 'native', 'sessions', 'tmp', 'adapter'):
+        for name in ('home', 'native', 'sessions', 'tmp'):
             (runtime/name).mkdir(mode=0o700)
         _private_save(runtime/'native/models.json', self.models)
         _private_save(runtime/'native/settings.json', dict(quietStartup=True))
-        adapter = runtime/'adapter/pi-acp.mjs'
-        adapter.write_text(derive_coordinator(raw.decode()))
-        adapter.chmod(0o600)
-        (runtime/'adapter/package.json').write_text('{"name":"pi-acp","version":"0.0.34","type":"module"}')
-        (runtime/'adapter/node_modules').symlink_to(SOURCE.parents[2], target_is_directory=True)
+        adapter = derive_directory(runtime/'adapter', role='coordinator')
         launcher = write_launch(runtime, project, 'coordinator', tools)
         q = lambda p: json.dumps(str(Path(p).resolve()))
         # The model has no shell/network tool. The OS further limits the native
@@ -144,7 +112,8 @@ class LocalPiProfile:
             CTASK_AGENT_SANDBOX=sandbox, CTASK_PI_MODEL=self.model,
             TMPDIR=str(runtime/'tmp'), JITI_CACHE=str(runtime/'jiti'))
         return Launch((str(SANDBOX), '-f', str(runtime/'sandbox.sb'), str(tools.node), str(adapter)),
-            environment, 'actual_pi_cli_with_scripted_loopback_model:Pi1.5.2:pi-acp0.0.34:'+ADAPTER_SHA256,
+            environment, 'actual_pi_cli_with_scripted_loopback_model:Pi'+tools.pi_version
+            +':pi-acp'+backend('coordinator')['version']+':'+ADAPTER_SHA256,
             provenance_data=dict(pi_version=tools.pi_version, pi_binary_sha256=tools.pi_sha256,
                 node_version=tools.node_version, node_binary_sha256=tools.node_sha256,
                 adapter_sha256=ADAPTER_SHA256, derived_adapter_sha256=hashlib.sha256(adapter.read_bytes()).hexdigest(),
