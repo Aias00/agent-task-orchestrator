@@ -115,6 +115,19 @@ def send(key, target, message, *, workflow=None):
             # material privately and send only an identifier/read command.
             message = coordination.prepare(d, state, core.read(d/'contract.json'), target, key, message)
             phase = 'host_handoff'
+        if workflow and key.startswith('followup:failure-'):
+            import coordination
+            import failure_notice
+            try:
+                message = failure_notice.prepare(key, target, workflow, message,
+                                                 reader_command=coordination.reader_command)
+            except failure_notice.StaleFailure:
+                row = dict(key=key, state='recorded_only', authority='none',
+                    at=core.now(), reason='failure is stale or already being handled')
+                con.execute('insert into outbox values(?,?)', (key, json.dumps(row)))
+                event(con, 'outbox:'+key, key, 'stale_source_not_sent', row)
+                con.commit()
+                return row
         source = (settings() or interaction.config() or {}).get('source', 'existing controller routing')
         if key.startswith('followup:question-'):
             identifier = key.split(':')[1]

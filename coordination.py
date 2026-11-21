@@ -10,22 +10,10 @@ import sys
 import interaction
 import recovery
 import ato_core as core
+from ato_config import reader_command
 
 MARKER = 'host-handoff:'
 MAX_BYTES = 2 * 1024 * 1024
-
-
-def reader_command():
-    """Use explicit trusted host configuration, never project files or PATH lookup."""
-    configured = os.environ.get('CTASK_HANDOFF_READER')
-    path = Path(configured).expanduser() if configured else None
-    if not (path and path.is_absolute() and path.is_file() and os.access(path, os.X_OK)):
-        path = Path.home()/'.local/bin/ato-read-handoff'
-    # Quote the directory separately so the standard helper name remains visible.
-    command = shlex.quote(str(path.parent))+'/'+shlex.quote(path.name)
-    if path.name != 'ato-read-handoff':
-        command = '/bin/sh -c '+shlex.quote('exec '+command+' "$@"')+' ato-read-handoff'
-    return command
 
 
 def identifier(directory, state):
@@ -89,6 +77,9 @@ def prepare(directory, state, contract, target, key, material):
 
 
 def read(identifier_value):
+    if re.fullmatch(r'failure-[0-9a-f]{20}', identifier_value):
+        import failure_notice
+        return failure_notice.read(identifier_value)
     if not re.fullmatch(r'host-handoff-[0-9a-f]{20}', identifier_value):
         raise ValueError('invalid handoff identifier')
     path = payload_directory()/(identifier_value+'.json')

@@ -9,6 +9,7 @@ values are paths only, not actor credentials or session proofs.
 """
 import os
 from pathlib import Path
+import shlex
 
 
 def _configured_path(name, fallback):
@@ -58,3 +59,16 @@ def ensure_interaction_directory():
     path = interaction_directory()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def reader_command():
+    """Resolve the trusted installed handoff helper without project/PATH discovery."""
+    configured = os.environ.get('CTASK_HANDOFF_READER')
+    path = Path(configured).expanduser() if configured else None
+    if not (path and path.is_absolute() and path.is_file() and os.access(path, os.X_OK)):
+        path = Path.home()/'.local/bin/ato-read-handoff'
+    # Keep the standard helper name visible while quoting arbitrary directories.
+    command = shlex.quote(str(path.parent))+'/'+shlex.quote(path.name)
+    if path.name != 'ato-read-handoff':
+        command = '/bin/sh -c '+shlex.quote('exec '+command+' "$@"')+' ato-read-handoff'
+    return command

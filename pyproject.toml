@@ -43,6 +43,7 @@ py-modules = [
   "delegation",
   "execution_state",
   "failure_attention",
+  "failure_notice",
   "host_budget",
   "host_recheck",
   "hub_queue_gate",

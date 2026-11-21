@@ -11,6 +11,7 @@
 - [Adapter and transport boundary](agent-transports.md)
 - [设计与实现](architecture.md)
 - [Compact origin host handoff](compact-origin-handoff.md)
+- [Compact failure notices](compact-failure-notices.md)
 - [Final completion notification policy, 2026-11-19](completion-notifications.md)
 - [Independent mailbox and transport primitives](message-protocol.md)
 - [Hub notifications only when user intervention is required](notification-policy.md)
