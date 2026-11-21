@@ -9,10 +9,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from pi_toolchain import (ExecutableLocator, clean_environment, prepare_toolchain,
+                          write_launch)
 
 ROOT = Path(__file__).resolve().parent
-PI = Path.home()/'.local/bin/pi'
-NODE = Path.home()/'.nvm/versions/node/v24.22.1/bin/node'
+PI = ExecutableLocator('pi')
+NODE = ExecutableLocator('node')
 SANDBOX = Path('/usr/bin/sandbox-exec')
 
 def main():
@@ -43,29 +45,38 @@ def invoke(args):
     repo = Path(runner.read(directory/'state.json')['repo']).resolve()
     if args.sandbox not in ('read-only', 'workspace-write'):
         raise ValueError('unsupported sandbox')
-    if not SANDBOX.is_file() or not PI.is_file() or not NODE.is_file():
-        raise ValueError('pinned Pi, Node or OS sandbox unavailable')
+    if not SANDBOX.is_file():
+        raise ValueError('OS sandbox unavailable')
     if Path(args.output).resolve().parent != directory/'checkpoints':
         raise ValueError('output must belong to scheduler checkpoints')
     # Use a new, private, per-attempt directory; never reuse old session state.
     runtime = directory/'checkpoints'/(args.label+'.acp-runtime')
+    if runtime.is_relative_to(repo) and not runtime.is_relative_to(repo/'.codex/tasks'):
+        raise ValueError('worker runtime requires protected scheduler namespace')
     runtime.mkdir(mode=0o700)
     (runtime/'tmp').mkdir(mode=0o700)
+    tools = prepare_toolchain(repo, runtime, node=NODE, pi=PI)
     derived = runtime/'adapter'
     subprocess.run([sys.executable, str(ROOT/'scripts/derive_pi_acp.py'), str(derived)],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   env=clean_environment(home=runtime/'tmp'))
+    launcher = write_launch(runtime, repo, 'worker', tools)
     profile = runtime/'sandbox.sb'
     # Unlike the legacy Pi path, the ACP profile grants no write access to the
     # user's native agent directory. Native auth configuration is read-only.
     profile.write_text(agents.sandbox_profile(repo, runtime, args.sandbox))
-    env = dict(CTASK_PI_ACP_STATE_DIR=str(runtime/'state'),
-               PI_ACP_PI_COMMAND=str(ROOT/'pi_acp_exec.py'),
+    env = dict(clean_environment(home=Path.home()), CTASK_PI_ACP_STATE_DIR=str(runtime/'state'),
+               PI_ACP_PI_COMMAND=str(launcher),
                CTASK_AGENT_REPO=str(repo), CTASK_AGENT_SANDBOX=args.sandbox,
                CTASK_PI_RUNTIME=str(runtime), TMPDIR=str(runtime/'tmp'),
                JITI_CACHE=str(runtime/'jiti'), PI_TELEMETRY='0')
+    native = Path(os.environ.get('PI_CODING_AGENT_DIR', str(Path.home()/'.pi/agent'))).resolve()
+    if native.is_relative_to(repo) or native.is_relative_to(runtime):
+        raise ValueError('native auth configuration may not come from workspace or runtime')
+    env['PI_CODING_AGENT_DIR'] = str(native)
     if args.model:
         env['CTASK_PI_MODEL'] = args.model
-    command = [str(SANDBOX), '-f', str(profile), str(NODE), str(derived/'pi-acp.mjs')]
+    command = [str(SANDBOX), '-f', str(profile), str(tools.node), str(derived/'pi-acp.mjs')]
     acp_bridge.main(command, [str(directory), args.label, args.schema, args.output],
                     environment=env, native_result_only=True, stderr_path=runtime/'stderr.log')
 

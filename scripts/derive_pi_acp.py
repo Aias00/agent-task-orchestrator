@@ -90,8 +90,9 @@ def main():
     if package.get('name') != 'pi-acp' or package.get('version') != '0.0.34':
         raise ValueError('installed pi-acp package version differs from pinned version')
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
     (output/'pi-acp.mjs').write_text(derive(raw.decode()))
+    (output/'pi-acp.mjs').chmod(0o600)
     (output/'package.json').write_text(json.dumps({'name': 'pi-acp', 'version': '0.0.34', 'type': 'module'})+'\n')
     modules = output/'node_modules'
     modules.mkdir()

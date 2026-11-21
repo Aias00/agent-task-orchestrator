@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 import agent_registry as registry
+from pi_toolchain import write_exclusions
 from codex_session_adapter import CodexSessionAdapter
 
 KINDS = ('codex', 'claude', 'pi')
@@ -242,23 +243,24 @@ def sandbox_profile(repo, runtime, mode, kind=None):
     quote = lambda p: json.dumps(str(Path(p).resolve()))
     # Network is needed by the CLI's model client. No shell, web, MCP or extension
     # tool is offered to the model. Host checks run outside this worker policy.
+    protected = write_exclusions(runtime)
     rules = ['(version 1)', '(allow default)', '(deny file-write*)',
-             '(allow file-write* (literal "/dev/null") (subpath '+quote(runtime)+'))']
+             '(allow file-write* (literal "/dev/null") (require-all (subpath '+quote(runtime)+') '+protected+'))']
     # Trusted CLI metadata is writable, but model tools cannot target it:
     # Claude --restricted and the mandatory Pi path guard enforce workspace
     # paths. No credentials are copied into task records or invocation arguments.
     if kind == 'claude':
-        rules.append('(allow file-write* (subpath '+quote(Path.home()/'.claude')+') '
+        rules.append('(allow file-write* (require-all (require-any (subpath '+quote(Path.home()/'.claude')+') '
                      '(literal '+quote(Path.home()/'.claude.json')+') '
-                     '(subpath '+quote(Path('/tmp')/('claude-'+str(os.getuid())))+'))')
+                     '(subpath '+quote(Path('/tmp')/('claude-'+str(os.getuid())))+')) '+protected+'))')
     elif kind == 'pi':
         folder = Path(os.environ.get('PI_CODING_AGENT_DIR', str(Path.home()/'.pi/agent')))
-        rules.append('(allow file-write* (subpath '+quote(folder)+'))')
+        rules.append('(allow file-write* (require-all (subpath '+quote(folder)+') '+protected+'))')
     if mode == 'workspace-write':
         exclusions = ' '.join('(require-not (subpath '+quote(repo/name)+'))' for name in SENSITIVE_PATHS)
         # Also exclude nested sensitive segments and their physical symlink targets.
         pattern = '^'+re.escape(str(Path(repo).resolve()))+'/([^/]+/)*('+'|'.join(map(re.escape, SENSITIVE_PATHS))+')(/|$)'
-        rules.append('(allow file-write* (require-all (subpath '+quote(repo)+') '+exclusions+
+        rules.append('(allow file-write* (require-all (subpath '+quote(repo)+') '+exclusions+' '+protected+
                      ' (require-not (regex '+json.dumps(pattern)+'))))')
     return '\n'.join(rules)+'\n'
 

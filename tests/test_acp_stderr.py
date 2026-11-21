@@ -16,6 +16,7 @@ import acp_bridge
 import pi_acp_worker
 import runner
 import task_trace
+from pi_toolchain_support import tools_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 SECRET = 'SYNTHETIC_CREDENTIAL_MUST_REMAIN_PRIVATE_abc123'
@@ -100,18 +101,27 @@ class ACPStderrTests(unittest.TestCase):
 
     def test_pi_worker_passes_private_log_and_only_reports_type_and_diagnostic_path(self):
         command = self.command(SECRET.encode())
+        script = Path(command[1])
+        script.write_text('import os\nassert os.environ["PATH"] == "/usr/bin:/bin"\n'
+            'assert not any(k in os.environ for k in ("NODE_OPTIONS","NODE_PATH","LD_PRELOAD","DYLD_INSERT_LIBRARIES"))\n'
+            +script.read_text())
         pinned = self.root/'pinned-placeholder'
         pinned.write_text('synthetic; never executed')
+        tools, _ = tools_fixture(self.root)
         real_main = acp_bridge.main
         def bridge(_command, args, **kwargs):
             self.assertEqual(kwargs['stderr_path'], self.runtime/'stderr.log')
-            return real_main(command, args, stderr_path=kwargs['stderr_path'])
+            self.assertEqual(kwargs['environment']['PATH'], '/usr/bin:/bin')
+            return real_main(command, args, environment=kwargs['environment'], stderr_path=kwargs['stderr_path'])
         argv = ['pi_acp_worker', '--directory', str(self.directory), '--label', self.label,
                 '--schema', str(self.schema), '--output', str(self.output), '--sandbox', 'workspace-write']
         error, output = io.StringIO(), io.StringIO()
         with patch.object(sys, 'argv', argv), patch.object(sys, 'stdin', io.StringIO('fixture-native-error')), \
+                patch.dict(os.environ, NODE_OPTIONS='synthetic poison', NODE_PATH='synthetic poison', \
+                    LD_PRELOAD='synthetic poison', DYLD_INSERT_LIBRARIES='synthetic poison'), \
                 patch.multiple(pi_acp_worker, PI=pinned, NODE=pinned, SANDBOX=pinned), \
-                patch('pi_acp_worker.subprocess.run'), patch('acp_bridge.main', side_effect=bridge), \
+                patch('pi_acp_worker.prepare_toolchain', return_value=tools), \
+                patch('acp_bridge.main', side_effect=bridge), \
                 redirect_stderr(error), redirect_stdout(output):
             self.assertEqual(pi_acp_worker.main(), 1)
         self.assertEqual((self.runtime/'stderr.log').read_text(), SECRET)

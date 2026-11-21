@@ -22,7 +22,8 @@ ARCHIVE = BUILD/'candidate.tar.gz'
 SEED = BUILD/'stage-start.json'
 PATTERNS = ('ato_cli/**/*.py', 'pyproject.toml', 'requirements-acp.lock', '*.py', '*.mjs', 'README.md', 'AGENTS.md', 'bin/*', 'scripts/*.py',
             'docs/**/*.md', 'skills/**/*.md', 'tests/**/*.py', 'tests/**/*.json',
-            'integrations/pi-acp/package.json', 'integrations/pi-acp/package-lock.json')
+            'integrations/pi-acp/package.json', 'integrations/pi-acp/package-lock.json',
+            'integrations/pi-acp/compatibility.json')
 FORBIDDEN = {'.git', '.codex', 'node_modules', 'private', '__pycache__', '.aws', '.ssh'}
 
 

@@ -14,6 +14,8 @@ FILES = (
     'control.py', 'host_recheck.py', 'permissions.py', 'budget.py', 'recovery.py',
     'acp_bridge.py', 'acp_outcome.py', 'task_trace.py', 'pi_acp_worker.py',
     'pi_acp_exec.py', 'pi-path-guard.mjs', 'agent_native_events.py',
+    'pi_toolchain.py', 'integrations/pi-acp/compatibility.json',
+    'tests/pi_toolchain_support.py',
     'scripts/derive_pi_acp.py', 'scripts/create_acp_process_demo.py',
     'scripts/prepare_acp_process_candidate.py',
     'tests/fixtures/acp_fixture_cli.py', 'tests/fixtures/acp_fixture_agent.py',

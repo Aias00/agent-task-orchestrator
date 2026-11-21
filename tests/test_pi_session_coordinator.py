@@ -23,6 +23,7 @@ import session_router
 import transport
 from pi_session_coordinator import PiCoordinator, PiSessionAdapter, locate, private_read, provision_path
 from pi_session_profile import Launch, LocalPiProfile, SOURCE, ADAPTER_SHA256, derive_coordinator
+from pi_toolchain_support import tools_fixture
 
 FIXTURE = Path(__file__).parent/'fixtures/pi_coordinator_fixture.py'
 
@@ -390,14 +391,19 @@ class PiCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             apiKey='ato-local-dummy', api='openai-completions', models=[dict(id='scripted')])})
         profile = LocalPiProfile(configuration, 'fixture-local/scripted')
         runtime = self.root/'launch-construction'; runtime.mkdir(mode=0o700)
+        tools, _ = tools_fixture(self.root)
         # This tests command construction only. Even the version subprocess is
         # replaced; it is not an actual-Pi qualification or provider call.
-        with patch('pi_session_profile.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='1.5.2\n')):
+        with patch('pi_session_profile.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='1.5.2\n')), \
+                patch('pi_session_profile.prepare_toolchain', return_value=tools):
             launch = profile.launch(runtime, self.project, 'read-only')
         self.assertNotIn('CTASK_SESSION_TOKEN', launch.environment)
         self.assertNotIn('CODEX_HOME', launch.environment)
         self.assertNotIn('OPENAI_API_KEY', launch.environment)
         self.assertEqual(launch.environment['HOME'], str(runtime/'home'))
+        self.assertEqual(launch.environment['PATH'], '/usr/bin:/bin')
+        for name in ('NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'):
+            self.assertNotIn(name, launch.environment)
         self.assertEqual(launch.environment['PI_CODING_AGENT_DIR'], str(runtime/'native'))
         self.assertEqual(json.loads((runtime/'native/models.json').read_text()), configuration)
         self.assertIn('localhost:43210', (runtime/'sandbox.sb').read_text())

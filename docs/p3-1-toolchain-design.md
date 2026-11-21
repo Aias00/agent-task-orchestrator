@@ -1,8 +1,9 @@
 # P3-1：Pi/Node 工具链与 ACP 适配方案
 
-状态：待实施评审。2026-11-21 用户已授权进入 P3；本文按
+状态：评审通过，按 P3-1A / P3-1B 实施。2026-11-21 用户明确批准设计提交 `9aa83d6`，
+要求 A2、B2 两次独立提交，完成后等待验收再考虑合入 main。本文按
 [整改方案](remediation-plan.md) 第 6 节，交付 Batch 4 的设计与验收约定，
-待用户确认本文实施范围后再改运行代码。设计基于 `dc08da948bd9a1e5142e6528762be3ea89773644`。
+用户批准的范围执行；设计基于 `dc08da948bd9a1e5142e6528762be3ea89773644`。
 
 ## 1. 目标与本批边界
 
@@ -199,5 +200,22 @@ A2 与 B2 各形成可审查的源码提交；确认后在同一已授权 P3-1 �
 ## 9. 评审结论位置
 
 建议确认第 1 节的 P3-1A + P3-1B 为下一轮完整实施范围，第 7 节为最终验收条件。
-当前状态为设计完成、实现未开始；用户确认后记录确认来源和实施基线，不把本文自身的
-测试检查通过当作 P3-1 实现完成。
+用户已批准上述两步。实现分支基于 `9aa83d6`；不把设计阶段的测试检查通过当作
+P3-1 实现完成。生产更新与 P3-2 保持独立边界。
+
+### 既有夹具的必要扩充
+
+- `test_acp_stderr.py::test_pi_worker_passes_private_log_and_only_reports_type_and_diagnostic_path`：
+  保留 `PI/NODE/SANDBOX` patch 面，新增标准 `prepare_toolchain` 门面注入 synthetic 工具。
+  旧的空白 placeholder 不能通过新增的发布包准入；派生脚本改为真实离线运行，不再被
+  subprocess mock 跳过。原私有 stderr、错误类型、路径提示和无凭据泄露断言均保留。
+- `test_pi_session_coordinator.py::test_real_launch_construction_private_and_pinned_without_running_pi`：
+  保留 subprocess.run mock 和原全部隔离断言，另注入同一门面的 synthetic 结果，避免
+  新增 Node/Pi 探测触及真实 CLI。`NODE`/`ROOT` 导出保留，NODE 是只解析路径的惰性门面。
+- 新增工具链测试独立验证真实版本探测逻辑、两条 synthetic native 启动链、环境净化和
+  sandbox-exec 的写入/别名/重命名阻断；夹具不注册任何生产可选的 synthetic 后端。
+
+工具信任检查也应用于源码安装的祖先目录。其他用户可改写的源码/安装目录会拒绝运行；
+例如 group-writable 的挂载根不会被静默放宽。隔离测试复制同一源码至私有临时安装目录
+以验证准入，不修改本机挂载权限。发布包自身内容摘要不涵盖另行安装的 node_modules；
+依赖安装/lock integrity 和实际 provider 资格继续分别判断。

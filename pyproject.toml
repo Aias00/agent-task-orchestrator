@@ -58,6 +58,7 @@ py-modules = [
   "pi_coordinator_exec",
   "pi_session_coordinator",
   "pi_session_profile",
+  "pi_toolchain",
   "progress",
   "recovery",
   "runner",
@@ -68,3 +69,6 @@ py-modules = [
   "workflow_closure",
   "workflow_lineage"
 ]
+
+[tool.setuptools.data-files]
+"share/agent-task-orchestrator/integrations/pi-acp" = ["integrations/pi-acp/compatibility.json"]

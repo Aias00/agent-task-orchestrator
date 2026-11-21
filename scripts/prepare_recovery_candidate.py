@@ -26,7 +26,7 @@ def build():
         if sha(ROOT/name) != digest:
             raise ValueError('inherited test changed: '+name)
     files = {}
-    runtime_sources = {p.name for p in ROOT.glob('*.py')} | {p.relative_to(ROOT).as_posix() for p in (ROOT/'ato_cli').glob('*.py')} | {'pyproject.toml', 'requirements-acp.lock'}
+    runtime_sources = {p.name for p in ROOT.glob('*.py')} | {p.relative_to(ROOT).as_posix() for p in (ROOT/'ato_cli').glob('*.py')} | {'pyproject.toml', 'requirements-acp.lock', 'integrations/pi-acp/compatibility.json'}
     for name in sorted(set(baseline['files']) | EXTRA | runtime_sources):
         relative = Path(name)
         path = ROOT/relative
