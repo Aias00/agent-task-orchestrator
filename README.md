@@ -300,37 +300,45 @@ ctask delegation-status /absolute/project/.codex/tasks/delegations/DELEGATION_ID
 
 原生输出、stderr、调用信息和session/usage元数据在checkpoints/<attempt>.agent-runtime，目录0700。只接受成功终态的完整JSON，partial、错误、工具输出或截断不能冒充完成；缺认证返回blocked，不反复尝试。STOP/超时按同一进程组管理bridge、CLI及子进程，仓库锁/累计预算/独立验收保持原机制。
 
-上述 agents.py 阶段 worker/只读 planner 每次按完整合约和检查点重启；Claude worker 不持久化会话，Pi worker 保留本次 session。通信协调端使用另一套 message_adapters.py：Claude stream-json/精确 resume、Pi RPC/精确 session，支持多轮上下文和显式受管 origin/hub。第三方使用 origin_endpoint_id，不覆盖旧 origin_thread_id。协调端默认无工具，由可信 host 执行有权限的状态转换；模型结构化提问/接收事件不授予 shell、额外预算或业务执行许可。不支持注入任意既有交互窗口。
+上述 `agents.py` 阶段 worker/只读 planner 每次按完整合约和检查点重启；Claude worker 不持久化会话，Pi worker 保留本次 session。协调端由 `agent_registry.py` 注册能力、`session_router.py` 校验会话、`transport.py` 投递消息。`local_session_adapter.py` 提供被动本地 CLI origin/hub，`pi_session_coordinator.py` 提供受管 Pi 协调端；Claude 文件 worker 的可用性不代表已有通用 Claude 协调端。第三方使用显式 `origin_session_ref`，不覆盖旧 `origin_thread_id`。协调端工具与宿主状态转换按各自显式授权执行；模型结构化提问/接收事件不授予 shell、额外预算或业务执行许可。不支持注入任意既有交互窗口。能力范围见 [源码地图](docs/source-map.md) 与 [开发状态](docs/development-status.md)。
 
 验证分别报告：fixture CLI协议/进程测试，实际安装Pi+本地模拟模型端点（真实路径guard、write工具及独立验收），以及云端模型调用。前两者通过不证明账号额度或云端模型效果。缺少Claude登录或Pi provider凭据时是认证阻塞；真实云端验收需在目标机独立配置。开发环境另外验证过Pi真实provider调用和两阶段workflow，不能推广为每台机器已有登录或任意模型都同样可靠。仓库不携带node_modules、认证或会话；目标机独立安装CLI。非macOS暂不执行第三方worker。
 
 官方依据：[Claude headless](https://code.claude.com/docs/en/headless)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[Pi JSON](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md)。已按安装版本--help核对，升级需复验。
 
-持久化消息适配器同一受管会话串行接收后续消息。协议与混合 origin/hub 使用独立进程 fixture 验证；真实 Claude 2.1.325/Pi 1.5.2 曾由外部宿主通过本地 provider 双轮验证，后续源码变更须重新原生验收。worker 的 socket/nested sandbox 限制不等于宿主失败，也不能用旧证据宣称当前完整目标通过。未验证云端账号。接口与证据见 [agent-transports](docs/agent-transports.md) 和 [交付验证](docs/message-delivery-validation.md)。
+受管会话的消息传输与文件 worker 分别验收。主线离线 fixture 验证不等于当前版本的真实原生 CLI 或云端模型资格；历史候选的双轮结果也不能推广为通用 Claude/Pi 协调端支持。接口与资格边界见 [agent-transports](docs/agent-transports.md)、[交付验证](docs/message-delivery-validation.md) 和 [开发状态](docs/development-status.md)。
 
 
-### Agent-neutral workflow routing (feature checkout)
+### Agent-neutral workflow routing
 
 `interaction`, `control`, `recovery` and `delegation` deliver through the shared
-persistent mailbox and transport adapters. Managed Claude/Pi origins use explicit
-`mailbox-register` and `workflow-create --origin-endpoint`; existing Codex UUIDs,
-JSON outboxes, authorization sources and accumulated limits remain valid.
-Managed models can emit structured questions; actual sourced user answers return
-through the existing hub and origin-acceptance flow. A foreground `mailbox-pump`
-processes one managed native turn with tools disabled. No installed runtime is
-activated by this checkout. See [managed host interfaces](docs/agent-transports.md)
-and [workflow guards and compatibility](docs/message-protocol.md).
+persistent mailbox and transport adapters. Use `session-register --kind KIND
+--identity ID --project PROJECT --source SOURCE` for an adapter that can verify
+the exact existing session, or `local-session-create --project PROJECT --role
+origin --source SOURCE --credential-file PRIVATE_FILE` for a passive local CLI
+identity. Bind it with `workflow-create --repo PROJECT --plan CONTRACT
+--origin-ref REF`. Legacy `--origin-thread` UUIDs, JSON outboxes, authorization
+sources and accumulated limits remain supported. Automatic recovery additionally
+requires verified session observation and `--recovery-source`; passive local CLI
+identities do not provide native observation or resume. Actual sourced user
+answers return through the existing hub and origin-acceptance flow. No installed
+runtime is activated by this checkout. See [managed host interfaces](docs/agent-transports.md),
+[workflow guards and compatibility](docs/message-protocol.md) and the runnable
+[neutral CLI guide](docs/session-decoupling/neutral-cli.md).
 
 
 ### Offline upgrade and rollback
 
-`scripts/upgrade_runtime.py --dry-run --runtime /path/to/old-runtime` only reads
-source fingerprints and prints a plan. `--stage /new/private/stage --runtime
-/path/to/old-runtime` prepares an independent runtime; it never updates the old
-runtime, launcher, native config or hub. Optional explicit `--offline --state-root`
-snapshots and `--restore ... --destination NEW_DIR --offline` support temporary
-migration/rollback rehearsals. Legacy JSON/controller tables need no conversion;
-the mailbox is additive and unknown old deliveries are never imported as new sends.
-See [upgrade procedure](docs/runtime-upgrade.md) for operator activation prerequisites,
-current-ledger preservation and managed-origin rollback limits. Live installation
-is a separate authorized operation.
+Qualify the selected source in an independent checkout or immutable versioned
+snapshot. `scripts/install.py --bin-dir /custom/bin --helpers` installs launchers
+pointing at that source; it starts no services and migrates no task state. The
+`ctask` and `ctask-notify` launchers associate the sibling `ato-read-handoff` helper.
+Trusted host configuration may override it with `CTASK_HANDOFF_READER` pointing
+to an existing executable absolute path; otherwise the legacy home-bin reader
+remains the fallback. Reader commands are shell-quoted and notices stay below
+260 UTF-8 bytes; exceptionally long paths require a shorter trusted reader path.
+Switching live entrypoints or a controller requires separate explicit authority
+and a verified safe boundary. Rollback restores approved executable entrypoints,
+preserving current task/SQLite ledgers, STOP, attempts and unknown deliveries.
+See [upgrade procedure](docs/runtime-upgrade.md) for the current process and
+[development status](docs/development-status.md) for unmerged candidate features.

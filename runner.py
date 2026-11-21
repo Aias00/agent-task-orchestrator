@@ -888,8 +888,8 @@ def main():
         elif args.command in ('workflow-create', 'workflow-validate', 'acknowledge'):
             import workflow
             if args.command == 'workflow-create':
-                if args.auto_recover and (not args.origin_thread or not args.recovery_source):
-                    raise ValueError('auto-recover requires verified origin-thread and recovery-source')
+                if args.auto_recover and (not (args.origin_thread or args.origin_ref) or not args.recovery_source):
+                    raise ValueError('auto-recover requires verified --origin-thread or --origin-ref and --recovery-source')
                 directory = workflow.create(args.repo, args.plan, args.origin_thread, args.origin_ref)
                 if args.auto_recover:
                     import recovery

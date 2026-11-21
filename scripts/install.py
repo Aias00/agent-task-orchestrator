@@ -19,6 +19,11 @@ def main():
         parser.error('Python 3.12 or later is required')
     root = Path(__file__).resolve().parents[1]
     launcher = args.bin_dir.expanduser().resolve()/'ctask'
+    # This literal path comes from the trusted installer, never a workflow or PATH.
+    reader_env = ('if [ -z "${CTASK_HANDOFF_READER:-}" ]; then\n'
+                  '  CTASK_HANDOFF_READER='+shlex.quote(str(launcher.with_name('ato-read-handoff')))+'\n'
+                  '  export CTASK_HANDOFF_READER\n'
+                  'fi\n')
     skill = args.skills_dir.expanduser().resolve()/'codex-long-task' if args.skills_dir else None
     helpers = {}
     if args.helpers:
@@ -27,7 +32,7 @@ def main():
                 'case "${1-}" in\n'
                 '  control|notification-policy|followups|presented) ;;\n'
                 '  *) echo "Usage: ctask-notify {control|notification-policy|followups|presented} ..." >&2; exit 2 ;;\n'
-                'esac\n'
+                'esac\n'+reader_env+
                 'exec '+shlex.quote(sys.executable)+' '+shlex.quote(str(root/'runner.py'))+' "$@"\n'),
             launcher.with_name('ato-read-handoff'): (
                 'exec '+shlex.quote(sys.executable)+' '+shlex.quote(str(root/'coordination.py'))+' "$@"\n'),
@@ -39,7 +44,7 @@ def main():
     launcher.parent.mkdir(parents=True, exist_ok=True)
     temp = launcher.with_name('ctask.install-tmp-'+str(os.getpid()))
     try:
-        temp.write_text('#!/bin/sh\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(root/'runner.py'))+' "$@"\n')
+        temp.write_text('#!/bin/sh\n'+reader_env+'exec '+shlex.quote(sys.executable)+' '+shlex.quote(str(root/'runner.py'))+' "$@"\n')
         temp.chmod(0o755)
         os.replace(temp, launcher)
     finally:

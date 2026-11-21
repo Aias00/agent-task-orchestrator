@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 
 import interaction
@@ -12,7 +13,19 @@ import runner as core
 
 MARKER = 'host-handoff:'
 MAX_BYTES = 2 * 1024 * 1024
-READER = str(Path.home()/'.local/bin/ato-read-handoff')
+
+
+def reader_command():
+    """Use explicit trusted host configuration, never project files or PATH lookup."""
+    configured = os.environ.get('CTASK_HANDOFF_READER')
+    path = Path(configured).expanduser() if configured else None
+    if not (path and path.is_absolute() and path.is_file() and os.access(path, os.X_OK)):
+        path = Path.home()/'.local/bin/ato-read-handoff'
+    # Quote the directory separately so the standard helper name remains visible.
+    command = shlex.quote(str(path.parent))+'/'+shlex.quote(path.name)
+    if path.name != 'ato-read-handoff':
+        command = '/bin/sh -c '+shlex.quote('exec '+command+' "$@"')+' ato-read-handoff'
+    return command
 
 
 def identifier(directory, state):
@@ -55,6 +68,11 @@ def prepare(directory, state, contract, target, key, material):
     validate(directory, state, contract, expected)
     if not isinstance(material, str) or len(material.encode()) > MAX_BYTES:
         raise ValueError('handoff material bound exceeded')
+    notice = (f'[ctask-host-handoff id={expected}]\n'
+        f'{reader_command()} {expected}\n'
+        'Stale:silent; else:prior authority; no recap.')
+    if len(notice.encode('utf-8')) >= 260:
+        raise ValueError('handoff reader path exceeds compact notice byte limit; configure a shorter trusted path')
     path = payload_directory()/(expected+'.json')
     record = dict(version=1, id=expected, workflow=str(directory), target=target,
         contract_hash=state['contract_hash'], generation=recovery.generation(directory, state),
@@ -67,9 +85,7 @@ def prepare(directory, state, contract, target, key, material):
             import transport
             transport._private_save(path, record)
     # Retain the exact correlation marker, not task/authorization/host prose.
-    return (f'[ctask-host-handoff id={expected}]\n'
-        f'内部续办：先运行 {READER} {expected}。'
-        '无效则静默结束；有效按返回的原授权处理，不向用户复述交接。')
+    return notice
 
 
 def read(identifier_value):
