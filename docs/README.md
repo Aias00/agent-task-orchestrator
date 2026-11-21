@@ -27,6 +27,7 @@
 - [Stable baseline and development snapshots](development-status.md)
 - [Delivery validation boundaries](message-delivery-validation.md)
 - [Agent Task Orchestrator (ATO) 整改方案](remediation-plan.md)
+- [P3-1 工具链与 ACP 适配方案（待实施评审）](p3-1-toolchain-design.md)
 - [Capabilities and evidence levels](session-decoupling/capabilities.md)
 - [Trusted Codex session compatibility](session-decoupling/codex-adapter.md)
 - [Managed Pi ACP coordinator](session-decoupling/pi-coordinator.md)
