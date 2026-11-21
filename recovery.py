@@ -23,6 +23,9 @@ ACTIVE = {'running', 'planning', 'verifying', 'waiting'}
 REPAIR = {'blocked', 'error', 'cleanup_blocked', 'interrupted'}
 REPORT = {'needs_input', 'limit', 'stage_limit', 'planning_limit', 'contract_changed'}
 ALERT_STATES = {'stalled', 'blocked', 'delivery_unknown', 'send_failed', 'resume_failed'}
+WATCH_FAILURE_LIMIT = 5
+EVENT_BLOCK_BYTES = 64 * 1024
+_LINE_BOUNDARY = re.compile(rb'\r\n|[\n\r\v\f\x1c-\x1e]|\xc2\x85|\xe2\x80[\xa8\xa9]')
 
 
 @contextlib.contextmanager
@@ -42,6 +45,62 @@ def alive(pid):
         return False
     except PermissionError:
         return True  # Unknown ownership must not cause another execution.
+
+
+def pid_alive(info):
+    """Old records retain their PID-only compatibility; new records fence reuse."""
+    return alive(info.get('pid')) and ('pid_identity' not in info
+        or core.process_identity(info['pid']) == info['pid_identity'])
+
+
+def watch_ticks(tick, path, log_path, state_key, interval, stopped):
+    """Retry observation failures only; never replace or replay delivery records."""
+    failures, error = 0, None
+
+    def record(status, pid):
+        core.save(path, dict(pid=pid, pid_identity=core.process_identity(pid) if pid else None,
+            heartbeat=core.now(), **{state_key: status}, error=error, consecutive_failures=failures))
+
+    def log(exc):
+        message = f'{core.now()} {type(exc).__name__}: {exc}\n'
+        try:
+            with Path(log_path).open('a') as handle:
+                handle.write(message)
+        except OSError:
+            print(message, file=sys.stderr, end='', flush=True)
+
+    try:
+        while not stopped():
+            try:
+                keep = tick()
+                # A failed heartbeat write is also a bounded transient IO failure.
+                previous = failures, error
+                failures, error = 0, None
+                try:
+                    record('watching', os.getpid())
+                except Exception:
+                    failures, error = previous
+                    raise
+            except Exception as exc:
+                failures += 1
+                error = f'{type(exc).__name__}: {exc}'
+                log(exc)
+                try:
+                    record('retrying', os.getpid())
+                except OSError as write_error:
+                    log(write_error)
+                if failures >= WATCH_FAILURE_LIMIT:
+                    break
+                time.sleep(min(30, 2 ** (failures - 1)))
+                continue
+            if not keep:
+                break
+            time.sleep(interval)
+    finally:
+        try:
+            record('exited', None)
+        except OSError as write_error:
+            log(write_error)
 
 
 def session_path(home, thread):
@@ -118,7 +177,7 @@ def summary(directory):
     return dict(enabled=r['enabled'], status=r['status'], requests=len(r['requests']),
                 max_requests=r['max_requests'], deadline=r['deadline'],
                 handler=handler,
-                supervisor_pid=watch.get('pid'), supervisor_alive=alive(watch.get('pid')),
+                supervisor_pid=watch.get('pid'), supervisor_alive=pid_alive(watch),
                 heartbeat=watch.get('heartbeat'), last_error=watch.get('error'),
                 latest={k: latest.get(k) for k in ('id', 'state', 'mailbox_state', 'message_id', 'sent_at',
                        'responded_at', 'resumed_at', 'note', 'notification')} if latest else None)
@@ -127,17 +186,34 @@ def summary(directory):
 def generation(d, state):
     # A very fast resume can finish between watcher polls. The durable start event
     # still proves execution occurred, unlike a model's claim that it resumed.
-    last = None
     path = d/'events.jsonl'
     if path.exists():
-        for line in path.read_text().splitlines():
+        lines = (reversed(path.read_text().splitlines()) if path.stat().st_size <= EVENT_BLOCK_BYTES
+                 else reverse_event_lines(path))
+        for line in lines:
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
-            if event.get('event') == 'workflow_started':
-                last = event['time']
-    return [last, state.get('execution_revision', 0)]
+            if isinstance(event, dict) and event.get('event') == 'workflow_started' and 'time' in event:
+                return [event['time'], state.get('execution_revision', 0)]
+    return [None, state.get('execution_revision', 0)]
+
+
+def reverse_event_lines(path):
+    """Match str.splitlines, retaining incomplete lines/UTF-8 delimiters across blocks."""
+    with path.open('rb') as stream:
+        position = stream.seek(0, os.SEEK_END)
+        pending = b''
+        while position:
+            size = min(EVENT_BLOCK_BYTES, position)
+            position -= size
+            stream.seek(position)
+            parts = _LINE_BOUNDARY.split(stream.read(size) + pending)
+            pending = parts[0]
+            for line in reversed(parts[1:]):
+                yield line.decode('utf-8')
+        yield pending.decode('utf-8')
 
 
 def execution_resource(project):
@@ -634,12 +710,12 @@ def start(directory):
         return
     with locked(d/'supervisor-start.lock'):
         path = d/'supervisor.json'
-        if path.exists() and alive(core.read(path).get('pid')):
+        if path.exists() and pid_alive(core.read(path)):
             return
         with (d/'supervisor.log').open('ab') as log:
             proc = subprocess.Popen(core.runtime_command('_supervisor', d), stdin=subprocess.DEVNULL,
                                     stdout=log, stderr=log, start_new_session=True)
-        core.save(path, dict(pid=proc.pid, heartbeat=core.now(), status='launching'))
+        core.save(path, dict(pid=proc.pid, pid_identity=core.process_identity(proc.pid), heartbeat=core.now(), status='launching'))
 
 
 def watch(directory, interval=5):
@@ -653,15 +729,5 @@ def watch(directory, interval=5):
             stop = True
         signal.signal(signal.SIGTERM, interrupt)
         signal.signal(signal.SIGINT, interrupt)
-        error = None
-        try:
-            while not stop:
-                keep = tick(d)
-                core.save(d/'supervisor.json', dict(pid=os.getpid(), heartbeat=core.now(), status='watching'))
-                if not keep:
-                    break
-                time.sleep(interval)
-        except Exception as exc:
-            error = str(exc)
-        finally:
-            core.save(d/'supervisor.json', dict(pid=None, heartbeat=core.now(), status='exited', error=error))
+        watch_ticks(lambda: tick(d), d/'supervisor.json', d/'supervisor.log',
+                    'status', interval, lambda: stop)

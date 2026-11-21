@@ -20,6 +20,22 @@ def main():
         parser.add_argument('--'+name, required=True)
     parser.add_argument('--model')
     args = parser.parse_args()
+    try:
+        invoke(args)
+    except Exception as exc:
+        hint = ''
+        try:
+            diagnostic = Path(args.directory).resolve()/'checkpoints'/(args.label+'.acp-runtime')/'stderr.log'
+            if diagnostic.is_file():
+                hint = f' (inspect private runtime stderr at {diagnostic})'
+        except (OSError, ValueError, RuntimeError):
+            pass  # A failed diagnostic lookup must not expose the original exception chain.
+        print('ACP Pi worker failed: '+type(exc).__name__+hint, file=sys.stderr)
+        return 1
+    return 0
+
+
+def invoke(args):
     import agents
     import runner
     import acp_bridge
@@ -51,12 +67,7 @@ def main():
         env['CTASK_PI_MODEL'] = args.model
     command = [str(SANDBOX), '-f', str(profile), str(NODE), str(derived/'pi-acp.mjs')]
     acp_bridge.main(command, [str(directory), args.label, args.schema, args.output],
-                    environment=env, native_result_only=True)
+                    environment=env, native_result_only=True, stderr_path=runtime/'stderr.log')
 
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as exc:
-        # Never persist raw protocol errors or stderr, which can contain secrets.
-        print('ACP Pi worker failed: '+type(exc).__name__, file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())

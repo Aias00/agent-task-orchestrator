@@ -206,6 +206,8 @@ ctask takeover WORKFLOW_DIR --request REQUEST_ID --state repaired --evidence /ab
 
 `recovery.json` 保存授权来源、目标会话、全部请求与去重记录；`supervisor.json` 保存心跳/进程；`supervisor.log` 保留监督异常。`status`/`list` 同时显示 workflow 与 recovery 状态。queued 是已入队，responded_at 是观察到该请求后的回复，working 是接手登记，repaired 是修复证据登记，resumed 是实际恢复，completed 才是总任务验收完成。
 
+Controller 与 supervisor 的新进程记录包含内核启动身份 `pid_identity`，检查存活时校验 PID 和身份；旧文件缺少该字段时保留 PID-only 兼容行为。单次观察或心跳 IO 异常会记录状态与日志，以 1、2、4、8 秒退避，连续 5 次失败后退出；成功后连续计数清零。`KeyboardInterrupt`/`SystemExit` 继续向外传播，重试不清理或重发未知投递。监督代次从事件文件尾部查找最新合法启动记录，保留原执行代次和损坏 JSON 行容错。
+
 发送前先落盘 outbox；发送超时、崩溃或回执不明时标 delivery_unknown，不盲目重发。长时间无有效接管/恢复会标 stalled；启动失败标 resume_failed；这时需核对原会话和队列，而非另起平行修复。重复 supervise 不绕过去重。`stop` 的 STOP 文件阻止后续通知与接管，`unsupervise` 只关闭监督、不停止业务 worker；已经入队的消息无法撤回，原会话必须先通过 takeover 有效性检查。当前仍依赖本机开机、未休眠、Codex 会话服务可达；没有开机自启或跨机器通知。
 
 
@@ -296,9 +298,11 @@ ctask delegation-status /absolute/project/.codex/tasks/delegations/DELEGATION_ID
 
 安装验证版本：Claude Code 2.1.325；Pi `@earendil-works/pi-coding-agent` 1.5.2。工具装在 `~/.local/share/ctask-agent-clis`，不写业务工程。查找顺序为CTASK_CLAUDE_BIN/CTASK_PI_BIN、PATH、该目录node_modules/.bin。二进制覆盖必须来自受信任本机配置，计划不能传任意CLI flags。认证使用原生CLI登录/配置或环境变量，不把key放入plan、argv、日志或共享记忆。上游旧@mariozechner包已迁移，不保留两个pi入口。
 
-第一版仅支持macOS外部worker，要求sandbox-exec，不提供无沙箱回退。模型仅有文件读/查找/编辑/写入工具；无Bash、Web、MCP、子agent或自动加载的skills。构建/测试通过既定宿主checks执行。Claude启用safe-mode/restricted/dontAsk及明确工具清单；Pi关闭自动扩展/MCP/skills/上下文资源，只显式加载pi-path-guard.mjs。guard按真实路径检查范围和外部符号链接；模型不能写.git、.codex或原生认证目录。OS策略限制文件写入，允许受信任CLI自身认证/缓存目录和本次runtime；CLI客户端仍需联网调用模型，这不是Codex原生沙箱的完整复制。只读规划器无写工具。
+第一版仅支持macOS外部worker，要求sandbox-exec，不提供无沙箱回退。模型仅有文件读/查找/编辑/写入工具；无Bash、Web、MCP、子agent或自动加载的skills。构建/测试通过既定宿主checks执行。Claude启用safe-mode/restricted/dontAsk及明确工具清单；Pi关闭自动扩展/MCP/skills/上下文资源，只显式加载pi-path-guard.mjs。guard检查显式路径与逐级符号链接，拒绝路径进入任一级 `.git`、`.codex`、`.ato`、`.pi`、`.aws`、`.ssh`、`.env`，并保留仓库根 `.` 的正常 ls/find/grep 入口。OS工作区写规则同步排除这些敏感段。传统 Claude/Pi profile 为登录与缓存兼容性保留原生目录 OS 写权限，`agent-doctor` 如实标注；`acp_pi` profile 的原生凭据仅可读。CLI客户端仍需联网调用模型，这不是Codex原生沙箱的完整复制。只读规划器无写工具。
 
 原生输出、stderr、调用信息和session/usage元数据在checkpoints/<attempt>.agent-runtime，目录0700。只接受成功终态的完整JSON，partial、错误、工具输出或截断不能冒充完成；缺认证返回blocked，不反复尝试。STOP/超时按同一进程组管理bridge、CLI及子进程，仓库锁/累计预算/独立验收保持原机制。
+
+ACP Pi worker 的私有诊断位于 `checkpoints/<attempt>.acp-runtime/stderr.log`：runtime 为0700，日志为0600，每次截断后最多保存1 MiB，达到上限后继续排空子进程 stderr 管道。失败只向父进程报告异常类型及私有诊断路径；SDK 协议校验日志也仅保留安全类型。`task_trace` 继续只存元数据，不收录 stderr 或协议正文。
 
 上述 `agents.py` 阶段 worker/只读 planner 每次按完整合约和检查点重启；Claude worker 不持久化会话，Pi worker 保留本次 session。协调端由 `agent_registry.py` 注册能力、`session_router.py` 校验会话、`transport.py` 投递消息。`local_session_adapter.py` 提供被动本地 CLI origin/hub，`pi_session_coordinator.py` 提供受管 Pi 协调端；Claude 文件 worker 的可用性不代表已有通用 Claude 协调端。第三方使用显式 `origin_session_ref`，不覆盖旧 `origin_thread_id`。协调端工具与宿主状态转换按各自显式授权执行；模型结构化提问/接收事件不授予 shell、额外预算或业务执行许可。不支持注入任意既有交互窗口。能力范围见 [源码地图](docs/source-map.md) 与 [开发状态](docs/development-status.md)。
 

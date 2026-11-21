@@ -878,19 +878,19 @@ def status():
     cfg = settings()
     p = directory()/'process.json'
     process = core.read(p) if p.exists() else {}
-    return dict(config=cfg, process=process, process_alive=recovery.alive(process.get('pid')),
+    return dict(config=cfg, process=process, process_alive=recovery.pid_alive(process),
                 pending=rows(), database=str(directory()/'state.sqlite'))
 
 
 def start():
     with recovery.locked(directory()/'start.lock'):
         p = directory()/'process.json'
-        if p.exists() and recovery.alive(core.read(p).get('pid')):
+        if p.exists() and recovery.pid_alive(core.read(p)):
             return status()
         with (directory()/'worker.log').open('ab') as log:
             proc = subprocess.Popen(core.runtime_command('_controller'),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        core.save(p, dict(pid=proc.pid, heartbeat=core.now(), state='launching'))
+        core.save(p, dict(pid=proc.pid, pid_identity=core.process_identity(proc.pid), heartbeat=core.now(), state='launching'))
     return status()
 
 
@@ -904,12 +904,5 @@ def watch(interval=5):
             stopped = True
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
-        error = None
-        try:
-            while not stopped and tick():
-                core.save(directory()/'process.json', dict(pid=os.getpid(), heartbeat=core.now(), state='watching'))
-                time.sleep(interval)
-        except Exception as exc:
-            error = str(exc)
-        finally:
-            core.save(directory()/'process.json', dict(pid=None, heartbeat=core.now(), state='exited', error=error))
+        recovery.watch_ticks(tick, directory()/'process.json', directory()/'worker.log',
+                             'state', interval, lambda: stopped)

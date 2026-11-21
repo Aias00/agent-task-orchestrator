@@ -4,14 +4,107 @@ The bridge imports the ACP SDK only in its child invocation. A profile owns its
 command and its native-receipt protocol; plans cannot select paths or commands.
 """
 import asyncio
+from contextlib import asynccontextmanager, contextmanager
 import io
 import json
+import logging
+import os
 import re
+import stat
 import sys
 import uuid
 from pathlib import Path
 
 import agent_registry
+
+STDERR_MAX_BYTES = 1024 * 1024
+
+
+@contextmanager
+def safe_protocol_logging():
+    """SDK validation stacks can embed protocol values, even with stderr piped."""
+    import acp
+    source = str(Path(acp.__file__).resolve().parent) + os.sep
+
+    class ProtocolFilter(logging.Filter):
+        def filter(self, record):
+            if record.pathname.startswith(source) or record.name.startswith('asyncio'):
+                kind = type(record.exc_info[1]).__name__ if record.exc_info else 'ProtocolError'
+                record.msg, record.args = 'ACP SDK diagnostic: %s', (kind,)
+                record.exc_info = record.exc_text = record.stack_info = None
+            return True
+
+    filter_ = ProtocolFilter()
+    loggers = (logging.getLogger(), logging.getLogger('asyncio'))
+    for logger in loggers:
+        logger.addFilter(filter_)
+    try:
+        yield
+    finally:
+        for logger in loggers:
+            logger.removeFilter(filter_)
+
+
+@contextmanager
+def private_stderr(path, directory):
+    if path is None:
+        yield None
+        return
+    path = Path(path).absolute()
+    parent = path.parent.resolve(strict=True)
+    info = path.parent.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.getuid() or not parent.is_relative_to(directory/'checkpoints')):
+        raise ValueError('stderr requires a private runtime directory inside run checkpoints')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise ValueError('stderr requires an owned regular file without hard links')
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        handle = os.fdopen(fd, 'wb')
+        fd = None
+        with handle:
+            yield handle
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+async def drain_stderr(stream, log):
+    written, writable = 0, True
+    while chunk := await stream.read(65536):
+        # Keep draining after the disk cap (or a disk error) so the child cannot
+        # deadlock on a full pipe. No raw diagnostic enters parent stderr/trace.
+        if writable and written < STDERR_MAX_BYTES:
+            try:
+                part = chunk[:STDERR_MAX_BYTES-written]
+                log.write(part)
+                written += len(part)
+            except OSError:
+                writable = False
+
+
+@asynccontextmanager
+async def agent_process(client, command, directory, repo, environment, stderr_path):
+    import acp
+    draining = None
+    with private_stderr(stderr_path, directory) as log, safe_protocol_logging():
+        try:
+            async with acp.spawn_agent_process(client, *command, cwd=repo, env=environment,
+                transport_kwargs={'stderr': asyncio.subprocess.PIPE if log else asyncio.subprocess.DEVNULL}) as pair:
+                if log:
+                    draining = asyncio.create_task(drain_stderr(pair[1].stderr, log))
+                yield pair
+        finally:
+            # The SDK closes/terminates the process before this final drain.
+            # A descendant retaining the pipe cannot hold bridge cleanup forever.
+            if draining is not None:
+                try:
+                    await asyncio.wait_for(draining, timeout=2)
+                except TimeoutError:
+                    pass
 
 
 class ACPAdapter:
@@ -26,7 +119,8 @@ class ACPAdapter:
                 request.label, str(request.schema), str(request.output)]
 
 
-async def invoke(command, directory, label, schema_path, output, prompt, *, environment=None, native_result_only=False):
+async def invoke(command, directory, label, schema_path, output, prompt, *, environment=None,
+                 native_result_only=False, stderr_path=None):
     # Import lazily so the original standard-library-only routes still work.
     import acp
     from acp.schema import TextContentBlock, RequestPermissionResponse, DeniedOutcome
@@ -107,8 +201,7 @@ async def invoke(command, directory, label, schema_path, output, prompt, *, envi
                                           source='native', **context)
 
     client = Client()
-    async with acp.spawn_agent_process(client, *command, cwd=repo, env=environment,
-                                       transport_kwargs={'stderr': asyncio.subprocess.DEVNULL}) as (conn, proc):
+    async with agent_process(client, command, directory, repo, environment, stderr_path) as (conn, proc):
         await conn.initialize(protocol_version=1)
         session = await conn.new_session(cwd=str(repo))
         client.session = session.session_id
@@ -138,8 +231,8 @@ async def invoke(command, directory, label, schema_path, output, prompt, *, envi
         runner.save(output, value)
 
 
-def main(command, args, *, environment=None, native_result_only=False):
+def main(command, args, *, environment=None, native_result_only=False, stderr_path=None):
     if len(args) != 4:
         raise ValueError('bridge requires run, label, schema, and output')
     asyncio.run(invoke(command, *args, sys.stdin.read(), environment=environment,
-                       native_result_only=native_result_only))
+                       native_result_only=native_result_only, stderr_path=stderr_path))

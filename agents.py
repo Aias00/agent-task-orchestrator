@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import agent_registry as registry
 from codex_session_adapter import CodexSessionAdapter
 
 KINDS = ('codex', 'claude', 'pi')
+SENSITIVE_PATHS = ('.git', '.codex', '.ato', '.pi', '.aws', '.ssh', '.env')
 MANAGED = Path.home()/'.local/share/ctask-agent-clis/node_modules/.bin'
 
 
@@ -65,7 +67,14 @@ def doctor():
                     validity='not verified; configure a provider/model then run an isolated task')
         except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
             row['error'] = str(exc)
-        row['worker_guard'] = 'native' if kind == 'codex' else ('macOS sandbox-exec; file tools only' if Path('/usr/bin/sandbox-exec').exists() else 'unavailable; external execution refused')
+        if kind == 'codex':
+            row['worker_guard'] = 'native'
+        elif Path('/usr/bin/sandbox-exec').exists():
+            native = '~/.claude and ~/.claude.json' if kind == 'claude' else 'the configured Pi native agent directory'
+            row['worker_guard'] = ('macOS sandbox-exec; file tools only; legacy CLI metadata/auth directory '
+                +native+' remains OS-writable for login/cache compatibility; acp_pi keeps native credentials read-only')
+        else:
+            row['worker_guard'] = 'unavailable; external execution refused'
         rows.append(row)
     return rows
 
@@ -245,9 +254,11 @@ def sandbox_profile(repo, runtime, mode, kind=None):
         folder = Path(os.environ.get('PI_CODING_AGENT_DIR', str(Path.home()/'.pi/agent')))
         rules.append('(allow file-write* (subpath '+quote(folder)+'))')
     if mode == 'workspace-write':
-        rules.append('(allow file-write* (require-all (subpath '+quote(repo)+') '
-                     '(require-not (subpath '+quote(repo/'.git')+')) '
-                     '(require-not (subpath '+quote(repo/'.codex')+'))))')
+        exclusions = ' '.join('(require-not (subpath '+quote(repo/name)+'))' for name in SENSITIVE_PATHS)
+        # Also exclude nested sensitive segments and their physical symlink targets.
+        pattern = '^'+re.escape(str(Path(repo).resolve()))+'/([^/]+/)*('+'|'.join(map(re.escape, SENSITIVE_PATHS))+')(/|$)'
+        rules.append('(allow file-write* (require-all (subpath '+quote(repo)+') '+exclusions+
+                     ' (require-not (regex '+json.dumps(pattern)+'))))')
     return '\n'.join(rules)+'\n'
 
 
