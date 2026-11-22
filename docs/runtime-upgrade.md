@@ -57,15 +57,42 @@ activation permission.
   --bin-dir /tmp/ato-bin --ato-home /tmp/ato-state --codex-home /tmp/ato-native \
   --transaction /tmp/ato-release-transaction
 
+# If the inspected installation selects mixed old sources, operator approval
+# must explicitly include convergence. This additional flag never skips checks.
+.venv/bin/python scripts/release_snapshot.py --activate --allow-runtime-change \
+  --converge-mixed-entrypoints \
+  --commit FULL_COMMIT_HASH --snapshot /tmp/ato-releases/FULL_COMMIT_HASH \
+  --bin-dir /tmp/ato-bin --ato-home /tmp/ato-state --codex-home /tmp/ato-native \
+  --transaction /tmp/ato-mixed-release-transaction
+
 .venv/bin/python scripts/release_snapshot.py --rollback --allow-runtime-change \
   --bin-dir /tmp/ato-bin --ato-home /tmp/ato-state --codex-home /tmp/ato-native \
   --transaction /tmp/ato-release-transaction
 ```
 
-`--dry-run` checks the commit/tree, three installed launchers, selected source,
-unique controller and kernel start identity, policy hashes and mailbox. It
-prints a plan and `activation_ready`, without creating runtime directories,
-locks, backups or entrypoints. SQLite inspection reads a stable main/WAL copy
+`--dry-run` checks the commit/tree and each of the three installed launchers,
+reporting its own absolute `python`, `root`, `script`, checksum and mode. Different
+source roots **or interpreter paths** set `mixed_sources=true` and
+`converge_required=true`; they do not end inspection early. The old observer is
+always checked against **ctask-notify's** interpreter and runner source, even
+when ctask and the handoff reader select other sources. Exactly one controller
+with that precise command, matching kernel start `pid_identity` and healthy
+heartbeat is required. `observer_source` makes this choice explicit (`source`
+remains its compatibility alias).
+
+The report continues through policy hashes and selected settings in
+`policy_status`, plus mailbox envelope counts, blocking states and `turn_slots`
+counts (`idle`, `busy`, `total`). An idle slot here means a stored envelope with
+`busy=0`, not authorization to drain or replay that envelope. A queued/unknown
+envelope still blocks activation even if its slot is idle. `mailbox.idle` is true
+only when both envelope states and all external turn slots permit the boundary.
+`activation_blockers` explains missing qualification, mixed sources and busy
+mailbox conditions; `activation_requires` lists explicit activation flags.
+`activation_ready` describes the default activation mode, so it stays false for
+a mixed installation even with a qualified target and idle mailbox.
+
+Dry-run prints this plan without creating a snapshot, runtime directories,
+locks, backups or entrypoints, or changing policies or processes. SQLite inspection reads a stable main/WAL copy
 in a temporary directory, so it cannot create shared-memory files in the live
 mailbox. A changing database, missing policy/binding, unknown schema or ambiguous
 process refuses inspection; busy mailboxes appear in the plan without draining.
@@ -89,6 +116,15 @@ prerequisites. Failed stage directories retain their evidence, have no qualified
 manifest, and must not be reused as a destination.
 
 `--activate` requires a full 40-character commit and `--allow-runtime-change`.
+Mixed old entrypoints are refused by default. Only **both** that permission flag
+and `--converge-mixed-entrypoints` allow explicit convergence; the latter is
+accepted only in activate mode. Every old launcher must still be a regular
+executable with recognized absolute interpreter/script paths and existing source
+files. The three old entries may each select a different interpreter and source;
+no old entry is inferred from another. The unique old controller must select
+ctask-notify's exact old command and match its recorded `pid_identity`. These
+requirements, policy checks and mailbox gates are identical in convergence mode.
+
 It refuses queued, claimed, dispatching or delivery_unknown envelopes and **any
 busy external turn slot**, including delivered or cancelled envelopes. It
 records private launcher bytes/modes/checksums and policy hashes in
@@ -115,6 +151,13 @@ entrypoint replacement stops automatic recovery for operator inspection.
 `--rollback` accepts the same transaction and home/bin context. It checks idle
 mailbox and observer identity again, restores **only the three executable
 entrypoints** and starts the prior observer from its still-available source.
+For a convergence transaction, `before.entries` retains each launcher's own
+original bytes, mode and checksum, and `before.sources` records all three old
+sources. Rollback restores the distinct entries individually, then starts the
+observer from the backed-up **ctask-notify** source, rather than from ctask's
+possibly different old root. It needs `--allow-runtime-change`, without another
+convergence flag. Existing version-1 transactions remain supported. Failed
+partial convergence uses the same per-entry restoration and old observer source.
 It does not copy any task, STOP marker, contract, attempt counter, elapsed time,
 mailbox or SQLite ledger. Progress since activation therefore remains current.
 Keep the transaction and all old snapshots as long as existing workers or

@@ -110,10 +110,15 @@ def entrypoints(bin_dir):
     return {name: file_record(bin_dir/name) for name in ENTRIES}
 
 
-def launcher_source(entries):
-    selected = []
-    for name, row in entries.items():
-        lines = base64.b64decode(row['data']).decode().splitlines()
+def launcher_sources(entries):
+    """Parse every launcher without running it; a mixed installation is valid input."""
+    require(set(entries) == set(ENTRIES), 'expected all three installed entrypoints')
+    selected = {}
+    for name in ENTRIES:
+        row = entries[name]
+        data = base64.b64decode(row['data'], validate=True)
+        require(hashlib.sha256(data).hexdigest() == row['sha256'], 'entrypoint backup checksum mismatch: '+name)
+        lines = data.decode().splitlines()
         commands = [shlex.split(line) for line in lines if line.startswith('exec ')]
         require(len(commands) == 1 and len(commands[0]) == 4 and commands[0][-1] == '$@',
                 'unrecognized installed launcher: '+name)
@@ -122,10 +127,17 @@ def launcher_source(entries):
         require(Path(python).is_absolute() and root.is_absolute() and
                 Path(script).name == ('coordination.py' if name == 'ato-read-handoff' else 'runner.py'),
                 'unrecognized installed source: '+name)
-        require(Path(python).is_file() and Path(script).is_file(), 'previous source is unavailable')
-        selected.append((str(root), python))
-    require(len(set(selected)) == 1, 'entrypoints select different sources')
-    return dict(root=selected[0][0], python=selected[0][1])
+        require(Path(python).is_file() and Path(script).is_file(),
+                'previous source is unavailable: '+name)
+        selected[name] = dict(root=str(root), python=python, script=script)
+    return selected
+
+
+def launcher_source(entries):
+    sources = launcher_sources(entries)
+    require(len({(s['root'], s['python']) for s in sources.values()}) == 1,
+            'entrypoints select different sources')
+    return {k: sources['ctask-notify'][k] for k in ('root', 'python')}
 
 
 def mailbox_counts(con):
@@ -136,7 +148,9 @@ def mailbox_counts(con):
     # external turn slot. A terminal label alone does not prove quiescence.
     for state, count in con.execute('select state,count(*) from messages where busy != 0 group by state'):
         busy[state] = max(busy.get(state, 0), count)
-    return dict(counts=counts, busy=busy)
+    slots = dict(con.execute('select busy != 0,count(*) from messages group by busy != 0'))
+    return dict(counts=counts, busy=busy, idle=not busy,
+                turn_slots=dict(idle=slots.get(0, 0), busy=slots.get(1, 0), total=sum(slots.values())))
 
 
 def mailbox(state):
@@ -395,7 +409,7 @@ class System:
         expected = source['python']+' '+str(Path(source['root'])/'runner.py')+' _controller'
         processes = self.processes()
         require(len(processes) == 1 and processes[0]['pid'] == row.get('pid') and
-                ' '.join(processes[0]['command'].split()) == ' '.join(expected.split()),
+                processes[0]['command'] == expected,
                 'expected exactly one controller selecting the installed source')
         require(row.get('pid_identity') is not None and self.identity(row['pid']) == row['pid_identity'],
                 'controller pid_identity mismatch (possible PID reuse)')
@@ -438,15 +452,28 @@ class System:
         raise Refused('controller did not produce two independently verified healthy heartbeats')
 
 
-def inspect(bin_dir, state, system):
+def inspect(bin_dir, state, system, *, allow_mixed=False):
     entries = entrypoints(bin_dir)
-    source = launcher_source(entries)
+    sources = launcher_sources(entries)
+    mixed = len({(s['root'], s['python']) for s in sources.values()}) != 1
+    require(not mixed or allow_mixed,
+            'entrypoints select different sources; explicit --converge-mixed-entrypoints is required')
+    # The notification launcher owns the observer, independently of ctask and
+    # the reader. Keep source as the observer source for v1 recovery journals.
+    source = {k: sources['ctask-notify'][k] for k in ('root', 'python')}
     policies = policy_hashes(state)
+    policy_status = {}
+    for name, digest in policies.items():
+        value = read(state/name) if digest is not None else {}
+        policy_status[name] = dict(present=digest is not None, sha256=digest,
+            settings={k: value[k] for k in ('mode', 'completion', 'enabled', 'max_reminders',
+                      'hub_thread', 'thread_id') if k in value})
     cfg = read(state/'control/config.json')
     hub = read(state/'hub.json')
     require(cfg.get('enabled') is True and cfg.get('hub_thread') == hub.get('thread_id'),
             'controller/hub binding is disabled or inconsistent')
-    return dict(entries=entries, source=source, policies=policies,
+    return dict(entries=entries, sources=sources, mixed_sources=mixed, converge_required=mixed,
+                source=source, observer_source=source, policies=policies, policy_status=policy_status,
                 observer=system.observer(state, source), mailbox=mailbox(state))
 
 
@@ -501,6 +528,9 @@ def release_lock(bin_dir):
 def restore(journal, bin_dir, state, env, system):
     same_policies(state, journal['before']['policies'])
     old = journal['before']
+    sources = launcher_sources(old['entries'])
+    require(old['source'] == {k: sources['ctask-notify'][k] for k in ('root', 'python')},
+            'recorded prior observer differs from notification launcher')
     # A crash can leave a partial set. Restore only our old/new bytes, never
     # overwrite a third party's later installation.
     current = entrypoints(bin_dir)
@@ -509,11 +539,10 @@ def restore(journal, bin_dir, state, env, system):
                 'entrypoint changed outside this transaction: '+name)
     processes = system.processes()
     if processes:
-        source = journal['target'] if all(current[n]['sha256'] == journal['after_entries'][n]['sha256'] for n in ENTRIES) else old['source']
         # A partially replaced wrapper set may coexist with either source;
         # independently inspect the process against each exact trusted source.
         try:
-            observer = system.observer(state, source, healthy=False)
+            observer = system.observer(state, journal['target'], healthy=False)
         except Refused:
             observer = system.observer(state, old['source'], healthy=False)
         system.stop(observer)
@@ -527,11 +556,11 @@ def restore(journal, bin_dir, state, env, system):
     return observer
 
 
-def activate(root, commit, bin_dir, state, transaction, env, system=None):
+def activate(root, commit, bin_dir, state, transaction, env, system=None, *, converge_mixed=False):
     system = system or System()
     verify_snapshot(root, commit)
     with release_lock(bin_dir):
-        before = inspect(bin_dir, state, system)
+        before = inspect(bin_dir, state, system, allow_mixed=converge_mixed)
         require(not before['mailbox']['busy'], 'mailbox is not idle; queued/unknown messages are never replayed')
         after = generated_entries(root, bin_dir)
         target = launcher_source(after)
@@ -602,12 +631,16 @@ def main(argv=None):
     parser.add_argument('--npm-bin', type=Path, help='Trusted host npm CLI for staging (otherwise resolve operator PATH once)')
     parser.add_argument('--commit', help='Explicit trusted Git revision; no implicit HEAD')
     parser.add_argument('--allow-runtime-change', action='store_true', help='Required for activate/rollback; starts/stops only the observer')
+    parser.add_argument('--converge-mixed-entrypoints', action='store_true',
+                        help='Activate only: explicitly converge three validated sources, retaining per-entry rollback')
     args = parser.parse_args(argv)
     def need(*names):
         for name in names:
             if getattr(args, name) is None:
                 parser.error('--'+name.replace('_', '-')+' is required for this mode')
     try:
+        if args.converge_mixed_entrypoints and not args.activate:
+            parser.error('--converge-mixed-entrypoints is only supported with --activate')
         need('snapshot', 'commit') if not args.rollback else need('transaction')
         if args.stage or args.dry_run:
             need('repo')
@@ -637,20 +670,33 @@ def main(argv=None):
                         'transaction backups must be outside runtime homes, snapshot and bin-dir')
             if args.dry_run:
                 commit, tree = git_commit(args.repo, args.commit)
-                report = inspect(args.bin_dir, state, System())
+                report = inspect(args.bin_dir, state, System(), allow_mixed=True)
                 if args.snapshot.exists():
                     verify_snapshot(args.snapshot, commit)
+                blockers = []
+                if not args.snapshot.exists():
+                    blockers.append('snapshot must be staged and qualified')
+                if report['mixed_sources']:
+                    blockers.append('mixed entrypoints require --allow-runtime-change and --converge-mixed-entrypoints')
+                if report['mailbox']['busy']:
+                    blockers.append('mailbox is not idle; no queue draining or replay is allowed')
                 result = dict(mode='dry-run', commit=commit, tree=tree, snapshot=str(args.snapshot),
-                    entrypoints={k: dict(sha256=v['sha256'], mode=v['mode']) for k, v in report['entries'].items()},
-                    source=report['source'], observer=report['observer'], policies=report['policies'],
+                    entrypoints={k: dict(sha256=v['sha256'], mode=v['mode'], **report['sources'][k])
+                                 for k, v in report['entries'].items()},
+                    mixed_sources=report['mixed_sources'], converge_required=report['converge_required'],
+                    source=report['source'], observer_source=report['observer_source'],
+                    observer=report['observer'], policies=report['policies'], policy_status=report['policy_status'],
                     mailbox=report['mailbox'], stage_required=not args.snapshot.exists(),
-                    activation_ready=args.snapshot.exists() and not report['mailbox']['busy'],
+                    activation_ready=not blockers, activation_blockers=blockers,
+                    activation_requires=['--activate', '--allow-runtime-change'] +
+                        (['--converge-mixed-entrypoints'] if report['mixed_sources'] else []),
                     plan=['git archive, isolated dependencies, full qualification, read-only seal',
                           'explicit activation: backup entrypoints, SIGTERM observer, idle writer barrier, atomic per-entry replace, verify observer',
                           'rollback: executable entrypoints and observer only; no task or ledger restoration'])
             elif args.activate:
                 require(len(args.commit) == 40 and all(c in '0123456789abcdef' for c in args.commit), 'activate requires the full commit hash')
-                result = activate(args.snapshot, args.commit, args.bin_dir, state, args.transaction, env)
+                result = activate(args.snapshot, args.commit, args.bin_dir, state, args.transaction, env,
+                                  converge_mixed=args.converge_mixed_entrypoints)
             else:
                 result = rollback(args.transaction, args.bin_dir, state, env)
         print(json.dumps(result, indent=2, sort_keys=True))
