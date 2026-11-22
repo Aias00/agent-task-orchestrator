@@ -301,7 +301,7 @@ def _write_new(path, content, mode=0o600):
         os.fsync(stream.fileno())
 
 
-def write_launch(runtime, project, role, toolchain):
+def write_launch(runtime, project, role, toolchain, *, production=False):
     """Called by trusted host code only, after resolution and derivation."""
     if role not in ('worker', 'coordinator'):
         raise ToolchainError('unknown Pi role')
@@ -315,10 +315,16 @@ def write_launch(runtime, project, role, toolchain):
     trusted.mkdir(mode=0o700)
     record = dict(schema=1, role=role, runtime=str(runtime), project=str(project),
         registry_sha256=file_sha256(REGISTRY), toolchain=toolchain.mapping(), adapter_sha256=expected)
+    if production:
+        if role != 'coordinator':
+            raise ToolchainError('production is a separate coordinator profile')
+        record.update(profile_id='production-pi-v1', production_sources=production_sources(project, runtime))
     temporary = trusted/'toolchain.json.tmp'
     _write_new(temporary, json.dumps(record, sort_keys=True)+'\n')
     os.rename(temporary, trusted/'toolchain.json')  # New private directory, never an old runtime.
     script = ROOT/('pi_acp_exec.py' if role == 'worker' else 'pi_coordinator_exec.py')
+    if production:
+        script = ROOT/'pi_production_exec.py'
     launcher = trusted/'pi-launcher'
     _write_new(launcher, '#!/bin/sh\nexec '+shlex.quote(sys.executable)+' -E -s '
                +shlex.quote(str(script))+' "$@"\n', 0o700)
@@ -342,6 +348,10 @@ def load_launch(runtime, project, role):
             or record.get('runtime') != str(runtime) or record.get('project') != str(project)
             or record.get('registry_sha256') != file_sha256(REGISTRY)):
         raise ToolchainError('toolchain description binding differs')
+    if record.get('profile_id') is not None:
+        if (role != 'coordinator' or record['profile_id'] != 'production-pi-v1'
+                or record.get('production_sources') != production_sources(project, runtime)):
+            raise ToolchainError('production launcher sources changed')
     values = record['toolchain']
     tools = Toolchain(**{name: Path(value) if name in ('node', 'pi', 'package_root') else value
                         for name, value in values.items()})
@@ -389,3 +399,42 @@ def native_environment():
             env[key] = os.environ[key]
     env['PI_TELEMETRY'] = '0'
     return env
+
+
+def production_sources(project, runtime):
+    names = ('pi_production_exec.py', 'pi_production_transport.mjs',
+             'pi_production_profile.py', 'pi_production_credentials.py',
+             'pi_production_fence.py', 'pi_production_egress.py', 'pi-coordinator-guard.mjs')
+    return {name: file_sha256(trusted_path(ROOT/name, forbidden=(project, runtime))) for name in names}
+
+
+def production_sandbox(runtime, project, node, *, sources=ROOT, proxy_port, control_socket=None,
+                       sandbox='read-only', workflow=None):
+    """Default deny. This policy is separate from the unchanged Local profile."""
+    if sandbox not in ('read-only', 'workspace-write') or type(proxy_port) is not int or not 1 <= proxy_port <= 65535:
+        raise ToolchainError('invalid production sandbox')
+    q = lambda p: json.dumps(str(Path(p).resolve()))
+    runtime, project, sources = Path(runtime).resolve(), Path(project).resolve(), Path(sources).resolve()
+    if runtime.is_relative_to(project) or sources.is_relative_to(project):
+        raise ToolchainError('production trusted roots enter workspace')
+    exclusions = ' '.join('(require-not (subpath '+q(project/name)+'))'
+                         for name in ('.git','.codex','.ato','.pi','.aws','.ssh','.env'))
+    reads = [runtime, sources, Path(node).resolve().parent.parent,
+             Path(sys.base_prefix), Path('/System'), Path('/usr/lib'), Path('/usr/share'),
+             Path('/private/etc'), Path('/dev')]
+    rules = ['(version 1)', '(deny default)', '(allow file-read-metadata)',
+             '(allow file-read-data (literal "/"))',  # dyld bootstrap reads only the root directory.
+             '(allow sysctl-read)', '(allow process-fork)',
+             '(allow process-exec '+ ' '.join('(literal '+q(p)+')' for p in
+                (node, sys.executable, '/bin/sh', '/usr/bin/sandbox-exec')) +')',
+             '(allow file-read* '+ ' '.join('(subpath '+q(p)+')' for p in reads)+')',
+             '(allow file-read* (require-all (subpath '+q(project)+') '+exclusions+'))',
+             '(allow file-write* (literal "/dev/null") (require-all (subpath '+q(runtime)+') '+write_exclusions(runtime)+'))',
+             '(allow network-outbound (remote ip "localhost:'+str(proxy_port)+'"))']
+    if workflow:
+        rules.append('(allow file-read* (subpath '+q(workflow)+'))')
+    if control_socket:
+        rules.append('(allow network-outbound (remote unix-socket (literal '+q(control_socket)+')))')
+    if sandbox == 'workspace-write':
+        rules.append('(allow file-write* (require-all (subpath '+q(project)+') '+exclusions+' '+write_exclusions(runtime)+'))')
+    return '\n'.join(rules)

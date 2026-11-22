@@ -61,6 +61,8 @@ py-modules = [
   "pi_production_credentials",
   "pi_production_fence",
   "pi_production_profile",
+  "pi_production_egress",
+  "pi_production_exec",
   "pi_session_coordinator",
   "pi_session_profile",
   "pi_toolchain",
