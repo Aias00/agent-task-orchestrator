@@ -54,6 +54,7 @@ export async function request(config, body, key, grant, {ca, signal, onResponse}
       }
       if(pending.length>1024*1024) throw Error('Production frame limit');
     }
+    pending += decoder.end();
     if(pending.trim()||!events.includes('[DONE]')) throw Error('Production incomplete stream');
     return events;
   } finally {

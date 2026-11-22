@@ -54,6 +54,7 @@ class ProductionTransportTests(unittest.TestCase):
                 text='synthetic-secret' if test.mode=='reflection' else '中😀'
                 frame={'choices':[{'index':0,'delta':{'content':text},'finish_reason':'stop'}]}
                 body=('data: '+json.dumps(frame,ensure_ascii=False)+'\r\n\r\ndata: [DONE]\r\n\r\n').encode()
+                if test.mode=='truncated-utf8':body+=b'\xe4\xb8'  # Incomplete final U+4E2D.
                 self.wfile.write(body);self.wfile.flush()
         self.provider=http.server.ThreadingHTTPServer(('127.0.0.1',0),Provider)
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(self.cert,self.key)
@@ -91,6 +92,11 @@ catch {console.log(JSON.stringify({ok:false}));}
     def test_real_node_https_uses_connect_and_utf8_crlf_sse(self):
         self.assertEqual(self.invoke(),{'ok':True,'text':'中😀'})
         self.assertEqual(self.requests,1);self.assertGreater(self.checks,0)
+
+    def test_truncated_utf8_tail_after_terminal_sse_fails_closed_without_retry(self):
+        self.mode='truncated-utf8'
+        self.assertEqual(self.invoke(),{'ok':False})
+        self.assertEqual(self.requests,1)
 
     def test_503_and_redirect_never_retry_or_follow(self):
         for mode in ('503','redirect'):

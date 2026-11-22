@@ -55,6 +55,7 @@ def supervise():
     env = {k:v for k,v in os.environ.items() if k != 'ATO_PI_EXIT_FD'}
     child = subprocess.Popen(sys.argv[2:],env=env,stdin=sys.stdin,stdout=sys.stdout,
         stderr=subprocess.DEVNULL,close_fds=True)
+    os.environ.pop('ATO_PI_PROVIDER_KEY', None)
     env.clear()
     child.wait()
     os.write(fd,b'x')
