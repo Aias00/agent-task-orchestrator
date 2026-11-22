@@ -79,7 +79,7 @@
 
 父 ACP 与子 Pi 使用同一已验证 Node/Pi，Node ≥24、Pi 1.5.2、pi-acp 0.0.34 和当前 coordinator SHA 全部保持。后端输出字节不变是默认验收；若新增 guard/transport hook 必须改变兼容变换，要另行评审命名变换与 registry 新指纹，不能在实现时静默修改。P3-1 package digest 只覆盖 Pi 自身文件，不包括外部依赖；依赖完整性另由 lock、快照 inventory 和审查证明。
 
-`runtime/trusted`、`runtime/adapter` 仍为新建私有 0700 目录/0600 文件、原子禁止覆盖发布；模型进程的 OS 策略禁止写入、重命名、删除、symlink 绕路及替换 runtime 根。快照和可执行文件同样只读且在 project 外。不 chmod 挂载盘或放宽可信路径以通过准入；例如 `/Volumes/data` 的组可写祖先会被 P3-1 拒绝，设计 worktree 并不是可直接上线的可信安装根。owner 能主动改 seal 的事实，与模型受 seatbelt 约束的写保护必须分别验收。
+`runtime/trusted`、`runtime/adapter` 仍为新建私有 0700 目录/0600 文件、原子禁止覆盖发布；模型进程的 OS 策略禁止写入、重命名、删除、symlink 绕路及替换 runtime 根。快照和可执行文件同样只读且在 project 外。不 chmod 挂载盘或放宽可信路径以通过准入；例如组可写挂载目录的祖先会被 P3-1 拒绝，设计 worktree 并不是可直接上线的可信安装根。owner 能主动改 seal 的事实，与模型受 seatbelt 约束的写保护必须分别验收。
 
 ### 4.2 网络、进程和工具权限
 

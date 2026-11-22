@@ -17,7 +17,7 @@
    - 累计尝试次数、阶段数、预算账本和已投递历史不可重置或改写。
 3. **保留既有架构与分发测试硬约束**：
    - `tests/test_codex_session_adapter.py::test_core_ast_has_no_vendor_imports_or_native_event_decoders` 强制要求 8 个核心模块（`control`、`recovery`、`interaction`、`delegation`、`workflow`、`session_router`、`message_bus`、`transport`）留在仓库根路径（或保持被检文件名）且**不得**导入 `codex_legacy`、`appserver`、`codex_session_adapter`；
-   - `tests/test_source_distribution.py` 强制要求分发脚本中不得出现 `Path('/Users/...')` 或 `Path('/Volumes/...')`；
+   - `tests/test_source_distribution.py` 强制要求分发脚本中不得出现 本机用户目录或挂载目录的绝对路径；
    - `tests/test_compact_handoff.py` 强制要求紧凑宿主交接通知长度 `< 260` 且包含 `ato-read-handoff <id>`；
    - 禁止静默 skip 测试；离线 fixture 通过不得宣称为真实 CLI 或云端模型验收通过。
 
@@ -28,7 +28,7 @@
 在仓库根目录独立创建隔离依赖环境，使全部 602+ 离线回归测试均可运行（0 failures, 0 errors, 0 skips）：
 
 ```sh
-cd /Volumes/data/agent-task-orchestrator
+cd /path/to/agent-task-orchestrator
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-acp.lock
 npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp
@@ -81,7 +81,7 @@ npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp
   - `coordination.py:15` 硬编码 `READER = str(Path.home()/'.local/bin/ato-read-handoff')`。若通过 `scripts/install.py --bin-dir /custom/bin --helpers` 安装，生成的交接唤醒指令会指向错误路径。
 - **改造要求**：
   1. 将 `coordination.py` 的 reader 解析改为函数 `reader_command()`：
-     - 优先使用受信任的当前安装位置：如通过 `scripts/install.py` 安装的同目录 `ato-read-handoff`（或在显式配置 `CTASK_HANDOFF_READER` 且指向现有可执行文件时使用），默认回退为 `~/.local/bin/ato-read-handoff`（保持兼容且不引入硬编码 `/Users/`）。
+     - 优先使用受信任的当前安装位置：如通过 `scripts/install.py` 安装的同目录 `ato-read-handoff`（或在显式配置 `CTASK_HANDOFF_READER` 且指向现有可执行文件时使用），默认回退为 `~/.local/bin/ato-read-handoff`（保持兼容且不引入本机用户目录硬编码）。
      - 同步检查 `scripts/install.py` 生成 `ctask` / `ctask-notify` wrapper 时，若与 `ato-read-handoff` 同目录，可安全关联。
   2. 严格保持紧凑通知长度 `< 260` 字节，且保留 `[ctask-host-handoff id=...]` 与 `ato-read-handoff <id>` 格式。
 - **验收标准**：
