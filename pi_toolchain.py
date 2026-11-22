@@ -409,7 +409,7 @@ def production_sources(project, runtime):
 
 
 def production_sandbox(runtime, project, node, *, sources=ROOT, proxy_port, control_socket=None,
-                       sandbox='read-only', workflow=None):
+                       sandbox='read-only', workflow=None, pi_root=None, pi_entry=None):
     """Default deny. This policy is separate from the unchanged Local profile."""
     if sandbox not in ('read-only', 'workspace-write') or type(proxy_port) is not int or not 1 <= proxy_port <= 65535:
         raise ToolchainError('invalid production sandbox')
@@ -422,15 +422,32 @@ def production_sandbox(runtime, project, node, *, sources=ROOT, proxy_port, cont
     reads = [runtime, sources, Path(node).resolve().parent.parent,
              Path(sys.base_prefix), Path('/System'), Path('/usr/lib'), Path('/usr/share'),
              Path('/private/etc'), Path('/dev')]
+    if pi_root is not None:
+        pi_root = Path(pi_root).resolve(strict=True)
+        if pi_root.is_relative_to(project) or pi_root.is_relative_to(runtime):
+            raise ToolchainError('production Pi package enters workspace or runtime')
+        reads.append(pi_root)
+    # macOS /bin/sh dispatches to the system /bin/bash variant. Both are fixed
+    # launcher dependencies, not exposed Shell tools or a PATH search.
+    executables = [node, sys.executable, '/bin/sh', '/bin/bash', '/usr/bin/sandbox-exec', runtime/'trusted/pi-launcher']
+    if pi_entry is not None:
+        pi_entry = Path(pi_entry).resolve(strict=True)
+        if pi_root is None or not pi_entry.is_relative_to(pi_root):
+            raise ToolchainError('production Pi entry leaves reviewed package')
+        # Seatbelt also mediates access(X_OK); load_launch rechecks the exact
+        # pinned Pi entry even though Node reads it as a script.
+        executables.append(pi_entry)
     rules = ['(version 1)', '(deny default)', '(allow file-read-metadata)',
              '(allow file-read-data (literal "/"))',  # dyld bootstrap reads only the root directory.
+             '(allow file-read* (literal "/bin/sh") (literal "/bin/bash"))',
              '(allow sysctl-read)', '(allow process-fork)',
-             '(allow process-exec '+ ' '.join('(literal '+q(p)+')' for p in
-                (node, sys.executable, '/bin/sh', '/usr/bin/sandbox-exec')) +')',
+             '(allow process-exec '+ ' '.join('(literal '+q(p)+')' for p in executables) +')',
              '(allow file-read* '+ ' '.join('(subpath '+q(p)+')' for p in reads)+')',
              '(allow file-read* (require-all (subpath '+q(project)+') '+exclusions+'))',
              '(allow file-write* (literal "/dev/null") (require-all (subpath '+q(runtime)+') '+write_exclusions(runtime)+'))',
              '(allow network-outbound (remote ip "localhost:'+str(proxy_port)+'"))']
+    rules.extend(['(deny file-read* (regex #".*/[.]env([.][^/]+)?(/.*)?$"))',
+                  '(deny file-write* (regex #".*/[.]env([.][^/]+)?(/.*)?$"))'])
     if workflow:
         rules.append('(allow file-read* (subpath '+q(workflow)+'))')
     if control_socket:

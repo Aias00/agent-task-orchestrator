@@ -153,7 +153,7 @@ class PiCoordinator:
     real Pi qualification. There is no implicit restart on EOF or timeout.
     """
     def __init__(self, profile, project, *, sandbox='read-only', kind='pi_acp',
-                 bindings=None, runtime=None, timeout=15):
+                 bindings=None, runtime=None, timeout=15, production_owner=None):
         self.project = str(Path(project).resolve(strict=True))
         if not Path(self.project).is_dir() or sandbox not in ('read-only', 'workspace-write'):
             raise ValueError('invalid managed Pi project/policy')
@@ -161,9 +161,25 @@ class PiCoordinator:
             from pi_session_profile import LocalPiProfile
             if type(profile) is not LocalPiProfile:
                 raise ValueError('real Pi requires the trusted pinned profile')
+        elif kind == 'pi_acp_production':
+            from pi_production_profile import ProductionPiProfile
+            if type(profile) is not ProductionPiProfile or not callable(getattr(production_owner, 'guard', None)):
+                raise ValueError('production requires an explicit pinned profile and existing owner')
+            if bindings:
+                raise ValueError('production requires a fresh native origin before binding')
+            owner_directory = getattr(production_owner,'dir',None)
+            if (not isinstance(owner_directory,(str,Path)) or not Path(owner_directory).is_absolute()
+                    or Path(owner_directory).resolve().parent != (Path(self.project)/'.codex/tasks/workflows').resolve()):
+                raise ValueError('production owner must name one exact project workflow directory')
         elif not kind.startswith('fixture_pi_'):
             raise ValueError('custom profiles must be explicitly labelled fixtures')
         self.profile, self.sandbox, self.kind = profile, sandbox, kind
+        self.production = kind == 'pi_acp_production'
+        self.production_owner = production_owner
+        self.production_fence = None
+        self.production_watcher = None
+        self._production_closer = None
+        self._exit_reader = self._exit_writer = None
         self.host_id = 'host-'+uuid.uuid4().hex
         self.runtime = Path(runtime) if runtime else storage()/self.host_id
         self.runtime = self.runtime.resolve()
@@ -188,8 +204,111 @@ class PiCoordinator:
         self.state = dict(version=2, host_id=self.host_id, project=self.project, sandbox=sandbox,
             lifecycle='prepared', process_instance=uuid.uuid4().hex, identity=None,
             turns={}, sequence=0, bindings=self.bindings, workflow_completed_by_end_turn=False)
+        if self.production:
+            self.state.update(profile_id='production-pi-v1',adapter_kind=self.kind)
         self._save()
         _private_save(self.runtime/'control.json', dict(token=self.token, host_id=self.host_id))
+        if self.production:
+            if self.sandbox != self.profile.configuration['sandbox']:
+                raise ValueError('production sandbox binding differs')
+            self.profile.configure_host(self._production_check, control_socket(self.runtime),production_owner.dir)
+
+    def _production_check(self):
+        self.profile.recheck_permit()
+        if not self.production_fence:
+            raise ValueError('production workflow not bound')
+        self.production_fence.check(self.profile.fingerprint)
+
+    def _production_authorize(self, operation, turn_id):
+        if (not self.production or not self.current or self.state['lifecycle'] != 'active'
+                or turn_id != self.current['turn_id'] or self.current.get('cancel_requested')
+                or operation not in ('tool', 'provider_request', 'completion')):
+            raise ValueError('production action not admitted')
+        authority = private_read(self.runtime/'tool-authority.json')
+        d = Path(self.bindings['workflow_id'])
+        for field, name in (('contract_file_sha256','contract.json'),('origin_file_sha256','origin.json')):
+            if hashlib.sha256((d/name).read_bytes()).hexdigest() != authority[field]:
+                self.production_fence.revoke()
+                raise ValueError('production authority changed')
+        self.profile.recheck_permit()
+        request = operation == 'provider_request'
+        result = self.production_fence.authorize(self.profile.fingerprint, request=request,
+            cost_microusd=self.profile.approval['cost_microusd'] if request else 0)
+        self.state['production_allowance'] = self.production_fence.snapshot()
+        self._save()  # Durable cost reservation before an egress grant can escape.
+        # Only this owned lease may refresh append-only workflow evidence after budget polling.
+        events = d/'events.jsonl'
+        authority['workflow_events_sha256'] = hashlib.sha256(events.read_bytes() if events.exists() else b'').hexdigest()
+        _private_save(self.runtime/'tool-authority.json', authority)
+        if request:
+            if not self.profile.proxy:
+                raise ValueError('production egress unavailable')
+            result['egress_grant'] = self.profile.proxy.issue(result['remaining_ms'])
+        return result
+
+    async def _production_watch(self):
+        fd = self._exit_reader
+        exit_signal = self.loop.create_future()
+        def exited():
+            try: os.read(fd, 1)
+            except OSError: pass
+            if not exit_signal.done(): exit_signal.set_result(None)
+        self.loop.add_reader(fd, exited)
+        waiter = asyncio.create_task(self.proc.wait())
+        try:
+            while not self.closing:
+                if self.current:
+                    self._production_check()
+                ready, _ = await asyncio.wait((exit_signal, waiter),timeout=.05,
+                    return_when=asyncio.FIRST_COMPLETED)
+                if ready:
+                    raise ValueError('production child exited')
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            if self.current:
+                self.current['state'] = 'delivery_unknown'
+            await self.close()
+        finally:
+            self.loop.remove_reader(fd)
+            waiter.cancel()
+            await asyncio.gather(waiter,return_exceptions=True)
+
+    def _production_members(self):
+        import subprocess
+        raw = subprocess.check_output(['/bin/ps','-axo','pid=,pgid=,lstart='],
+            env={'PATH':'/usr/bin:/bin'},text=True,timeout=2)
+        members = {}
+        for line in raw.splitlines():
+            parts = line.split(None,2)
+            if len(parts) == 3 and int(parts[1]) == self.proc.pid:
+                members[int(parts[0])] = parts[2]
+        return members
+
+    async def _production_stop_group(self):
+        if not self.proc:
+            return False
+        # Only our still-live kernel group anchor permits taking a cohort snapshot.
+        if self.proc.returncode is not None or os.getpgid(self.proc.pid) != self.proc.pid:
+            return not self._production_members()
+        cohort = self._production_members()
+        try: os.killpg(self.proc.pid,signal.SIGTERM)
+        except ProcessLookupError: pass  # Exit raced the sample; still verify below.
+        try: await asyncio.wait_for(self.proc.wait(),2)
+        except asyncio.TimeoutError: pass
+        members = self._production_members()
+        if members:
+            if not any(cohort.get(pid) == start for pid,start in members.items()):
+                return False  # No identity witness: never signal a possibly reused group.
+            try: os.killpg(self.proc.pid,signal.SIGKILL)
+            except ProcessLookupError: pass  # A stale ps sample is not cleanup failure or proof.
+        await asyncio.wait_for(self.proc.wait(),2)
+        deadline = self.loop.time()+2
+        while self._production_members():
+            if self.loop.time() >= deadline:
+                return False
+            await asyncio.sleep(.025)
+        return True
 
     def _save(self):
         _private_save(self.runtime/'state.json', self.state)
@@ -223,10 +342,34 @@ class PiCoordinator:
             launch = self.profile.launch(self.runtime, Path(self.project), self.sandbox)
             self.launch = launch
             self.state['provenance_data'] = launch.provenance_data
-            self.proc = await asyncio.create_subprocess_exec(*launch.command,
-                cwd=self.project, env=launch.environment, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True, limit=MAX_FRAME)
+            command, environment, extra = launch.command, dict(launch.environment), {}
+            lease = None
+            try:
+                if self.production:
+                    from pi_toolchain import ROOT
+                    import resource
+                    import sys
+                    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+                    lease = self.profile.acquire_secret(self.runtime, Path(self.project))
+                    environment.update(lease.environment())
+                    self._exit_reader, self._exit_writer = os.pipe()
+                    os.set_blocking(self._exit_reader, False)
+                    environment['ATO_PI_EXIT_FD'] = str(self._exit_writer)
+                    command = (sys.executable, '-E', '-s', str(ROOT/'pi_production_exec.py'), '--supervise', *command)
+                    extra['pass_fds'] = (self._exit_writer,)
+                    self.state['production_profile_hash'] = self.profile.fingerprint
+                self.proc = await asyncio.create_subprocess_exec(*command,
+                    cwd=self.project, env=environment, stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True, limit=MAX_FRAME, **extra)
+            finally:
+                environment.clear()
+                if lease: lease.close()
+                if self._exit_writer is not None:
+                    os.close(self._exit_writer)
+                    self._exit_writer = None
+            if self.production:
+                self.production_watcher = asyncio.create_task(self._production_watch())
             self.state['pid'] = self.proc.pid  # Diagnostic only; never adopted/killed from disk.
             self.reader = asyncio.create_task(self._read())
             initialized = await self._request('initialize', dict(protocolVersion=1,
@@ -250,6 +393,8 @@ class PiCoordinator:
             self._save()
             private_create(index, dict(host_id=self.host_id))
             self._event('session_started', self._lifecycle_turn())
+            if self.production and not self.server:
+                await self.listen()
             return identity
         except BaseException:
             self.state['lifecycle'] = 'creation_unknown'
@@ -409,6 +554,18 @@ class PiCoordinator:
         binding = dict(workflow_id=str(d), contract_hash=state['contract_hash'], generation=revision(gen))
         if self.bindings and self.bindings != binding:
             raise ValueError('existing coordinator binding is immutable; explicit recovery required')
+        if self.production:
+            from pi_production_fence import ProductionFence
+            owner = self.production_owner
+            if (Path(owner.dir).resolve() != d or not hasattr(owner, '_accounted_at')
+                    or owner._accounted_at is None):
+                raise ValueError('production requires the existing accounted workflow owner')
+            self.profile.recheck_permit()
+            owner.guard()
+            self.production_fence = ProductionFence(dict(binding, project=self.project),
+                owner_guard=owner.guard, profile_hash=self.profile.fingerprint,
+                max_cost_microusd=self.profile.max_cost_microusd,
+                hard_timeout_seconds=self.profile.configuration['hard_timeout_seconds'],max_requests=16)
         self.bindings = binding
         self.state['bindings'] = binding
         self._save()
@@ -416,6 +573,8 @@ class PiCoordinator:
 
     async def dispatch(self, endpoint, message):
         try:
+            if self.production:
+                self._production_check()
             rev = self._validate_envelope(endpoint, message)
         except (ValueError, KeyError, OSError, TypeError):
             return DeliveryResult('failed', receipt='no native effect: invalid or stale envelope')
@@ -457,6 +616,8 @@ class PiCoordinator:
                         _meta=dict(ctaskTurn=turn['turn_id'])))
                     if (result.get('stopReason') == 'end_turn' and turn.get('native_stop')
                             and not turn.get('native_error') and not turn.get('cancel_requested')):
+                        if self.production:
+                            self._production_authorize('completion', turn['turn_id'])
                         self._event('response_completed', turn, text=turn.get('text', ''))
                         self._event('turn_completed', turn, text=turn.get('text', ''))
                         turn['state'] = 'turn_completed'
@@ -475,6 +636,8 @@ class PiCoordinator:
                 turn.pop('text', None)
                 self.current = None
                 self._save()
+                if self.production and self.state['lifecycle'] != 'idle' and not self.closing:
+                    await self.close()
         task = asyncio.create_task(run())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -502,22 +665,46 @@ class PiCoordinator:
             self._save()
         try:
             if self.proc and self.proc.returncode is None:
-                await self._write(dict(jsonrpc='2.0', method='session/cancel',
-                    params=dict(sessionId=(self.state.get('identity') or {}).get('native_id'))))
+                notification = dict(jsonrpc='2.0', method='session/cancel',
+                    params=dict(sessionId=(self.state.get('identity') or {}).get('native_id')))
+                if self.production:
+                    await asyncio.wait_for(self._write(notification),min(self.timeout,.25))
+                else:
+                    await self._write(notification)
         finally:
             # Notification is not evidence of cancellation. A broken ACP pipe
             # must not prevent stopping our own live group.
             await self.close()
 
     async def close(self):
+        if self.production and self._production_closer is not None:
+            if self._production_closer is not asyncio.current_task():
+                await self.closed.wait()
+            return
+        if self.production:
+            self._production_closer = asyncio.current_task()
         self.closing = True
+        production_cleanup_failed = False
+        if self.production:
+            if self.production_fence:
+                self.production_fence.revoke()
+                self.state['production_allowance'] = self.production_fence.snapshot()
+            if self.production_watcher and self.production_watcher is not asyncio.current_task():
+                self.production_watcher.cancel()
+                await asyncio.gather(self.production_watcher,return_exceptions=True)
+                self.production_watcher = None
+            try: await asyncio.to_thread(self.profile.close)
+            except Exception: production_cleanup_failed = True
         if self.server:
             self.server.close()
             await self.server.wait_closed()
             self.server = None
             control_socket(self.runtime).unlink(missing_ok=True)
         owned_stopped = False
-        if self.proc and self.proc.returncode is None:
+        if self.production:
+            try: owned_stopped = await self._production_stop_group()
+            except (OSError,ValueError,asyncio.TimeoutError): production_cleanup_failed = True
+        elif self.proc and self.proc.returncode is None:
             try:
                 if os.getpgid(self.proc.pid) == self.proc.pid:
                     os.killpg(self.proc.pid, signal.SIGTERM)
@@ -534,15 +721,18 @@ class PiCoordinator:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)
             self.reader = None
-        for task in list(self.tasks):
+        for task in list(self.tasks - {asyncio.current_task()}):
             task.cancel()
-        if self.tasks:
-            await asyncio.gather(*list(self.tasks), return_exceptions=True)
+        others = self.tasks - {asyncio.current_task()}
+        if others:
+            await asyncio.gather(*others, return_exceptions=True)
         self.current = None
         if owned_stopped and self.state['lifecycle'] not in ('creation_unknown', 'disconnected_unknown'):
             self.state['lifecycle'] = 'stopped'
         elif self.state['lifecycle'] not in ('stopped', 'prepared'):
             self.state['lifecycle'] = 'disconnected_unknown'
+        if self.production and (production_cleanup_failed or (self.proc and not owned_stopped)):
+            self.state['lifecycle'] = 'cleanup_blocked'
         self._save()
         if self.state.get('identity') and owned_stopped:
             self._event('session_stopped', self._lifecycle_turn())
@@ -550,6 +740,10 @@ class PiCoordinator:
             fcntl.flock(self._lock, fcntl.LOCK_UN)
             self._lock.close()
         self.closed.set()
+        if self.production and self._exit_reader is not None:
+            self.loop.remove_reader(self._exit_reader)
+            os.close(self._exit_reader)
+            self._exit_reader = None
 
     async def listen(self):
         """Private control socket for the foreground host; not a model tool API."""
@@ -566,7 +760,11 @@ class PiCoordinator:
             if value.get('host_id') != self.host_id:
                 raise ValueError('wrong host instance')
             action = value.get('action')
-            if action == 'new':
+            if action == 'authorize_action':
+                if not self.production or value.get('profile_hash') != self.profile.fingerprint:
+                    raise ValueError('production profile mismatch')
+                result = self._production_authorize(value.get('operation'),value.get('turn_id'))
+            elif action == 'new':
                 if value.get('project') != self.project or value.get('sandbox') != self.sandbox:
                     raise ValueError('creation policy mismatch')
                 result = (await self.start()).to_mapping()
@@ -630,6 +828,11 @@ class PiSessionAdapter:
             raise ValueError('invalid foreground provisioning host')
         runtime = storage()/provision['host_id']
         state = private_read(runtime/'state.json')
+        if self.kind == 'pi_acp_production' and (state.get('profile_id') != 'production-pi-v1'
+                or state.get('adapter_kind') != self.kind):
+            raise ValueError('production provisioning may not adopt a local host')
+        if self.kind == 'pi_acp' and state.get('profile_id') == 'production-pi-v1':
+            raise ValueError('local provisioning may not adopt a production host')
         if state['lifecycle'] != 'prepared' or state['project'] != project or state['sandbox'] != contract['sandbox']:
             raise ValueError('foreground host is unavailable, already consumed or has different policy')
         identity = registry.SessionIdentity.from_mapping(self._call(runtime, state, 'new',
@@ -822,7 +1025,7 @@ class PiSessionAdapter:
             target = session_router.bind_origin(runner.read(Path(workflow_id)/'origin.json'), identity.project)
             if session_router.resolve_v2(target)[0].identity != identity:
                 raise ValueError('origin grant must match the exact assigned workflow origin')
-        elif self.kind == 'pi_acp':
+        elif self.kind in ('pi_acp', 'pi_acp_production'):
             raise ValueError('real Pi origin grants require an actual frozen workflow')
         path = runtime/'origin-actor.json'
         try:
@@ -874,6 +1077,8 @@ class PiSessionAdapter:
         Unknown delivery/native effects require external reconciliation first.
         This operation cannot be used as a timeout retry or native resume shim.
         """
+        if self.kind == 'pi_acp_production':
+            raise ValueError('production native load and reconstruction require W2-2')
         registry.authorize_actor(actor, 'session.resume_owned', project=previous.identity.project,
             workflow_id=workflow_id, contract_hash=contract_hash, generation=generation)
         if actor.session != previous or previous.identity.adapter != self.kind:

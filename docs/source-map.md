@@ -18,6 +18,9 @@ installed launchers, migrate task records or grant execution permissions.
 | Managed Pi coordinator and bounded Pi file worker | `pi_session_coordinator.py`, `pi_session_profile.py`, `pi_acp_worker.py` |
 | Trusted Pi/Node resolution, reviewed release fingerprints and protected native launch | `pi_toolchain.py`, `integrations/pi-acp/compatibility.json` |
 | Verified pi-acp backend, named transformations and atomic private adapter publication | `pi_acp_compat.py`, `scripts/derive_pi_acp.py` |
+| Explicit opt-in production Pi profile and read-only credentials (offline candidate) | `pi_production_profile.py`, `pi_production_credentials.py` |
+| Per-action existing-owner budget fence, conservative request reservations | `pi_production_fence.py`, `pi-coordinator-guard.mjs` |
+| Owned CONNECT exit, bounded custom HTTPS/SSE transport and native group anchor | `pi_production_egress.py`, `pi_production_transport.mjs`, `pi_production_exec.py` |
 | Compact private host/failure material and once-only completion policy | `coordination.py`, `failure_notice.py`, `completion_notifications.py`, `notifications.py`, `hub_queue_gate.py` |
 | Read-only snapshot qualification, journaled entrypoint/observer cutover and executable-only rollback | `scripts/release_snapshot.py` |
 | CLI entrypoints and optional conversation integration | `bin/`, `scripts/install.py`, `skills/codex-long-task/` |
@@ -37,6 +40,19 @@ not implicitly supplied. Optional production Pi profiles remain macOS-specific
 and version-pinned. Claude worker availability does not establish a generic
 Claude coordinator transport. AGY/acpx work is an unfinished development
 snapshot, not part of this stable baseline.
+
+W2-1 production Pi is an explicitly registered `pi_acp_production` offline
+candidate. It neither changes `LocalPiProfile` nor adopts any existing task.
+It requires an exact sealed source snapshot, host-reviewed provider/model/address
+policy, an explicit permit callback and an accounted existing workflow owner.
+There is no default reviewed cloud provider. Each request reserves its entire
+reviewed worst-case cost; missing usage never refunds the reservation. The v1
+text/OpenAI-compatible request path bounds serialized input plus a framing
+reserve conservatively, so oversized contexts fail before network admission.
+Native load/resume and production checkpoint reconstruction remain unsupported.
+Offline qualification does not authorize cloud calls or installed-runtime
+activation. See the [design](w2-1-production-pi-design.md) and
+[pinned prerequisite spike](w2-1-spike.md).
 
 Operator records belong outside Git. `operator-evidence/` is ignored and only
 used when explicitly supplied to historical qualification utilities. Offline

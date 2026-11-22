@@ -164,3 +164,17 @@ class ACPStderrTests(unittest.TestCase):
         with redirect_stderr(error):
             self.invoke(self.command(b'private stderr', protocol))
         self.assertNotIn(SECRET, error.getvalue())
+
+    def test_sdk_filter_normalizes_symlink_venv_record_pathname(self):
+        import acp
+        alias=self.root/'linked-venv-package'
+        alias.symlink_to(Path(acp.__file__).resolve().parent,target_is_directory=True)
+        error=io.StringIO()
+        handler=logging.StreamHandler(error)
+        logger=logging.getLogger();logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler,handler)
+        record=logging.LogRecord('root',logging.ERROR,str(alias/'connection.py'),1,
+            SECRET,(),None)
+        with acp_bridge.safe_protocol_logging():logger.handle(record)
+        self.assertNotIn(SECRET,error.getvalue())
+        self.assertIn('ACP SDK diagnostic:',error.getvalue())

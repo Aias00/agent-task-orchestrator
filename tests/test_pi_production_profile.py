@@ -9,6 +9,7 @@ import pickle
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 from ato_core import digest
 from pi_production_credentials import acquire, private_json, SecretLease
@@ -55,9 +56,8 @@ class ProductionProfileTests(unittest.TestCase):
         self.assertNotIsInstance(p, LocalPiProfile)
         self.assertFalse(p.native_load_verified)
         self.assertEqual(p.adapter_kind, 'pi_acp_production')
-        # Commit A is intentionally not capable of accidentally starting Pi.
-        if not (ROOT/'pi_production_exec.py').exists():
-            with self.assertRaises(ValueError): p.launch(None, None, None)
+        # No stage may launch without a qualified snapshot and bound host.
+        with self.assertRaises(ValueError): p.launch(None, None, None)
 
     def test_closed_configuration_missing_unknown_wrong_types_and_identity(self):
         for name, value in [('enabled',False),('schema_version',True),('adapter_kind','pi_acp'),
@@ -87,6 +87,15 @@ class ProductionProfileTests(unittest.TestCase):
                 dict(kind='native_auth',path='relative',provider='synthetic')):
             c=configuration();c['credential_source']=source
             with self.assertRaises(ValueError):self.profile(c)
+
+    def test_reviewed_context_is_bounded_and_still_requires_worst_case_cost_reservation(self):
+        r=reviewed();r[('synthetic','scripted')]['input_tokens']=64000
+        self.assertEqual(self.profile(reviewed=r).approval['input_tokens'],64000)
+        for field,value in [('input_tokens',64001),('input_tokens',True),('output_tokens',129),
+                            ('cost_microusd',50001)]:
+            invalid=copy.deepcopy(r);invalid[('synthetic','scripted')][field]=value
+            with self.subTest(field=field,value=value),self.assertRaises(ValueError):
+                self.profile(reviewed=invalid)
 
     def test_profile_identity_is_immutable_to_callers_and_bound_to_policy(self):
         c=configuration();p=self.profile(c);before=p.fingerprint
@@ -201,3 +210,29 @@ class ProductionFenceTests(unittest.TestCase):
         self.assertTrue(f.revoked)
         for cost in (True,0,-1,1.1,50001):
             with self.assertRaises(ValueError):self.fence().authorize('fixture',request=True,cost_microusd=cost)
+
+    def test_real_workflow_owner_rechecks_progress_and_preserves_original_budget_ledger(self):
+        import budget
+        import runner
+        import workflow
+        from test_budget import BudgetTests
+        fixture=BudgetTests('test_legacy_tasks_keep_their_fixed_limits')
+        fixture.setUp();self.addCleanup(fixture.tearDown)
+        d=fixture.prepared();fixture.configure(d)
+        owner=workflow.Workflow(d);owner._accounted_at=100;owner.state['elapsed_seconds']=9
+        owner.deadline=101;owner._next_budget_poll=200
+        fixture.successful_check(d)
+        fence=ProductionFence(dict(workflow_id=str(d),project=owner.state['repo'],
+            contract_hash=owner.state['contract_hash'],generation=0),owner_guard=owner.guard,
+            profile_hash='fixture',max_cost_microusd=50000,hard_timeout_seconds=60,clock=lambda:10)
+        before=(d/'contract.json').read_bytes()
+        with patch.object(runner,'now',return_value=102):
+            fence.authorize('fixture',request=True,cost_microusd=50000)
+        self.assertEqual(budget.summary(d)['extensions'],1)
+        self.assertEqual((d/'contract.json').read_bytes(),before)
+        self.assertEqual(owner.state['elapsed_seconds'],9)
+        owner.state['elapsed_seconds']=30;owner._next_budget_poll=0
+        with patch.object(runner,'now',return_value=103),self.assertRaises(runner.Halt):
+            fence.authorize('fixture')
+        self.assertEqual(fence.snapshot()['reserved_microusd'],50000)
+        self.assertTrue(fence.revoked)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import socket
 import shutil
+import shlex
 import ssl
 import subprocess
 import tempfile
@@ -36,11 +37,15 @@ class ProductionTransportTests(unittest.TestCase):
 
     def setUp(self):
         self.mode='ok';self.requests=0;self.checks=0;test=self
+        self.delay_gate=threading.Event();self.addCleanup(self.delay_gate.set)
         class Provider(http.server.BaseHTTPRequestHandler):
             def log_message(self,*_):pass
             def do_POST(self):
                 test.requests+=1
                 self.rfile.read(int(self.headers['Content-Length']))
+                if test.mode=='hang':
+                    test.delay_gate.wait(3)
+                    return
                 code=200 if test.mode not in ('503','redirect') else (503 if test.mode=='503' else 302)
                 self.send_response(code)
                 self.send_header('Content-Type','text/event-stream')
@@ -92,6 +97,11 @@ catch {console.log(JSON.stringify({ok:false}));}
             self.mode=mode;before=self.requests
             self.assertFalse(self.invoke()['ok']);self.assertEqual(self.requests,before+1)
 
+    def test_slow_real_tls_response_is_cancelled_by_absolute_deadline_without_retry(self):
+        self.mode='hang'
+        self.assertEqual(self.invoke(),{'ok':False})
+        self.assertEqual(self.requests,1)
+
     def test_unknown_or_reused_connect_grant_has_no_provider_effect(self):
         self.assertFalse(self.invoke(token='unissued')['ok']);self.assertEqual(self.requests,0)
         token=self.proxy.issue(1500);self.assertTrue(self.invoke(token=token)['ok'])
@@ -120,20 +130,39 @@ catch {console.log(JSON.stringify({ok:false}));}
     def test_default_deny_policy_with_real_node_not_python_fixture(self):
         with tempfile.TemporaryDirectory() as folder:
             base=Path(folder).resolve();runtime=base/'runtime';project=base/'project';source=base/'source'
-            for p in (runtime,project,source):p.mkdir()
+            package=base/'pinned-pi-package'
+            for p in (runtime,project,source,package):p.mkdir()
             for name in ('trusted','adapter'):(runtime/name).mkdir()
+            launcher=runtime/'trusted/pi-launcher'
+            launcher.write_text('#!/bin/sh\nexec '+shlex.quote(str(self.node))+" -e 'console.log(\"fixed-launcher-ok\")'\n")
+            launcher.chmod(0o700)
             secret=base/'native-auth';secret.write_text('private synthetic value')
             (project/'safe').write_text('allowed')
             (project/'.pi').mkdir();(project/'.pi/auth.json').write_text('forbidden')
+            (project/'.env.production').write_text('private synthetic env')
             (source/'snapshot.py').write_text('immutable')
+            (package/'bundle.js').write_text('pinned package')
+            (package/'bundle.js').chmod(0o700)
+            workflow=project/'.codex/tasks/workflows/selected';workflow.mkdir(parents=True)
+            (workflow/'state.json').write_text('bound metadata')
+            other=workflow.parent/'unbound';other.mkdir();(other/'state.json').write_text('forbidden')
             policy=production_sandbox(runtime,project,self.node,sources=source,
-                proxy_port=self.port,control_socket=runtime/'control.sock',sandbox='workspace-write')
-            code="""import fs from 'node:fs';import net from 'node:net';import {once} from 'node:events';
-const [r,p,s,secret,allowed,denied]=process.argv.slice(1);
+                proxy_port=self.port,control_socket=runtime/'control.sock',sandbox='workspace-write',
+                pi_root=package,pi_entry=package/'bundle.js',workflow=workflow)
+            code="""import fs from 'node:fs';import net from 'node:net';import {once} from 'node:events';import {spawnSync} from 'node:child_process';
+const [r,p,s,secret,allowed,denied,pi]=process.argv.slice(1);
 function blocked(fn){try{fn();}catch(e){if(['EPERM','EACCES'].includes(e.code))return;throw e;}throw Error('OS permission widened');}
 if(Number(process.versions.node.split('.')[0])<24)throw Error('Node 24 required');
+const child=spawnSync(r+'/trusted/pi-launcher',[],{encoding:'utf8'});
+if(child.status!==0||child.stdout.trim()!=='fixed-launcher-ok')throw Error('fixed launcher denied: '+child.stderr);
 if(fs.readFileSync(p+'/safe','utf8')!=='allowed')throw Error('read denied');
-blocked(()=>fs.readFileSync(secret));blocked(()=>fs.readFileSync(p+'/.pi/auth.json'));
+if(fs.readFileSync(pi+'/bundle.js','utf8')!=='pinned package')throw Error('package read denied');
+fs.accessSync(pi+'/bundle.js',fs.constants.X_OK);
+if(fs.readFileSync(p+'/.codex/tasks/workflows/selected/state.json','utf8')!=='bound metadata')throw Error('workflow read denied');
+blocked(()=>fs.readFileSync(p+'/.codex/tasks/workflows/unbound/state.json'));
+blocked(()=>fs.writeFileSync(pi+'/bundle.js','bad'));
+blocked(()=>fs.writeFileSync(p+'/.codex/tasks/workflows/selected/state.json','bad'));
+blocked(()=>fs.readFileSync(secret));blocked(()=>fs.readFileSync(p+'/.pi/auth.json'));blocked(()=>fs.readFileSync(p+'/.env.production'));
 for(const target of [r+'/trusted/new',r+'/adapter/new',s+'/snapshot.py'])blocked(()=>fs.writeFileSync(target,'bad'));
 blocked(()=>fs.renameSync(r+'/trusted',r+'/moved'));blocked(()=>fs.renameSync(r,p+'/runtime'));
 fs.symlinkSync(r+'/trusted',r+'/alias');blocked(()=>fs.writeFileSync(r+'/alias/new','bad'));
@@ -144,7 +173,7 @@ try{await once(no,'connect');throw Error('direct egress allowed');}catch(e){if(!
 console.log('real-node-default-deny-passed');
 """
             p=subprocess.run(['/usr/bin/sandbox-exec','-p',policy,str(self.node),'--input-type=module','-e',code,
-                str(runtime),str(project),str(source),str(secret),str(self.port),str(self.provider.server_address[1])],
+                str(runtime),str(project),str(source),str(secret),str(self.port),str(self.provider.server_address[1]),str(package)],
                 cwd=project,env=dict(HOME=str(runtime),PATH='/usr/bin:/bin'),capture_output=True,text=True,timeout=10)
             self.assertEqual(p.returncode,0,p.stderr);self.assertIn('real-node-default-deny-passed',p.stdout)
 
@@ -154,6 +183,23 @@ console.log('real-node-default-deny-passed');
         for name in ('pi_production_egress','pi_production_exec'):
             self.assertIn(name,data['py-modules']);self.assertIn(name+'.py',FILES)
         self.assertIn('pi_production_transport.mjs',FILES)
+
+    def test_pinned_transcript_shape_terminal_and_tool_policy(self):
+        code="""import assert from 'node:assert/strict';import {payload,decode} from './pi_production_transport.mjs';
+const config={model_id:'fixture',output_tokens:128};
+const p=payload(config,{messages:[{role:'system',content:'fixed'},{role:'user',content:[{type:'text',text:'synthetic'}]}]});
+assert.equal(p.messages[0].content,'fixed');assert.equal(p.max_tokens,128);
+assert.throws(()=>payload(config,{messages:[{role:'system',content:[]}]}));
+assert.throws(()=>payload(config,{messages:[{role:'user',content:[{type:'image',data:'x'}]}]}));
+const model={id:'fixture',api:'fixture',provider:'fixture'};
+assert.throws(()=>decode([],model));
+assert.throws(()=>decode([JSON.stringify({choices:[{index:0,delta:{},finish_reason:'length'}]}),'[DONE]'],model));
+assert.throws(()=>decode([JSON.stringify({choices:[{index:0,delta:{tool_calls:[{index:0,id:'x',function:{name:'bash',arguments:'{}'}}]},finish_reason:'tool_calls'}]}),'[DONE]'],model));
+console.log('transcript and terminal policy passed');
+"""
+        p=subprocess.run([str(self.node),'--input-type=module','-e',code],cwd=ROOT,
+            env=dict(HOME=str(self.base),PATH='/usr/bin:/bin'),capture_output=True,text=True,timeout=5)
+        self.assertEqual(p.returncode,0,p.stderr)
 
     def test_production_launcher_reuses_exact_toolchain_and_rejects_changed_source(self):
         import pi_toolchain as policy

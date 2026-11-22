@@ -29,7 +29,7 @@ def safe_protocol_logging():
 
     class ProtocolFilter(logging.Filter):
         def filter(self, record):
-            if record.pathname.startswith(source) or record.name.startswith('asyncio'):
+            if str(Path(record.pathname).resolve()).startswith(source) or record.name.startswith('asyncio'):
                 kind = type(record.exc_info[1]).__name__ if record.exc_info else 'ProtocolError'
                 record.msg, record.args = 'ACP SDK diagnostic: %s', (kind,)
                 record.exc_info = record.exc_text = record.stack_info = None

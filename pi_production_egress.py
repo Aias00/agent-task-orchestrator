@@ -4,12 +4,15 @@ import secrets
 import select
 import socket
 import socketserver
+import subprocess
+import sys
+import json
 import threading
 import time
 
 
 class EgressProxy:
-    def __init__(self, host, addresses, *, check, resolver=socket.getaddrinfo,
+    def __init__(self, host, addresses, *, check, resolver=None,
                  connector=socket.create_connection):
         self.host = host
         self.addresses = frozenset(addresses)
@@ -23,7 +26,17 @@ class EgressProxy:
         self.server = self.thread = None
 
     def validate_dns(self):
-        addresses = {item[4][0] for item in self.resolver(self.host, 443, type=socket.SOCK_STREAM)}
+        if self.resolver is None:
+            # libc DNS cannot be cancelled safely in a Python thread. Own a finite
+            # credential-free resolver subprocess instead; timeout kills and reaps it.
+            code = 'import socket,json,sys;print(json.dumps(sorted({x[4][0] for x in socket.getaddrinfo(sys.argv[1],443,type=socket.SOCK_STREAM)})))'
+            result = subprocess.run([sys.executable,'-I','-c',code,self.host],cwd='/',
+                env={'PATH':'/usr/bin:/bin'},stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=2,check=True)
+            if len(result.stdout)>4096:
+                raise ValueError('production DNS answer limit')
+            addresses = set(json.loads(result.stdout))
+        else:
+            addresses = {item[4][0] for item in self.resolver(self.host, 443, type=socket.SOCK_STREAM)}
         if addresses != self.addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
             raise ValueError('production DNS binding changed')
 
@@ -84,7 +97,9 @@ class EgressProxy:
                     return
                 self.check()
                 self.validate_dns()
+                self.check()
                 upstream = self.connector((sorted(self.addresses)[0], 443), timeout=2)
+                self.check()
                 self.sockets.update((client, upstream))
             client.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
             transferred = 0
@@ -102,7 +117,7 @@ class EgressProxy:
                     if transferred > 2*1024*1024:
                         return
                     (upstream if source is client else client).sendall(chunk)
-        except (OSError, ValueError, KeyError, UnicodeError):
+        except (OSError, ValueError, KeyError, UnicodeError, subprocess.SubprocessError):
             return
         finally:
             with self.lock:

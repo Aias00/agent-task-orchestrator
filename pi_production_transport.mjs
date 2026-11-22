@@ -65,7 +65,8 @@ export function payload(config, context) {
   const messages=[],tools=[];
   for(const m of context.messages) {
     if(m.role==='system') {
-      messages.push({role:'system',content:m.content.filter(x=>x.type==='text').map(x=>x.text).join('\n')});
+      if(typeof m.content!=='string') throw Error('Production system message rejected');
+      messages.push({role:'system',content:m.content});
       for(const t of m.tools??[]) tools.push({type:'function',function:{name:t.name,description:t.description,parameters:t.parameters}});
     } else if(m.role==='user') {
       if(m.content.some(x=>x.type!=='text')) throw Error('Production text input only');

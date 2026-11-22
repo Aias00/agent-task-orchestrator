@@ -1,6 +1,6 @@
 # W2-1：受管 Pi 协调端 ProductionPiProfile 设计
 
-状态：**待评审设计，未实现、未启用、未获得真实 Provider 冒烟授权**。基线为已合入 W1 的 `09c0f8f7a7b96cc0ef4226b1cd5b81c0fdb8b6dd`，包含 P3-1 与 W1 `a2c84a6`。本文的配置、类型和新接口均为拟议契约，不是现行 CLI。源码引用行号固定对应这个 commit；链接打开源码文件，`L` 标记给出复核位置。
+状态：**设计已获用户批准，离线实现候选未启用、未获得真实 Provider 冒烟授权**。设计基线为已合入 W1 的 `09c0f8f7a7b96cc0ef4226b1cd5b81c0fdb8b6dd`，包含 P3-1 与 W1 `a2c84a6`。本文保留原设计阶段范围和行号；实现状态见[离线候选说明](w2-1-offline-implementation.md)，不是现行 CLI 或云端资格。源码引用行号固定对应设计 commit；链接打开源码文件，`L` 标记给出复核位置。
 
 本轮仅新增本文并登记索引；不改变运行代码，不安装或激活快照，不操作本机入口、真实 interaction home 或在线 controller，不调用云端模型。后续实施与真实 Provider 冒烟分别需要用户评审和单独授权。更早的 [P3-1 设计](p3-1-toolchain-design.md)、[受管 Pi 状态](session-decoupling/pi-coordinator.md) 和 [发布契约](runtime-upgrade.md) 是背景，不能替代本轮验收。
 

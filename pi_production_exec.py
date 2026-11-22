@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import resource
+import signal
+import subprocess
 import sys
 
 from pi_toolchain import ROOT, load_launch, native_arguments, native_environment
@@ -21,6 +23,8 @@ def environment():
 
 
 def main():
+    if sys.argv[1:2] == ['--supervise']:
+        return supervise()
     runtime = Path(os.environ['CTASK_PI_RUNTIME']).resolve(strict=True)
     project = Path(os.environ['CTASK_AGENT_REPO']).resolve(strict=True)
     args = native_arguments(runtime, sys.argv[1:])
@@ -42,6 +46,22 @@ def main():
         '--extension', str(ROOT/'pi_production_transport.mjs'),
         '--session-dir', str(runtime/'sessions'), '--model', os.environ['CTASK_PI_MODEL']]
     os.execve(command[0], command+args, environment())
+
+
+def supervise():
+    """Keep a live group anchor after ACP exits; wake the host on a private fd."""
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    fd = int(os.environ['ATO_PI_EXIT_FD'])
+    env = {k:v for k,v in os.environ.items() if k != 'ATO_PI_EXIT_FD'}
+    child = subprocess.Popen(sys.argv[2:],env=env,stdin=sys.stdin,stdout=sys.stdout,
+        stderr=subprocess.DEVNULL,close_fds=True)
+    env.clear()
+    child.wait()
+    os.write(fd,b'x')
+    os.close(fd)
+    # The host owns termination, even if grandchildren still retain stdout.
+    while True:
+        signal.pause()
 
 
 if __name__ == '__main__':
