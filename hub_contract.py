@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import re
 from typing import Callable, Protocol
 
@@ -59,7 +60,9 @@ def _pairs(rows):
 def strict_json(data):
     try:
         require(isinstance(data, (str, bytes)) and len(data) <= 1024*1024)
-        return json.loads(data, object_pairs_hook=_pairs,
+        def finite(value):
+            result=float(value);require(math.isfinite(result),'NONFINITE_JSON');return result
+        return json.loads(data, object_pairs_hook=_pairs,parse_float=finite,
             parse_constant=lambda _: (_ for _ in ()).throw(HubError('NONFINITE_JSON')))
     except (UnicodeError, ValueError, TypeError, RecursionError):
         raise HubError('INVALID_JSON') from None
@@ -93,6 +96,8 @@ def validate_review_verdict(value):
         token(finding['id']);require(finding['id'] not in seen);seen.add(finding['id'])
         require(finding['severity'] in SEVERITIES and finding['category'] in CATEGORIES)
         relative(finding['file']);require(re.fullmatch(r'L[1-9][0-9]*(?:-L[1-9][0-9]*)?',finding['lines']))
+        bounds=[int(n) for n in re.findall(r'[0-9]+',finding['lines'])]
+        require(len(bounds)==1 or bounds[0]<=bounds[1])
     for name in ('checked_items','residual_risks'):
         require(isinstance(value[name],list) and len(value[name]) <= 128)
         for item in value[name]:text(item)
@@ -104,7 +109,7 @@ def validate_review_verdict(value):
 
 def blocker_fingerprint(tree_sha, verdict):
     validate_review_verdict(verdict)
-    require(isinstance(tree_sha,str) and re.fullmatch(r'[0-9a-f]{40,64}',tree_sha))
+    require(isinstance(tree_sha,str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})',tree_sha))
     return digest([tree_sha, sorted((f['file'],f['category'],' '.join(f['title'].casefold().split()))
         for f in verdict['findings'] if f['severity']=='blocker')])
 
@@ -155,6 +160,8 @@ class HubTurnRequest:
         text(self.prompt,512*1024);require(callable(self.snapshot) and callable(self.stop))
         require(self.session_mode in MODES);integer(self.timeout_seconds)
         if self.resume_session_id is not None:token(self.resume_session_id)
+        require(self.provenance in ('fresh_only','native_resume','ledger_reconstruction','ledger_rollover',
+            'ledger_reconstruction_from_agy','ledger_reconstruction_from_claude','ledger_reconstruction_from_codex'))
 
 
 @dataclass(frozen=True)
@@ -164,6 +171,15 @@ class HubTurnResult:
     session_id: str | None = None
     output: dict | None = None
     metadata: dict = field(default_factory=dict)
+
+
+def failed(code):
+    allowed={'AUTH_BLOCKED','TIMEOUT','STOPPED','CLEANUP_BLOCKED','OUTPUT_LIMIT','PROCESS_ERROR',
+        'INVALID_PROTOCOL','SESSION_MISMATCH','EXECUTABLE_UNAVAILABLE','VERSION_MISMATCH',
+        'RESUME_NOT_QUALIFIED','REVIEWER_MUTATION_VIOLATION','SECRET_IN_REVIEW'}
+    code=code if code in allowed else 'INVALID_PROTOCOL'
+    return HubTurnResult('auth_blocked' if code=='AUTH_BLOCKED' else 'timeout' if code=='TIMEOUT'
+        else 'stopped' if code=='STOPPED' else 'cleanup_blocked' if code=='CLEANUP_BLOCKED' else 'blocked',code)
 
 
 class HubAdapter(Protocol):
@@ -196,13 +212,22 @@ def validate_task_spec(value):
         require(isinstance(policy[key],list) and len(policy[key])<=128)
         for item in policy[key]:relative(item) if key=='design_docs' else text(item)
     worker=value['worker_contract'];require(isinstance(worker,dict))
+    require(set(worker)<={'objective','scope','authorization','acceptance','stages','limits','memory','sandbox',
+                         'model','agent','permissions','host_handoff','budget','execution_policy'})
     for key in ('objective','scope','authorization'):text(worker.get(key))
     require(worker.get('memory',False) is False, 'H1_MEMORY_MUST_BE_DISABLED')
     require(isinstance(worker.get('acceptance'),list) and worker['acceptance'])
     manual=False
     for criterion in worker['acceptance']:
-        require(isinstance(criterion,dict));token(criterion.get('id'))
+        require(isinstance(criterion,dict) and not set(criterion)-{'id','description','kind','checks'})
+        token(criterion.get('id'));text(criterion.get('description'))
+        require(criterion.get('kind','command') in ('manual','command'))
         if criterion.get('kind','command')=='manual':manual=True
+        else:
+            require(isinstance(criterion.get('checks'),list) and criterion['checks'])
+            for command in criterion['checks']:
+                require(isinstance(command,list) and command)
+                for argument in command:text(argument)
     require(not policy['enabled'] or manual,'FINAL_MANUAL_GATE_REQUIRED')
     worktree=value['worktree_policy'];exact(worktree,('parent_dir','shared_env_links'))
     require(worktree['parent_dir'] is None or isinstance(worktree['parent_dir'],str) and worktree['parent_dir'].startswith('/'))

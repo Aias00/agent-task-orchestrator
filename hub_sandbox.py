@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import signal
 import stat
 import subprocess
 import time
+import tempfile
 
 from pi_toolchain import write_exclusions
 
@@ -34,7 +36,7 @@ def private_dir(path):
 def clean_environment(home, temporary, *, native_home=None):
     env=dict(HOME=str(canonical(home)),TMPDIR=str(canonical(temporary)),PATH='/usr/bin:/bin',
              LANG='en_US.UTF-8',NO_COLOR='1',NO_BROWSER='1',PYTHONDONTWRITEBYTECODE='1')
-    if native_home is not None:env['CODEX_HOME']=str(canonical(native_home))
+    if native_home is not None:env['CODEX_HOME']=str(canonical(native_home,exists=False))
     return env
 
 
@@ -70,14 +72,16 @@ def readonly_profile(runtime, *, protected, writable_native=()):
 
 def identity(pid):
     try:
-        data=subprocess.check_output(['/bin/ps','-p',str(pid),'-o','lstart='],timeout=2)
+        data=subprocess.check_output(['/bin/ps','-p',str(pid),'-o','lstart='],timeout=2,
+            env=dict(PATH='/usr/bin:/bin',LANG='C'),stderr=subprocess.DEVNULL)
         return hashlib.sha256(data.strip()).hexdigest() if data.strip() else None
     except (OSError,subprocess.SubprocessError):return None
 
 
 def group_members(group):
     try:
-        data=subprocess.check_output(['/bin/ps','-axo','pid=,pgid=,stat='],text=True,timeout=2)
+        data=subprocess.check_output(['/bin/ps','-axo','pid=,pgid=,stat='],text=True,timeout=2,
+            env=dict(PATH='/usr/bin:/bin',LANG='C'),stderr=subprocess.DEVNULL)
         return {int(pid):identity(int(pid)) for pid,pgid,state in (row.split() for row in data.splitlines())
                 if int(pgid)==group and not state.startswith('Z')}
     except (OSError,ValueError,subprocess.SubprocessError):return None
@@ -138,13 +142,13 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
     try:
         if stop():return ProcessResult('STOPPED',None)
         with stdin.open('rb') as source,error.open('ab') as log:
+            deadline=time.monotonic()+timeout
             process=subprocess.Popen(list(command),cwd=workspace,env=environment,stdin=source,
-                stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,umask=0o077)
             birth=identity(process.pid);owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})
             selector=selectors.DefaultSelector()
             for stream in (process.stdout,process.stderr):
                 os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ)
-            deadline=time.monotonic()+timeout
             try:
                 while True:
                     if stop():code='STOPPED';break
@@ -190,3 +194,74 @@ def checked_turn(request, invoke):
         try:after=request.snapshot()
         except Exception:raise ValueError('REVIEWER_MUTATION_VIOLATION') from None
         if after!=before:raise ValueError('REVIEWER_MUTATION_VIOLATION')
+
+
+def executable(kind, selected=None):
+    """Host-only selection seam; task specs never contain executable fields."""
+    value=selected if selected is not None else shutil.which(kind)
+    if value is None:return None
+    path=Path(value)
+    if not path.is_absolute():raise ValueError('EXECUTABLE_UNAVAILABLE')
+    path=path.resolve(strict=True)
+    if not path.is_file() or not os.access(path,os.X_OK):raise ValueError('EXECUTABLE_UNAVAILABLE')
+    return path
+
+
+def tool_environment(home, temporary, tool, *, codex=False):
+    env=clean_environment(home,temporary,native_home=Path(home)/'.codex' if codex else None)
+    paths=[str(Path(tool).parent),'/usr/bin','/bin']
+    # Script CLIs may need their trusted Node loader. Do not inherit the
+    # ambient PATH or any loader/proxy/actor/key variables into native tools.
+    node=shutil.which('node')
+    if node:paths.insert(1,str(Path(node).resolve().parent))
+    env['PATH']=os.pathsep.join(dict.fromkeys(paths))
+    return env
+
+
+def write_private(path, data):
+    fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'w') as stream:stream.write(data)
+
+
+def read_output(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>LIMIT:
+            raise ValueError('INVALID_PROTOCOL')
+        return stream.read(LIMIT+1)
+
+
+def turn_context(request, tool, home, *, outer=True, writable_native=(), codex=False):
+    if tool is None:raise ValueError('EXECUTABLE_UNAVAILABLE')
+    workspace=canonical(request.workspace);rt=private_dir(request.runtime_dir);home=canonical(home)
+    if rt.is_relative_to(workspace) or tool.is_relative_to(workspace):raise ValueError('INVALID_PROTOCOL')
+    temporary=rt/'tmp';temporary.mkdir(mode=0o700)
+    env=tool_environment(home,temporary,tool,codex=codex)
+    prefix=[]
+    if outer:
+        from_root=Path(__file__).resolve().parent
+        protected={workspace,from_root}
+        # A worktree's Git metadata and common directory belong to its source
+        # repository. Protect those exact roots without granting a write path.
+        result=subprocess.run(['git','-C',str(workspace),'rev-parse','--git-common-dir'],
+            capture_output=True,text=True,timeout=5,env=dict(PATH='/usr/bin:/bin',LANG='C',GIT_OPTIONAL_LOCKS='0'))
+        if result.returncode:raise ValueError('INVALID_PROTOCOL')
+        common=Path(result.stdout.strip());common=(workspace/common).resolve() if not common.is_absolute() else common.resolve()
+        protected.add(common)
+        policy=readonly_profile(rt,protected=protected,writable_native=writable_native)
+        write_private(rt/'readonly.sb',policy);prefix=['/usr/bin/sandbox-exec','-f',str(rt/'readonly.sb')]
+    return rt,env,prefix
+
+
+def doctor(kind, tool, expected):
+    if tool is None:return dict(kind=kind,available=False,version=None,code='EXECUTABLE_UNAVAILABLE')
+    with tempfile.TemporaryDirectory(prefix='h1-doctor-') as folder:
+        rt=Path(folder).resolve();rt.chmod(0o700);home=rt/'home';home.mkdir(mode=0o700);temporary=rt/'tmp';temporary.mkdir(mode=0o700)
+        profile=readonly_profile(rt,protected=())
+        result=run(['/usr/bin/sandbox-exec','-p',profile,str(tool),'--version'],workspace=rt,runtime=rt,
+            environment=tool_environment(home,temporary,tool),timeout=3)
+        found=re.search(rb'(?<![0-9])'+re.escape(expected.encode())+rb'(?![0-9])',result.stdout)
+        good=result.code=='OK' and bool(found)
+        return dict(kind=kind,available=good,version=expected if good else None,
+                    code='OK' if good else result.code if result.code!='OK' else 'VERSION_MISMATCH')

@@ -18,7 +18,7 @@ def canonical(value, *, exists=True):
 
 
 def git(repo, *args):
-    env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
+    env=dict(PATH='/usr/bin:/bin',LANG='C')
     env.update(GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_OPTIONAL_LOCKS='0')
     result=subprocess.run(['git','-C',str(repo),*args],env=env,capture_output=True,timeout=30)
     if result.returncode:raise ValueError('GIT_OPERATION_REFUSED')
