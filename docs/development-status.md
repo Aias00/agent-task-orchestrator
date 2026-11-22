@@ -26,6 +26,9 @@ must not silently become release claims. Later integration should use reviewed
 commits from a development branch and a new source-matched verification.
 
 The [W3 source audit](w3-candidate-snapshots-audit.md) compares the four archived
-trees at `7ec8221` with `main@0f45125` and proposes separate dispositions for
-review. It does not change the export-time qualification facts above, approve
-integration, reissue historical acceptance, or authorize a native/model trial.
+trees at `7ec8221` with `main@0f45125` and records the reviewed dispositions
+(`tracking-rectification`: `INCREMENTAL_PORT`, `execution-efficiency`:
+`REDESIGN_FROM_MAIN`, `agy-acpx-integration`: `REDESIGN_FROM_MAIN`,
+`legacy-managed-mailbox`: `ARCHIVE_ONLY`). It does not change the export-time
+qualification facts above, approve integration, reissue historical acceptance,
+or authorize a native/model trial.

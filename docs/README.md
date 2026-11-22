@@ -26,7 +26,7 @@
 源码基线、支持矩阵、未合并候选及当前整改计划；历史候选的阶段通过不等于现行运行态已升级。
 
 - [Stable baseline and development snapshots](development-status.md)
-- [W3 四个历史候选快照源码审计与处置建议（待评审）](w3-candidate-snapshots-audit.md)
+- [W3 四个历史候选快照源码审计与处置建议（已评审通过，仅定性未实施）](w3-candidate-snapshots-audit.md)
 - [Delivery validation boundaries](message-delivery-validation.md)
 - [Agent Task Orchestrator (ATO) 整改方案](remediation-plan.md)
 - [P3-1 工具链与 ACP 适配方案（已批准，隔离实施）](p3-1-toolchain-design.md)
