@@ -30,6 +30,7 @@
 - [Agent Task Orchestrator (ATO) 整改方案](remediation-plan.md)
 - [P3-1 工具链与 ACP 适配方案（已批准，隔离实施）](p3-1-toolchain-design.md)
 - [W2-1 ProductionPiProfile 设计（待评审，仅文档，未启用）](w2-1-production-pi-design.md)
+- [W2-1 锁定 Pi 前置离线 Spike](w2-1-spike.md)
 - [Capabilities and evidence levels](session-decoupling/capabilities.md)
 - [Trusted Codex session compatibility](session-decoupling/codex-adapter.md)
 - [Managed Pi ACP coordinator](session-decoupling/pi-coordinator.md)

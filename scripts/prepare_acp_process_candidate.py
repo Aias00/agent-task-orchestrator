@@ -15,6 +15,7 @@ FILES = (
     'acp_bridge.py', 'acp_outcome.py', 'task_trace.py', 'pi_acp_worker.py',
     'pi_acp_exec.py', 'pi-path-guard.mjs', 'agent_native_events.py',
     'pi_toolchain.py', 'pi_acp_compat.py', 'integrations/pi-acp/compatibility.json',
+    'pi_production_credentials.py', 'pi_production_fence.py', 'pi_production_profile.py',
     'tests/pi_toolchain_support.py',
     'scripts/derive_pi_acp.py', 'scripts/create_acp_process_demo.py',
     'scripts/prepare_acp_process_candidate.py',
