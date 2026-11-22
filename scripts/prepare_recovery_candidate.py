@@ -14,6 +14,9 @@ EXTRA = {'workflow_lineage.py', 'docs/recovery-escalation-task.md',
          'build/recovery-escalation/validation-report.md',
          'scripts/prepare_recovery_candidate.py', 'tests/test_recovery_escalation.py',
          'tests/test_workflow_lineage.py'}
+EXTRA.update({'tests/hub_support.py', 'tests/test_hub_foundations.py', 'tests/test_hub_adapters.py',
+              'tests/test_hub_loop.py', 'tests/fixtures/hub_cli_fixture.py', 'tests/fixtures/hub_worker_fixture.py',
+              'docs/h1-offline-implementation.md', 'docs/hub-orchestrator-design.md', 'docs/h1-cli-spike.md'})
 
 
 def sha(path):
@@ -26,7 +29,9 @@ def build():
         if sha(ROOT/name) != digest:
             raise ValueError('inherited test changed: '+name)
     files = {}
-    runtime_sources = {p.name for p in ROOT.glob('*.py')} | {p.relative_to(ROOT).as_posix() for p in (ROOT/'ato_cli').glob('*.py')} | {'pyproject.toml', 'requirements-acp.lock', 'integrations/pi-acp/compatibility.json'}
+    runtime_sources = ({p.name for p in ROOT.glob('*.py')} | {p.relative_to(ROOT).as_posix() for p in (ROOT/'ato_cli').glob('*.py')}
+                       | {p.relative_to(ROOT).as_posix() for p in (ROOT/'skills').rglob('*.md')}
+                       | {'pyproject.toml', 'requirements-acp.lock', 'integrations/pi-acp/compatibility.json'})
     for name in sorted(set(baseline['files']) | EXTRA | runtime_sources):
         relative = Path(name)
         path = ROOT/relative

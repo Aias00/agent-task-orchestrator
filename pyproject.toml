@@ -56,6 +56,8 @@ py-modules = [
   "hub_adapter_claude",
   "hub_adapter_codex",
   "hub_registry",
+  "hub_loop",
+  "hub_cli",
   "interaction",
   "local_session_adapter",
   "message_bus",
@@ -89,3 +91,5 @@ py-modules = [
 "share/agent-task-orchestrator/integrations/pi-acp" = ["integrations/pi-acp/compatibility.json"]
 
 "share/agent-task-orchestrator/scripts" = ["scripts/release_snapshot.py"]
+
+"share/agent-task-orchestrator/skills/ato-hub-orchestrator" = ["skills/ato-hub-orchestrator/SKILL.md"]

@@ -172,15 +172,16 @@ class HubLedger:
         return sid,effective,'native_resume' if sid else row['next_provenance'] if rebuilding else 'ledger_reconstruction'
 
     @mutation
-    def record_session(self, session_id, provenance):
+    def record_session(self, session_id, provenance, *, workspace=None):
         token(session_id);row=self.hub();kind=row['active_agent']['kind'];old=row['native_sessions'].get(kind,{})
+        if workspace is not None:workspace=str(canonical(workspace))
         same=old.get('session_id')==session_id and old.get('state')=='active'
         retired=list(old.get('retired_sessions',[]))
         if old.get('session_id') and not same:
             retired.append({k:old[k] for k in ('session_id','provenance','created_at','turn_count')})
         row['native_sessions'][kind]=dict(session_id=session_id,provenance=provenance,
             created_at=old['created_at'] if same else time.time(),last_used_at=time.time(),
-            turn_count=old.get('turn_count',0)+1 if same else 1,retired_sessions=retired,state='active')
+            turn_count=old.get('turn_count',0)+1 if same else 1,retired_sessions=retired,state='active',workspace=workspace)
         row['next_provenance']='native_resume';save(self.root/'hub.json',row);self.brief()
 
     @mutation

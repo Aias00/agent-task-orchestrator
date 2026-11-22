@@ -24,6 +24,9 @@ installed launchers, migrate task records or grant execution permissions.
 | Compact private host/failure material and once-only completion policy | `coordination.py`, `failure_notice.py`, `completion_notifications.py`, `notifications.py`, `hub_queue_gate.py` |
 | Read-only snapshot qualification, journaled entrypoint/observer cutover and executable-only rollback | `scripts/release_snapshot.py` |
 | CLI entrypoints and optional conversation integration | `bin/`, `scripts/install.py`, `skills/codex-long-task/` |
+| Neutral read-only hub contracts, OS boundary, worktree integrity and private session ledger (offline candidate) | `hub_contract.py`, `hub_sandbox.py`, `hub_worktree.py`, `hub_ledger.py` |
+| Code-owned thin AGY/Claude/Codex reviewers and explicit capability registry | `hub_adapter_agy.py`, `hub_adapter_claude.py`, `hub_adapter_codex.py`, `hub_registry.py` |
+| Bounded isolated work/check/review/fix loop and independent source-only CLI/skill | `hub_loop.py`, `hub_cli.py`, `skills/ato-hub-orchestrator/SKILL.md` |
 
 The structural source refactor preserves the protected core filenames and public
 CLI. Passive stores add no independent ledger, delivery path or authorization;
@@ -38,8 +41,9 @@ neutral local CLI uses explicit scoped actors. Managed Pi coordination and
 file workers have different capability/grant boundaries; native Pi resume is
 not implicitly supplied. Optional production Pi profiles remain macOS-specific
 and version-pinned. Claude worker availability does not establish a generic
-Claude coordinator transport. AGY/acpx work is an unfinished development
-snapshot, not part of this stable baseline.
+Claude coordinator transport. The old AGY/acpx integration remains a historical
+snapshot. The separate [H1 offline candidate](h1-offline-implementation.md) uses
+native thin reviewers and no acpx dependency; it has not activated a runtime.
 
 W2-1 production Pi is an explicitly registered `pi_acp_production` offline
 candidate. It neither changes `LocalPiProfile` nor adopts any existing task.

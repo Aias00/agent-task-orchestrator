@@ -18,6 +18,11 @@ FILES = (
     'pi_production_credentials.py', 'pi_production_fence.py', 'pi_production_profile.py',
     'pi_production_egress.py', 'pi_production_exec.py', 'pi_production_transport.mjs',
     'tests/pi_toolchain_support.py',
+    'hub_contract.py', 'hub_sandbox.py', 'hub_worktree.py', 'hub_ledger.py',
+    'hub_adapter_agy.py', 'hub_adapter_claude.py', 'hub_adapter_codex.py', 'hub_registry.py',
+    'hub_loop.py', 'hub_cli.py', 'skills/ato-hub-orchestrator/SKILL.md',
+    'tests/hub_support.py', 'tests/test_hub_foundations.py', 'tests/test_hub_adapters.py',
+    'tests/test_hub_loop.py', 'tests/fixtures/hub_cli_fixture.py', 'tests/fixtures/hub_worker_fixture.py',
     'scripts/derive_pi_acp.py', 'scripts/create_acp_process_demo.py',
     'scripts/prepare_acp_process_candidate.py',
     'tests/fixtures/acp_fixture_cli.py', 'tests/fixtures/acp_fixture_agent.py',
@@ -35,7 +40,7 @@ def build():
     inputs = set(FILES)
     for group in (ROOT.glob('*.py'), ROOT.glob('*.mjs'), (ROOT/'tests').glob('test*.py'),
                   (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'docs').glob('*.md'),
-                  (ROOT/'skills/codex-long-task').rglob('*.md'), (ROOT/'ato_cli').glob('*.py')):
+                  (ROOT/'skills').rglob('*.md'), (ROOT/'ato_cli').glob('*.py')):
         inputs.update(p.relative_to(ROOT).as_posix() for p in group if p.is_file())
     inputs.update(('pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py'))
     for name in sorted(inputs):

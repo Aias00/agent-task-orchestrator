@@ -18,7 +18,7 @@ def sha(path):
 def inputs():
     # Explicit portable source groups only: no task state, databases, logs or secrets.
     groups = [ROOT.glob('*.py'), ROOT.glob('*.mjs'), (ROOT/'docs').glob('*.md'),
-              (ROOT/'skills/codex-long-task').rglob('*.md'), (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'ato_cli').glob('*.py')]
+              (ROOT/'skills').rglob('*.md'), (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'ato_cli').glob('*.py')]
     files = {p for group in groups for p in group if p.is_file()}
     files.update(ROOT/name for name in (
         'pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py',
@@ -26,6 +26,8 @@ def inputs():
         'build/agent-abstraction/validation-report.md',
         'tests/test_agent_registry_contract.py', 'tests/test_agent_neutral_e2e.py',
         'tests/test_agent_lifecycle_contract.py', 'tests/test_agent_transport_contract.py'))
+    files.update(ROOT/name for name in ('tests/hub_support.py', 'tests/test_hub_foundations.py',
+        'tests/test_hub_adapters.py', 'tests/test_hub_loop.py'))
     for p in files:
         if not p.is_file() or not p.resolve().is_relative_to(ROOT.resolve()):
             raise ValueError('missing or nonportable input: '+str(p))
