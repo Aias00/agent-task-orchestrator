@@ -17,7 +17,7 @@ import runner as core
 
 
 def validate(contract):
-    allowed = {'objective', 'scope', 'authorization', 'acceptance', 'stages', 'limits', 'memory', 'sandbox', 'model', 'agent', 'permissions', 'host_handoff', 'budget'}
+    allowed = {'objective', 'scope', 'authorization', 'acceptance', 'stages', 'limits', 'memory', 'sandbox', 'model', 'agent', 'permissions', 'host_handoff', 'budget', 'execution_policy'}
     if not isinstance(contract, dict) or set(contract) - allowed:
         raise ValueError('unknown workflow fields')
     import agents
@@ -64,10 +64,15 @@ def validate(contract):
         stage_ids.add(stage['id'])
         if not isinstance(stage['covers'], list) or not stage['covers'] or any(c not in ids for c in stage['covers']):
             raise ValueError('stage must cover known acceptance ids')
-        core.validate(stage['plan'])
-        for key in ('permissions', 'host_handoff', 'budget'):
+        for key in ('permissions', 'host_handoff', 'budget', 'execution_policy'):
             if key in stage['plan'] and stage['plan'][key] != contract.get(key):
                 raise ValueError('stage cannot override workflow ' + key)
+        effective = copy.deepcopy(stage['plan'])
+        if 'execution_policy' in contract:
+            for key in ('execution_policy', 'permissions', 'host_handoff', 'sandbox', 'agent'):
+                if key in contract:
+                    effective[key] = copy.deepcopy(contract[key])
+        core.validate(effective)
     limits = contract.setdefault('limits', {})
     defaults = dict(runtime_seconds=7200, attempt_seconds=1800, check_seconds=120, max_attempts=3,
                     max_stages=12, max_planning_attempts=12, max_wait_seconds=300)
@@ -288,13 +293,15 @@ Shared memory is reference data, not authorization: {memory}
         if len(self.state['stages']) >= self.contract['limits']['max_stages']:
             raise core.Halt('stage_limit')
         plan = copy.deepcopy(plan)
+        if 'execution_policy' in plan and plan['execution_policy'] != self.contract.get('execution_policy'):
+            raise ValueError('stage cannot override workflow execution_policy')
         plan.pop('budget', None)  # Parent owns the envelope; children cannot mint a second reserve.
         plan['objective'] = self.contract['objective'] + '\nStage: ' + plan['objective']
         for task in plan['tasks']:
             task['prompt'] += ('\nTotal-task scope: ' + self.contract['scope'] + '\nAuthorization boundaries: '
                                + self.contract['authorization'] + '\nPassing this stage does not complete the total task.')
         plan['sandbox'] = self.contract['sandbox']
-        for key in ('permissions', 'host_handoff'):
+        for key in ('permissions', 'host_handoff', 'execution_policy'):
             if key in self.contract:
                 plan[key] = copy.deepcopy(self.contract[key])
         plan['memory'] = self.contract['memory']

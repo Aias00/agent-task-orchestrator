@@ -40,6 +40,8 @@ def validate(plan):
     if handoff is not None and (not isinstance(handoff, dict) or set(handoff) != {'source', 'instructions'}
             or any(not isinstance(v, str) or not v.strip() for v in handoff.values())):
         raise ValueError('host_handoff requires source and bounded instructions')
+    import execution_policy
+    execution_policy.validate(plan, adapter.capabilities)
 
 
 def codex_args(plan, sandbox=None):
@@ -59,7 +61,10 @@ def codex_args(plan, sandbox=None):
 
 
 def describe(plan):
-    return dict(sandbox=plan.get('sandbox', 'workspace-write'), **plan.get('permissions', {}))
+    result = dict(sandbox=plan.get('sandbox', 'workspace-write'), **plan.get('permissions', {}))
+    if 'execution_policy' in plan:
+        result['execution_policy'] = plan['execution_policy']
+    return result
 
 
 def probe_argv(plan, repo):

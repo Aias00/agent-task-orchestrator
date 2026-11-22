@@ -19,6 +19,7 @@
 - [Neutral CLI human interaction (candidate only)](session-decoupling/neutral-cli.md)
 - [User closure and failed-task observation](task-disposition.md)
 - [Worker permissions and normal host handoffs](worker-permissions-and-handoffs.md)
+- [Worker action ownership and conflict handling](worker-action-policy.md)
 
 ## 能力状态
 

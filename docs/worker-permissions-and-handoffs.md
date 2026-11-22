@@ -48,6 +48,11 @@ deployment, messaging and final human decisions still follow the original task
 authorization. Do not switch all tasks to full access or interpret a worker's
 request as the permission source.
 
+Full access alone does not assign deployment, Git or messaging actions to a
+worker. Use the explicit bounded [worker action policy](worker-action-policy.md)
+to select a worker or origin owner. Required actions without an execution path
+fail before a model attempt. Legacy contracts retain their existing restrictions.
+
 Before a model attempt, declared requirements are checked with the model-free
 native `codex sandbox --permission-profile` command. The CLI's sandbox subcommand
 uses a named profile representing the requested workspace/network/extra roots;
