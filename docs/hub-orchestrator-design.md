@@ -1,6 +1,6 @@
 # H1：可换长期主控（AGY / Claude / Codex）与隔离执行闭环设计
 
-状态：**设计已获用户批准（2026-11-22），授权执行第 7 节最小前置只读 CLI Spike（S1–S4，隔离 `/tmp` 合成仓、≤4 次只读调用）；离线实现待 Spike 复核后启动**。设计基线为 `main@e162395`（包含 Batch 1–3、P3-1、W1、W2-1 离线实现与 W3 审计定性）。
+状态：**设计已获用户批准（2026-11-22），前置只读 CLI Spike（S1–S4）已通过（见 [h1-cli-spike.md](h1-cli-spike.md)），准予推进离线实现（H1-A / H1-B / H1-C）**。设计基线为 `main@e162395`（包含 Batch 1–3、P3-1、W1、W2-1 离线实现与 W3 审计定性）。
 
 本轮仅新增本设计文档并登记索引；**不修改任何运行代码、测试或依赖文件，不操作本机运行态或安装入口，不调用真实云端模型**。后续的前置 CLI 实测 Spike、离线实现与真实端到端试跑均需分步评审和单独授权。
 
@@ -209,10 +209,11 @@ class HubAdapter(Protocol):
 
 ### 4.4 只读 OS 边界与安全卫生（`hub_sandbox.py`）
 
-- **双重只读防线**（绝不只靠提示词）：
-  1. **OS 层写拒绝**：macOS 上对主控子进程默认施加只读 `sandbox-exec` profile——全局 `(deny file-write*)`，仅放行 `/dev/null`、当次 `runtime_dir`（叠加 `pi_toolchain.write_exclusions`）以及（当且仅当开启原生 `session_resume` 且经 Spike 证实必需时）该 CLI 自身原生会话目录；**目标主仓、隔离 worktree、`.git`、`.codex/tasks`、`runtime/trusted` 全部在 OS 层禁止写入**。
-  2. **嵌套 Seatbelt 处理原则**：若第 7 节 Spike 证明 `agy --sandbox` 内部也调用 macOS `sandbox_init` 导致嵌套冲突，则以 Spike 实测确认“真正强制拒绝向 worktree 写入”的单一 OS 边界为准（优先 ATO 外层可控 `sandbox-exec` + `agy --mode plan`；若外层不可用则拒绝宣称 `os_sandbox_compatible`），**绝不降级成无沙箱**。
-  3. **事后树完整性绊线**：配合 `snapshot_integrity`，形成独立于 CLI 内部实现的第二重保障。
+- **双重只读防线**（绝不只靠提示词；具体策略已由 [h1-cli-spike.md](h1-cli-spike.md) 实测落定）：
+  1. **OS 层写拒绝（按厂商实测边界区分，避免 Seatbelt 嵌套冲突）**：
+     - **AGY / Claude**：由 ATO 外层施加 macOS 只读 `sandbox-exec` profile——全局 `(deny file-write*)`，仅放行 `/dev/null`、当次 `runtime_dir`（叠加 `pi_toolchain.write_exclusions`）以及开启原生 `session_resume` 时必需的该 CLI 原生会话目录（AGY 为 `$HOME/.gemini/antigravity-cli`，Claude 为 `~/.claude` / `~/.claude.json` / `/tmp/claude-<uid>`）；**目标主仓、隔离 worktree、`.git`、`.codex/tasks`、`runtime/trusted` 全部在 OS 层禁止写入**。AGY 不再依赖与 `--disable-slash-commands` 冲突的 `--mode plan`，也不与内建 `--sandbox` 叠套。
+     - **Codex**：实测外层 `sandbox-exec` 会与 Codex 内建 Seatbelt 冲突导致连只读命令也失败，因此遵循 [agents.py](../agents.py) L72–73，采用 Codex 原生只读 Seatbelt（首轮 `--sandbox read-only`，续轮 `-c sandbox_mode="read-only"`），不叠套外层 `sandbox-exec`。
+  2. **事后树完整性绊线**：无论哪家主控，每轮审阅前后均强制执行 `snapshot_integrity`，形成独立于 CLI 内部实现的第二重硬保障。
 - **清洁环境与防泄漏**：
   - 子进程环境剥离 `PYTHONPATH`、`NODE_OPTIONS`、`DYLD_*`、`LD_*`、`CTASK_SESSION_REF` 及 ATO actor 凭据路径；
   - 私有 `stderr.log` 以 `0600` 写入、上限 1 MiB；公开回执与异常信息只输出固定错误码与证据路径，不回显环境变量或原始 stderr。
