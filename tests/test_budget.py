@@ -157,8 +157,13 @@ class BudgetTests(unittest.TestCase):
     def test_real_workflow_continues_past_soft_limit_when_independent_checks_advance(self):
         c=self.contract(keys=('first','second'))
         c['limits']['runtime_seconds']=1
+        # Cross the soft boundary once. Stage/final/overall verification reuse
+        # this exact check; repeating the delay tests storage/scheduler speed
+        # against the hard cap instead of independent-progress renewal.
         c['acceptance'][1]['checks']=[[sys.executable,'-c',
-            'from pathlib import Path; assert Path("second").exists(); import time; time.sleep(1.1)']]
+            'from pathlib import Path; assert Path("second").exists(); import time; '
+            'marker=Path("budget-delay-once"); '
+            'time.sleep(0 if marker.exists() else 1.1); marker.touch()']]
         c['budget']=dict(source='Actual bounded fixture reserve authorization',estimate=self.forecast(1,6))
         (self.repo/'first').write_text('already implemented')
         d=self.create(c)

@@ -387,7 +387,10 @@ def poll(owner):
     if not time_enforced():
         owner.deadline = float('inf')
         return
-    if getattr(owner, '_accounted_at', None) is None or current < getattr(owner, '_next_budget_poll', 0):
+    # Scheduling/initialization may place the next periodic poll beyond the
+    # soft deadline. Recheck real progress at that boundary before guard halts.
+    if (getattr(owner, '_accounted_at', None) is None or
+            current < min(getattr(owner, '_next_budget_poll', 0), owner.deadline)):
         return
     owner._next_budget_poll = current + 1
     fingerprint = owner.state.get('contract_hash', owner.state.get('plan_hash'))

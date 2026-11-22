@@ -15,7 +15,7 @@
 - [Final completion notification policy, 2026-11-19](completion-notifications.md)
 - [Independent mailbox and transport primitives](message-protocol.md)
 - [Hub notifications only when user intervention is required](notification-policy.md)
-- [Source publication and runtime upgrades](runtime-upgrade.md)
+- [Source publication and runtime upgrades](runtime-upgrade.md) — `scripts/release_snapshot.py` 的只读检查、隔离 stage、显式 activate 与仅入口/controller 回退
 - [Neutral CLI human interaction (candidate only)](session-decoupling/neutral-cli.md)
 - [User closure and failed-task observation](task-disposition.md)
 - [Worker permissions and normal host handoffs](worker-permissions-and-handoffs.md)

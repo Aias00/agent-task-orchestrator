@@ -144,7 +144,12 @@ class Runner:
                         self.kill()
                         self.event('command_timeout', evidence=str(log))
                         return 124, str(log)
-                    time.sleep(0.15)
+                    # Wake as soon as a short check exits; retain a bounded guard
+                    # interval for STOP, budgets and descendants of a live child.
+                    try:
+                        self.process.wait(timeout=min(0.15, max(0.001, timeout-(now()-start))))
+                    except subprocess.TimeoutExpired:
+                        pass
                 code = self.process.returncode
                 self.guard()
                 self.event('command_finished', code=code, evidence=str(log))

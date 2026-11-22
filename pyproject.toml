@@ -74,3 +74,5 @@ py-modules = [
 
 [tool.setuptools.data-files]
 "share/agent-task-orchestrator/integrations/pi-acp" = ["integrations/pi-acp/compatibility.json"]
+
+"share/agent-task-orchestrator/scripts" = ["scripts/release_snapshot.py"]
