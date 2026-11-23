@@ -7,9 +7,29 @@ Codex indexes and rollouts; it is never authorization for an operation.
 Setting a distinct ``ATO_HOME`` does not migrate existing ledgers. Environment
 values are paths only, not actor credentials or session proofs.
 """
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from pathlib import Path
 import shlex
+
+_unified_kernel = ContextVar('unified_kernel', default=None)
+
+
+def unified_home():
+    """Locate the new namespace without resolving away redirected components."""
+    configured = os.environ.get('ATO_HOME')
+    return Path(configured).expanduser().absolute() if configured else Path.home()/'.local/share/ato'
+
+
+@contextmanager
+def use_unified_kernel(kernel_root, native_home):
+    """Bind the sealed runtime to host-verified roots for its kernel calls."""
+    token = _unified_kernel.set((Path(kernel_root), Path(native_home)))
+    try:
+        yield
+    finally:
+        _unified_kernel.reset(token)
 
 
 def _configured_path(name, fallback):
@@ -20,11 +40,15 @@ def _configured_path(name, fallback):
 
 def codex_home():
     """Return the vendor-owned Codex configuration root, independent of ATO_HOME."""
+    if selected := _unified_kernel.get():
+        return selected[1]
     return _configured_path('CODEX_HOME', Path.home()/'.codex')
 
 
 def ato_home():
     """Return the ATO-owned state root, retaining CODEX_HOME fallback compatibility."""
+    if selected := _unified_kernel.get():
+        return selected[0]
     explicit = os.environ.get('ATO_HOME')
     if explicit:
         return _configured_path('ATO_HOME', Path.home()/'.codex')
@@ -47,6 +71,8 @@ def interaction_directory():
     Changing either locator does not migrate state or confer authority.
     """
     root = ato_home()/'ctask-interaction'
+    if _unified_kernel.get() is not None:
+        return root
     if os.environ.get('ATO_HOME') and os.environ.get('CODEX_HOME'):
         import hashlib
         namespace = hashlib.sha256(str(codex_home()).encode()).hexdigest()
