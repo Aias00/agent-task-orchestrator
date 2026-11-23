@@ -1,19 +1,23 @@
 """Offline T4 acceptance with real Task/Run state, Git and the managed mailbox."""
 from dataclasses import replace
+from functools import partial
 import json
 import os
 from pathlib import Path
 import shlex
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import agent_registry
 import ato_config
+import ato_observer
 import ato_process
 from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
 from ato_execution import ExecutionService, HostProfile, _initial_binding, _publish_receipt
+from ato_private import render_notice
 from ato_task_store import InitialBinding, RunIntent, SubmissionGrant, TaskError
 from ato_task_store import TaskStore, new_id
 from message_bus import MessageBus
@@ -409,6 +413,66 @@ class UnifiedAcceptanceTests(unittest.TestCase):
             task_record, self.binding(task_record, self.store.load_spec(task)), "initial"))
         self.assertEqual(self.interaction.task_status(self.proof(task, "user"), task)["acceptance"]["disposition"],
                          "pending")
+
+    def test_observer_applies_correlated_native_terminal_without_sending_again(self):
+        import agents
+        from codex_session_adapter import CodexSessionAdapter
+        task = self.create()
+        request = self.ask(task)
+        user = self.proof(task, "user")
+        bus = self.mailbox()
+        sender = bus.register_endpoint("observer-hub", kind="codex", session_id="hub",
+                                       project=str(self.repo), source="fixture")
+        recipient = bus.register_endpoint("observer-origin", kind="codex", session_id="origin",
+                                          project=str(self.repo), source="fixture")
+        self.interaction.render_notice = render_notice
+        self.interaction.route = lambda *args: MailboxRoute(sender, recipient, "fixture-route")
+        host = SimpleNamespace(store=self.store, folder=self.store.root / "host",
+                               record=lambda *_: {"transport_kinds": ["codex"]})
+        self.interaction.dispatch_envelope = self.interaction.observe_envelope = partial(ato_observer._dispatch, host)
+        calls = []
+        rollout = self.root / "fixture-rollout.jsonl"
+        rollout.write_text(json.dumps({"payload": {"cwd": str(self.repo)}}) + "\n")
+
+        class Adapter(CodexSessionAdapter):
+            capabilities = frozenset({"native_queue_serialization"})
+
+            def verify_target(self, target, home_dir=None):
+                assert target == "origin"
+                return rollout
+
+            def session_cursor(self, native_id, project):
+                calls.append("cursor")
+                return super().session_cursor(native_id, project)
+
+            def send(self, endpoint, envelope):
+                calls.append("send")
+                with rollout.open("a") as stream:
+                    for payload in ({"type": "task_started", "turn_id": "fixture-turn"},
+                                    {"type": "user_message", "message": envelope["body"]},
+                                    {"type": "task_complete", "turn_id": "fixture-turn"}):
+                        stream.write(json.dumps({"type": "event_msg", "payload": payload}) + "\n")
+                return DeliveryResult("delivered", "synthetic-queue-receipt")
+
+            def observe_session_v2(self, *args):
+                calls.append("observe")
+                return super().observe_session_v2(*args)
+
+        catalog = agents.registry.get
+        adapter = Adapter()
+        def lookup(kind, capability=None):
+            return adapter if (kind, capability) == ("codex", "transport") else catalog(kind, capability)
+
+        self.interaction.record_answer(user, request, "choice", self.event(user, "answer", request, "choice"))
+        with patch.object(agents.registry, "get", side_effect=lookup):
+            self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "delivered")
+            record = self.store.load_task(task)
+            binding = self.binding(record, self.store.load_spec(task))
+            self.assertEqual(self.interaction.decision_barrier(record, binding, "resume"), "RUN_UNSETTLED")
+            self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "turn_completed")
+            self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "turn_completed")
+        self.assertEqual(calls, ["cursor", "send", "observe"])
+        self.assertIsNone(self.interaction.decision_barrier(record, binding, "resume"))
 
     def test_handoff_supersedes_only_the_unsent_reservation(self):
         task = self.create()

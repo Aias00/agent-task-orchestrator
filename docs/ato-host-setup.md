@@ -89,3 +89,9 @@ route credentials and notification policy through the trusted host. Read-only
 diagnosis and installation work with the observer absent. The observer routes
 compact references. Its reader verifies the current Task, generation,
 binding and actor before exposing material.
+
+For Codex delivery, the observer records a native cursor before dispatch and
+keeps the exact endpoint lease while observing a pending attempt. A correlated
+terminal event closes the mailbox turn. If the lease is lost or the old
+attempt cannot be verified, the observer preserves the existing delivery
+disposition without replaying it.

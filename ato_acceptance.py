@@ -134,6 +134,7 @@ class InteractionService:
         self.mailbox = mailbox
         self.render_notice = render_notice
         self.dispatch_envelope = None
+        self.observe_envelope = None
         self.clock = clock
 
     def execution_hooks(self):
@@ -1158,7 +1159,9 @@ class InteractionService:
         _require(bus is not None, "DELIVERY_UNKNOWN")
         bus.recover()
         message = self._message(task, notice)
-        if message is not None and message["state"] != "queued":
+        if message is not None and message["state"] != "queued" and (
+                self.observe_envelope is None or message["state"] not in {
+                    "dispatching", "delivered", "delivery_unknown", "accepted", "responded"}):
             return self._delivery(task, notice)[0]
 
         def guard():
@@ -1201,7 +1204,9 @@ class InteractionService:
                     bus.cancel(route.sender, message["id"], source="unified reservation became stale")
                 raise
             notice = updated
-        if self.dispatch_envelope is not None:
+        if message["state"] != "queued":
+            self.observe_envelope(bus, route, notice["mailbox_id"], guard)
+        elif self.dispatch_envelope is not None:
             self.dispatch_envelope(bus, route, notice["mailbox_id"], guard)
         elif route.owner_token and route.transports:
             transport.dispatch_one(bus, route.target, route.owner_token, route.transports,
