@@ -808,6 +808,10 @@ def inspect(paths, system, target=None):
     departure = departing_seal(sources.get(PUBLIC), target) if target else None
     blockers = active_tasks(paths, system, sources | ({'target': target} if target else {}),
                             departing_seal=departure)
+    selected = sources.get(PUBLIC)
+    if (target and selected and not mixed
+            and all(selected[key] == target[key] for key in ('root', 'python', 'seal'))):
+        blockers.append('snapshot is already selected')
     if not all(box['idle'] for box in mailboxes.values()):
         blockers.append('mailbox is busy; release does not drain or replay it')
     if observer:
@@ -971,8 +975,6 @@ def activate(root, commit, paths, transaction, system=None, *, converge_mixed=Fa
         before = inspect(paths, system, target)
         require(not before['blockers'], '; '.join(before['blockers']))
         require(not before['mixed_sources'] or converge_mixed, 'mixed entries require explicit convergence')
-        require(target not in before['sources'].values() or len([r for r in before['entries'].values() if r]) > 1,
-                'snapshot is already selected')
         transaction.mkdir(mode=0o700, parents=False)
         sync_directory(transaction.parent)
         path = transaction/'transaction.json'

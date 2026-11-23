@@ -168,6 +168,35 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(restored['observer']['command'], original['command'])
         self.assertEqual(release.launcher_sources(release.entrypoints(self.bin))['ato'], source)
 
+    def test_same_selection_is_refused_before_transaction_or_observer_stop(self):
+        source = release.snapshot_source(self.snapshot)
+        release.atomic_entry(self.bin/'ato', release.entry_set(source)['ato'])
+        selected = release.launcher_sources(release.entrypoints(self.bin))['ato']
+        observer = self.system.seed(self.unified_state, selected)
+        write(self.paths['ato_home'], 'unified-v1/host/observation.json', '{"enabled":true}')
+        original = self.contents(self.base)
+        with patch.object(release, 'System', return_value=self.system), \
+                patch.object(release, 'git_commit', return_value=(CURRENT, 'fixture')), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(release.main(self.args('dry-run')), 0)
+        report = json.loads(out.getvalue())
+        self.assertFalse(report['activation_ready'])
+        self.assertIn('snapshot is already selected', report['blockers'])
+        with self.assertRaisesRegex(release.Refused, 'snapshot is already selected'):
+            self.activate()
+        self.assertEqual(self.system.calls, [])
+        self.assertEqual(self.system.observer(self.unified_state, selected), observer)
+        self.assertEqual(self.contents(self.base), original)
+        self.assertFalse(self.transaction.exists())
+
+        legacy_entry(self.bin, 'ctask', self.old)
+        with self.assertRaisesRegex(release.Refused, 'explicit convergence'):
+            self.activate()
+        result = release.activate(self.snapshot, CURRENT, self.paths, self.transaction, self.system,
+                                  converge_mixed=True)
+        self.assertEqual(result['state'], 'activated')
+        self.assertEqual([path.name for path in self.bin.iterdir()], ['ato'])
+
     def test_both_mailbox_writes_are_excluded_during_each_replacement(self):
         self.old_observer()
         original = release.atomic_entry
