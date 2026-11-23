@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import uuid
 
 import ato_core
@@ -152,7 +153,7 @@ class CommandHost:
         self.unknown = True
         raise ato_core.Halt("interrupted")
 
-    def _fence(self, argv, runtime, root, *, write, native):
+    def _fence(self, argv, runtime, root, *, write):
         if self.profile.fixture:
             return argv
         q = lambda path: json.dumps(str(path))
@@ -163,8 +164,6 @@ class CommandHost:
         if write:
             rules.append("(allow file-write* (require-all (subpath " + q(root)
                          + ") (require-not (literal " + q(root) + "))))")
-        if native:
-            rules.append("(allow file-write* (subpath " + q(Path(self.profile.worker_home) / ".codex") + "))")
         binding = self.driver.task["worktree"]
         for path in (root / ".codex", root / ".git", root / ".ato", runtime / "profile.sb",
                      *(root / name for name in binding["shared_link_identities"]),
@@ -176,6 +175,31 @@ class CommandHost:
         profile = runtime / "profile.sb"
         hub_sandbox.write_private(profile, "\n".join(rules))
         return ["/usr/bin/sandbox-exec", "-f", str(profile), *argv]
+
+    def _invoke(self, args, owner, runtime, environment, prompt, timeout, output, write):
+        def run(command):
+            return hub_sandbox.run(command, workspace=owner.repo, runtime=runtime,
+                environment=environment, prompt=prompt, timeout=timeout,
+                stop=lambda: self._command_stop(owner), truncate=output is None)
+
+        if self.profile.fixture:
+            return run(args)
+        root = owner.repo
+        if output is None:
+            return run(self._fence(args, runtime, root, write=write))
+        # Codex creates its own Seatbelt for command tools. Its frontend
+        # needs the private output and environment; tool subprocesses
+        # use a separate scratch path outside the protected ATO store.
+        binding = self.driver.task["worktree"]
+        with TemporaryDirectory(prefix="ato-codex-tool-") as scratch:
+            temporary = Path(scratch).resolve()
+            environment["TMPDIR"] = str(temporary)
+            mode = args.index("--sandbox")
+            args[mode:mode + 2] = hub_sandbox.guarded_codex_args(root, temporary,
+                writable=write, denied=(self.driver.store.root, root / ".codex/tasks"),
+                read_only=(root / ".git", root / ".codex", root / ".ato",
+                           *(root / name for name in binding["shared_link_identities"])))
+            return run(args)
 
     def command(self, owner, argv, name, timeout, input_text, agent_kind):
         owner.guard()
@@ -212,10 +236,7 @@ class CommandHost:
         # the sanitized child PATH for unqualified executable names.
         if "/" in executable and not Path(executable).is_absolute():
             args[0] = str(owner.repo / executable)
-        result = hub_sandbox.run(self._fence(args, runtime, owner.repo, write=write, native=output is not None),
-            workspace=owner.repo, runtime=runtime, environment=environment,
-            prompt=input_text or "", timeout=timeout, stop=lambda: self._command_stop(owner),
-            truncate=output is None)
+        result = self._invoke(args, owner, runtime, environment, input_text or "", timeout, output, write)
         with log.open("xb") as stream:
             stream.write(result.stdout)
             stream.write(result.stderr)

@@ -62,6 +62,32 @@ def clean_environment(home, temporary, *, native_home=None, proxy=None):
     return env
 
 
+def native_codex_args(workspace, temporary, *, writable, denied=(), read_only=()):
+    """Select one native tool sandbox with exact, host-owned filesystem rules."""
+    filesystem = {':root': 'read', str(temporary): 'write'}
+    if writable:
+        filesystem[str(workspace)] = 'write'
+    filesystem.update((str(path), 'read') for path in read_only)
+    filesystem.update((str(path), 'deny') for path in denied)
+    # Put the complete map in one TOML value. Quoted path segments in dotted
+    # CLI overrides are parsed differently across native CLI versions.
+    rules = ', '.join(f'{json.dumps(path)}={json.dumps(mode)}'
+                      for path, mode in filesystem.items())
+    profile = 'permissions.ato-host={filesystem={' + rules + '},network={enabled=false}}'
+    return ['-c', 'default_permissions="ato-host"', '-c', profile]
+
+
+def guarded_codex_args(workspace, temporary, *, writable, denied=(), read_only=()):
+    return native_codex_args(workspace, temporary, writable=writable, denied=denied,
+        read_only=read_only) + [
+        '--ignore-user-config', '--ignore-rules', '--strict-config',
+        '-c', 'mcp_servers={}', '-c', 'features.hooks=false', '-c', 'features.apps=false',
+        '-c', 'features.multi_agent=false', '-c', 'features.plugins=false',
+        '-c', 'features.shell_snapshot=false', '-c', 'web_search="disabled"',
+        '-c', 'projects={' + json.dumps(str(workspace)) + '={trust_level="untrusted"}}',
+    ]
+
+
 def secrets(environment):
     return tuple(str(value) for key,value in environment.items() if value and len(str(value))>=8
         and re.search(r'(secret|token|password|credential|api.?key|actor)',key,re.I))

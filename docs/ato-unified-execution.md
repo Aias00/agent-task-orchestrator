@@ -73,7 +73,11 @@ it outside the public spec and ambient actor environment.
 ## Offline scope
 
 The included bounded Worker profile handles Codex in workspace-write or
-read-only mode. Other Worker protocols and broader grants require their own
+read-only mode with one host-selected native permissions profile. The Codex
+frontend starts directly and its command tools use native Seatbelt. The
+profile gives writes only to the selected workspace and per-turn scratch,
+fences Git and Task records, and keeps command-tool network disabled.
+Independent host checks use their own outer Seatbelt. Other Worker protocols and broader grants require their own
 verified write boundary. The H1 reviewer selection uses its existing
 read-only profiles. `resume_if_supported` starts fresh for the supplied
 one-shot reviews. `require_resume` refuses admission because the profile

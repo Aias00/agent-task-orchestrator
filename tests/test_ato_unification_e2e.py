@@ -34,7 +34,9 @@ import sys
 import time
 
 assert sys.argv[1] == "exec"
-assert sys.argv[sys.argv.index("--sandbox") + 1] == "workspace-write"
+assert "--sandbox" not in sys.argv
+assert 'default_permissions="ato-host"' in sys.argv
+assert any(s.startswith('permissions.ato-host=') and 'network={enabled=false}' in s for s in sys.argv)
 assert "ATO_ACTOR_FILE" not in os.environ and "OPENAI_API_KEY" not in os.environ
 assert sys.stdin.read()
 native = Path(os.environ["CODEX_HOME"])
