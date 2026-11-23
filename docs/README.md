@@ -26,6 +26,7 @@
 源码基线、支持矩阵、未合并候选及当前整改计划；历史候选的阶段通过不等于现行运行态已升级。
 
 - [Stable baseline and development snapshots](development-status.md)
+- [ATO 统一入口与任务模型实施拆分](ato-unification-task-plan.md)
 - [W3 四个历史候选快照源码审计与处置建议（已评审通过，仅定性未实施）](w3-candidate-snapshots-audit.md)
 - [H1 可换长期主控（AGY / Claude / Codex）与隔离执行闭环设计（已批准，前置 Spike 通过）](hub-orchestrator-design.md)
 - [H1 前置只读 CLI 能力实测 Spike 记录（S1–S4）](h1-cli-spike.md)
