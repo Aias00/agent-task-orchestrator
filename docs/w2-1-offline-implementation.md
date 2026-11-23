@@ -16,6 +16,11 @@ guard在原turn/STOP/合约/代次/指纹检查之外，经私有control socket�
 
 每请求先持久化完整的保守成本预占，再发CONNECT grant。原生usage缺失、断连、取消或未知结果不退款。单次monotonic硬期限独立于总任务advisory政策。v1仅支持被审查的文本/OpenAI-compatible路径；序列化字节加framing reserve保守限流，大上下文在发网前拒绝。价格、token和次数上界来自宿主审查，不是模型参数。
 
+CONNECT/TLS 建立阶段保留至多 2 秒的 socket 闲置超时；握手成功后清除原 socket 与
+TLS socket 的该超时。等待响应头及 SSE 分块间隔统一受本次 grant 的绝对截止时间和
+取消信号约束，不因超过 2 秒而提前中断，也不自动重试。本地 TLS 测试覆盖 10 秒 grant
+内延迟 2.7 秒的响应头/分块，以及超过绝对期限的拒绝；这不构成真实 Provider 资格。
+
 宿主持续监视STOP、代次、owner guard和子进程退出；无需等待下一次工具调用。显式cancel的ACP写入上限为250ms，写管道卡住仍进入关闭。生产supervisor在ACP子进程退出后保留自有组anchor，并用私有fd唤醒宿主，即使孙进程仍持有stdout。关闭先撤销准入/出口，再对已证明的组cohort终止、必要时KILL并复核；不能证明身份或清理则 `cleanup_blocked`，不扫杀未知进程。迟到响应不能把取消、unknown或错误改成workflow完成。
 
 `session.load_resume`仍为unsupported；生产checkpoint reconstruction同样拒绝，留待W2-2。没有隐式重启、重放、Local回退或旧任务接管。

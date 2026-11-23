@@ -10,6 +10,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -46,6 +47,7 @@ class ProductionTransportTests(unittest.TestCase):
                 if test.mode=='hang':
                     test.delay_gate.wait(3)
                     return
+                if test.mode=='slow-headers':test.delay_gate.wait(2.7)
                 code=200 if test.mode not in ('503','redirect') else (503 if test.mode=='503' else 302)
                 self.send_response(code)
                 self.send_header('Content-Type','text/event-stream')
@@ -55,7 +57,14 @@ class ProductionTransportTests(unittest.TestCase):
                 frame={'choices':[{'index':0,'delta':{'content':text},'finish_reason':'stop'}]}
                 body=('data: '+json.dumps(frame,ensure_ascii=False)+'\r\n\r\ndata: [DONE]\r\n\r\n').encode()
                 if test.mode=='truncated-utf8':body+=b'\xe4\xb8'  # Incomplete final U+4E2D.
-                self.wfile.write(body);self.wfile.flush()
+                try:
+                    if test.mode=='slow-stream':
+                        boundary=body.index(b'data: [DONE]')
+                        self.wfile.write(body[:boundary]);self.wfile.flush()
+                        test.delay_gate.wait(2.7)
+                        body=body[boundary:]
+                    self.wfile.write(body);self.wfile.flush()
+                except (BrokenPipeError,ConnectionResetError,ssl.SSLError):pass
         self.provider=http.server.ThreadingHTTPServer(('127.0.0.1',0),Provider)
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(self.cert,self.key)
         self.provider.socket=tls.wrap_socket(self.provider.socket,server_side=True)
@@ -68,9 +77,9 @@ class ProductionTransportTests(unittest.TestCase):
 
     def check(self):self.checks+=1
 
-    def invoke(self, *, token=None, ca=True):
+    def invoke(self, *, token=None, ca=True, remaining_ms=1500):
         config=dict(endpoint='https://provider.example/v1',proxy_port=self.port)
-        grant=dict(remaining_ms=1500,egress_grant=token or self.proxy.issue(1500))
+        grant=dict(remaining_ms=remaining_ms,egress_grant=token or self.proxy.issue(remaining_ms))
         code="""import fs from 'node:fs';
 import {request,decode} from './pi_production_transport.mjs';
 const config=JSON.parse(process.env.FIXTURE_CONFIG),grant=JSON.parse(process.env.FIXTURE_GRANT);
@@ -84,7 +93,7 @@ catch {console.log(JSON.stringify({ok:false}));}
             FIXTURE_CONFIG=json.dumps(config),FIXTURE_GRANT=json.dumps(grant))
         if ca:env['FIXTURE_CA']=str(self.cert)
         p=subprocess.run([str(self.node),'--input-type=module','-e',code],cwd=ROOT,env=env,
-            text=True,capture_output=True,timeout=6)
+            text=True,capture_output=True,timeout=max(6,remaining_ms/1000+3))
         self.assertEqual(p.returncode,0,p.stderr)
         self.assertNotIn('synthetic-secret',p.stdout+p.stderr)
         return json.loads(p.stdout)
@@ -105,7 +114,19 @@ catch {console.log(JSON.stringify({ok:false}));}
 
     def test_slow_real_tls_response_is_cancelled_by_absolute_deadline_without_retry(self):
         self.mode='hang'
+        started=time.monotonic()
         self.assertEqual(self.invoke(),{'ok':False})
+        self.assertLess(time.monotonic()-started,3)
+        self.assertEqual(self.requests,1)
+
+    def test_slow_headers_within_absolute_grant_succeed_without_retry(self):
+        self.mode='slow-headers'
+        self.assertEqual(self.invoke(remaining_ms=10000),{'ok':True,'text':'中😀'})
+        self.assertEqual(self.requests,1)
+
+    def test_stream_idle_gap_over_two_seconds_within_grant_succeeds(self):
+        self.mode='slow-stream'
+        self.assertEqual(self.invoke(remaining_ms=10000),{'ok':True,'text':'中😀'})
         self.assertEqual(self.requests,1)
 
     def test_unknown_or_reused_connect_grant_has_no_provider_effect(self):

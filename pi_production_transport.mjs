@@ -31,6 +31,9 @@ export async function request(config, body, key, grant, {ca, signal, onResponse}
     if(head!=='HTTP/1.1 200 Connection Established\r\n\r\n') throw Error('Production CONNECT rejected');
     secure=tls.connect({socket,servername:url.hostname,rejectUnauthorized:true,...(ca?{ca}:{})});
     await once(secure,'secureConnect',{signal});
+    // Bound CONNECT/TLS setup only; provider/stream latency uses the absolute
+    // grant deadline above, without an implicit two-second idle deadline.
+    socket.setTimeout(0);secure.setTimeout(0);
     agent=new https.Agent({keepAlive:false,maxSockets:1});
     // HTTPS never gets a default socket-creation path or an ambient proxy.
     agent.createConnection=()=>secure;
