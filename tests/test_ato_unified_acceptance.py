@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -413,6 +414,46 @@ class UnifiedAcceptanceTests(unittest.TestCase):
             task_record, self.binding(task_record, self.store.load_spec(task)), "initial"))
         self.assertEqual(self.interaction.task_status(self.proof(task, "user"), task)["acceptance"]["disposition"],
                          "pending")
+
+    def test_observer_reports_corrupt_task_and_still_dispatches_later_task(self):
+        damaged, task = sorted((self.create(), self.create()))
+        request = self.ask(task)
+        user = self.proof(task, "user")
+        bus = self.mailbox()
+        sender = bus.register_endpoint("isolation-hub", kind="fake", session_id="hub",
+                                       project=str(self.repo), source="fixture")
+        target = bus.register_endpoint("isolation-origin", kind="fake", session_id="origin",
+                                       project=str(self.repo), source="fixture")
+        owner = bus.acquire_endpoint(target, owner="offline-fixture")
+        calls = []
+
+        class Adapter:
+            def send(self, endpoint, message):
+                calls.append(message["correlation_id"])
+                return DeliveryResult("delivery_unknown")
+
+        self.interaction.route = lambda *args: MailboxRoute(sender, target, "fixture-route", owner,
+            {"fake": Adapter()}) if args[2] == "answer" else None
+        self.interaction.record_answer(user, request, "choice", self.event(user, "answer", request, "choice"))
+        (self.store.tasks / damaged / "task.json").write_text("{")
+
+        config = {"enabled": True}
+        host = SimpleNamespace(store=self.store, interaction=self.interaction, record=lambda _: config)
+        stop = Event()
+        report = []
+
+        def save(_fd, _name, row):
+            report.append(dict(row))
+            stop.set()
+
+        with patch.object(ato_observer, "_save", side_effect=save):
+            ato_observer._watch(host, config, None, self.store.runtime_seal, "fixture", stop)
+        self.assertEqual(calls, [request])
+        self.assertEqual(report[0]["consecutive_failures"], 1)
+        self.assertEqual(report[0]["failed_task_count"], 1)
+        self.assertEqual(report[0]["first_task_failure"], {"task_id": damaged, "code": "STATE_CORRUPT"})
+        self.assertEqual(ato_observer.tick(host), {damaged: "STATE_CORRUPT"})
+        self.assertEqual(calls, [request])
 
     def test_observer_applies_correlated_native_terminal_without_sending_again(self):
         import agents

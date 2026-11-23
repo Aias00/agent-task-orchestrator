@@ -12,7 +12,7 @@ from agent_registry import SessionEvent, SessionIdentity
 import ato_process
 from ato_host import Host
 from ato_private import delivery_candidates, render_notice
-from ato_task_store import TaskError, _directory, _locked_file, _publish, _read_json, _require, _save, _sha
+from ato_task_store import TaskError, _directory, _locked_file, _publish, _read_json, _require, _save, _sha, _state_errors
 from message_bus import EndpointCredential, MailboxError
 import transport
 
@@ -117,29 +117,39 @@ def _dispatch(host, bus, route, message_id, guard):
             bus.release_endpoint(route.target, owner)
 
 
+@_state_errors
+def _tick_task(host, service, task_id):
+    task, spec, binding = service._task(task_id)
+    if task["creation"]["runtime_seal"] != host.store.runtime_seal:
+        return
+    for phase, correlation in delivery_candidates(service, task):
+        try:
+            _, _, notice = service._delivery_item(task, spec, correlation, phase)
+            if notice and notice["binding_revision"] != binding["revision"]:
+                # A displaced reservation can be cancelled only by its
+                # original enrolled sender and before a possible native effect.
+                old = host.record(notice["from_ref"], {})
+                if not notice["superseded"] and old.get("mailbox"):
+                    service.supersede_unsubmitted(task_id, correlation, phase,
+                                                   EndpointCredential(**old["mailbox"]))
+                if phase != "question":
+                    continue
+            service.dispatch_delivery(task_id, correlation, phase)
+        except TaskError as exc:
+            if exc.code not in {"BUSY", "STALE_REQUEST", "BINDING_CHANGED",
+                                "PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
+                raise
+
+
 def tick(host):
     service = host.interaction
+    failures = {}
     for task_id in service._task_ids():
-        task, spec, binding = service._task(task_id)
-        if task["creation"]["runtime_seal"] != host.store.runtime_seal:
-            continue
-        for phase, correlation in delivery_candidates(service, task):
-            try:
-                _, _, notice = service._delivery_item(task, spec, correlation, phase)
-                if notice and notice["binding_revision"] != binding["revision"]:
-                    # A displaced reservation can be cancelled only by its
-                    # original enrolled sender and before a possible native effect.
-                    old = host.record(notice["from_ref"], {})
-                    if not notice["superseded"] and old.get("mailbox"):
-                        service.supersede_unsubmitted(task_id, correlation, phase,
-                                                       EndpointCredential(**old["mailbox"]))
-                    if phase != "question":
-                        continue
-                service.dispatch_delivery(task_id, correlation, phase)
-            except TaskError as exc:
-                if exc.code not in {"BUSY", "STALE_REQUEST", "BINDING_CHANGED",
-                                    "PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
-                    raise
+        try:
+            _tick_task(host, service, task_id)
+        except TaskError as exc:
+            failures[task_id] = exc.code
+    return failures
 
 
 def observe(seal):
@@ -165,17 +175,21 @@ def observe(seal):
 
 
 def _watch(host, config, fd, seal, birth, stop):
-    failures = 0
+    row = dict(pid=os.getpid(), pid_identity=birth, release=seal, consecutive_failures=0,
+               failed_task_count=0, first_task_failure=None)
     while not stop.is_set():
         if host.record("observation") != config:
             break
         try:
-            tick(host)
-            failures = 0
-        except (TaskError, OSError, ValueError, MailboxError):
-            failures += 1
-        _save(fd, "process.json", dict(pid=os.getpid(), pid_identity=birth, release=seal,
-               heartbeat=time.time(), state="watching", consecutive_failures=failures))
+            task_failures = tick(host)
+        except (OSError, ValueError):
+            task_failures = None
+        failed = task_failures is None or bool(task_failures)
+        first = next(iter(task_failures.items())) if task_failures else None
+        row.update(heartbeat=time.time(), state="watching",
+                   consecutive_failures=row["consecutive_failures"] + 1 if failed else 0,
+                   failed_task_count=len(task_failures) if task_failures is not None else None,
+                   first_task_failure=dict(task_id=first[0], code=first[1]) if first else None)
+        _save(fd, "process.json", row)
         stop.wait(2)
-    _save(fd, "process.json", dict(pid=os.getpid(), pid_identity=birth, release=seal,
-           heartbeat=time.time(), state="stopped", consecutive_failures=failures))
+    _save(fd, "process.json", dict(row, heartbeat=time.time(), state="stopped"))
