@@ -108,7 +108,7 @@ def assert_integrity(before, after):
 def diff_bundle(binding):
     root=repository(binding['path']);base=resolve_base(root,binding['base_commit'])
     diff=git(root,'diff','--no-ext-diff','--binary',base,'--')
-    if len(diff.encode())>512*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
+    if len(diff.encode())>256*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
     untracked={}
     for name in git(root,'ls-files','--others','--exclude-standard','-z').split('\x00'):
         if not name or name in SHARED:continue
@@ -117,7 +117,7 @@ def diff_bundle(binding):
         else:
             if path.stat().st_size>128*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
             untracked[name]=path.read_text(errors='replace')
-    if len(str(untracked).encode())+len(diff.encode())>512*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
+    if len(str(untracked).encode())+len(diff.encode())>256*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
     return dict(base_commit=base,head=git(root,'rev-parse','HEAD').strip(),diff=diff,untracked=untracked,
                 status=git(root,'status','--porcelain=v1','--untracked-files=all'),snapshot=snapshot_integrity(root))
 

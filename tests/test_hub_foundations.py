@@ -141,3 +141,13 @@ class HubFoundationTests(unittest.TestCase):
         with self.assertRaises(ValueError):book.hub()
         alias=self.root/'alias';alias.symlink_to(self.repo,target_is_directory=True)
         with self.assertRaises(ValueError):worktree.repository(alias)
+
+    def test_O7_fresh_sessions_bound_retired_history_and_diff_inline_cap(self):
+        book=ledger.HubLedger.create(self.repo,contract.HubAgentSpec('claude'))
+        for index in range(260):
+            book.record_session(f'claude-{index}','fresh_only')
+        self.assertEqual(len(book.hub()['native_sessions']['claude']['retired_sessions']),256)
+        binding=worktree.provision(self.repo,'cap','feat/cap','main')
+        (Path(binding['path'])/'result.txt').write_text('x'*(260*1024))
+        with self.assertRaisesRegex(ValueError,'REVIEW_DIFF_BOUND_EXCEEDED'):
+            worktree.diff_bundle(binding)

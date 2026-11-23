@@ -179,6 +179,7 @@ class HubLedger:
         retired=list(old.get('retired_sessions',[]))
         if old.get('session_id') and not same:
             retired.append({k:old[k] for k in ('session_id','provenance','created_at','turn_count')})
+            retired=retired[-256:]
         row['native_sessions'][kind]=dict(session_id=session_id,provenance=provenance,
             created_at=old['created_at'] if same else time.time(),last_used_at=time.time(),
             turn_count=old.get('turn_count',0)+1 if same else 1,retired_sessions=retired,state='active',workspace=workspace)

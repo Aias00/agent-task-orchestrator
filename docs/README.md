@@ -29,7 +29,7 @@
 - [W3 四个历史候选快照源码审计与处置建议（已评审通过，仅定性未实施）](w3-candidate-snapshots-audit.md)
 - [H1 可换长期主控（AGY / Claude / Codex）与隔离执行闭环设计（已批准，前置 Spike 通过）](hub-orchestrator-design.md)
 - [H1 前置只读 CLI 能力实测 Spike 记录（S1–S4）](h1-cli-spike.md)
-- [H1 离线实现、独立 CLI 与 O1–O10 验收边界（待评审，未启用）](h1-offline-implementation.md)
+- [H1 离线实现、独立 CLI 与 O1–O10 验收边界（已评审合入，离线候选未激活）](h1-offline-implementation.md)
 - [Delivery validation boundaries](message-delivery-validation.md)
 - [Agent Task Orchestrator (ATO) 整改方案](remediation-plan.md)
 - [P3-1 工具链与 ACP 适配方案（已批准，隔离实施）](p3-1-toolchain-design.md)

@@ -66,13 +66,20 @@ class GuardedWorkflow(workflow.Workflow):
 
 
 class HubLoop:
-    def __init__(self,ledger,registry=None,*,worker_tools=None,notifier=None):
+    def __init__(self,ledger,registry=None,*,worker_tools=None,worker_codex_home=None,notifier=None):
         require(isinstance(ledger,HubLedger));self.ledger=ledger
         self.registry=registry if registry is not None else HubRegistry()
         # Trusted host injection for offline fixtures, never task-controlled.
         self.worker_tools=dict(worker_tools or {})
         require(set(self.worker_tools)<={'CTASK_CODEX_BIN','CTASK_CLAUDE_BIN','CTASK_PI_BIN'},'INVALID_WORKER_TOOLS')
         for value in self.worker_tools.values():canonical(value)
+        if worker_codex_home is not None:
+            path=canonical(worker_codex_home)
+            repo=Path(self.ledger.hub()['repo'])
+            require(path.is_dir() and path!=repo and not path.is_relative_to(repo),'UNSAFE_WORKER_CODEX_HOME')
+            self.worker_codex_home=path
+        else:
+            self.worker_codex_home=None
         self.notifier=notifier
 
     def create_task(self,spec):
@@ -142,8 +149,12 @@ class HubLoop:
         # may escape into the operator's live ATO/native session namespace.
         root=self.ledger.root/'worker-ato';root.mkdir(mode=0o700,exist_ok=True)
         home=self.ledger.root/'worker-home';home.mkdir(mode=0o700,exist_ok=True)
-        native=home/'.codex';native.mkdir(mode=0o700,exist_ok=True)
-        for path in (root,home,native):private(path,directory=True)
+        if self.worker_codex_home is not None:
+            native=canonical(self.worker_codex_home)
+            for path in (root,home):private(path,directory=True)
+        else:
+            native=home/'.codex';native.mkdir(mode=0o700,exist_ok=True)
+            for path in (root,home,native):private(path,directory=True)
         old=dict(os.environ)
         tools=dict(self.worker_tools)
         for kind in ('codex','claude','pi'):
@@ -290,10 +301,13 @@ class HubLoop:
                 self.transition(identifier,state,'blocked','HUB_OPERATION_REFUSED')
             finally:
                 self.ledger.brief()
-                if state['status'] in ('ready_for_user_review','blocked','stopped','cleanup_blocked') and not state.get('notice'):
+                if (state['status'] in ('ready_for_user_review','blocked','stopped','cleanup_blocked')
+                        and state.get('notice')!='delivery_unknown'
+                        and state.get('notice_status')!=state['status']):
                     # A durable outbox marker is not a delivery claim. A trusted
                     # host may supply a notifier; unknown delivery is never retried.
                     state['notice']='recorded_only' if self.notifier is None else 'delivery_unknown'
+                    state['notice_status']=state['status']
                     self.ledger.update_task(identifier,state)
                     if self.notifier is not None:
                         try:self.notifier(dict(hub=self.ledger.identifier,task=identifier,status=state['status']))

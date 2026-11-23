@@ -27,6 +27,7 @@ def parser():
             item.add_argument('--kind',choices=KINDS,required=True);item.add_argument('--model');item.add_argument('--effort')
         if name=='task-create':item.add_argument('--spec',required=True)
         if name.startswith('task-') and name!='task-create' or name=='worktree-cleanup':item.add_argument('task_id')
+        if name=='task-run':item.add_argument('--worker-codex-home')
         if name=='worktree-cleanup':item.add_argument('--confirm',action='store_true',required=True)
     return cli
 
@@ -39,7 +40,8 @@ def dispatch(args,*,registry=None,worker_tools=None):
         repo=hub_worktree.repository(args.repo)
         ledger=HubLedger.create(repo,HubAgentSpec(args.kind,args.model,args.effort),max_turns=args.max_turns)
         return dict(hub_id=ledger.identifier)
-    ledger=HubLedger(args.hub_id);loop=HubLoop(ledger,registry,worker_tools=worker_tools)
+    ledger=HubLedger(args.hub_id);loop=HubLoop(ledger,registry,worker_tools=worker_tools,
+        worker_codex_home=getattr(args,'worker_codex_home',None))
     if args.command=='hub-status':return dict(hub=ledger.hub(),hub_busy=ledger.busy())
     if args.command=='task-status':
         _,state=ledger.read_task(args.task_id);return dict(state=state,hub_busy=ledger.busy())

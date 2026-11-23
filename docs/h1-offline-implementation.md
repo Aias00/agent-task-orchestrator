@@ -1,8 +1,8 @@
 # H1 离线实现与验收边界
 
-状态：基于 `main@7ee8433` 的隔离候选，待用户评审。遵循
+状态：**已评审合入 `main`（离线候选，未安装激活运行态）**。遵循
 [批准设计](hub-orchestrator-design.md) 与 [CLI Spike](h1-cli-spike.md)。
-本轮仅完成第 8 节 O1–O10 离线实现；未调用真实模型、未安装入口、未切换运行态、未合入或推送。
+离线实现已通过第 8 节 O1–O10 门禁；默认不继承本机 Codex 认证，仅在操作者显式传入 `--worker-codex-home` 时向隔离 Worker 传递指定 `CODEX_HOME`（`ATO_HOME` 仍保持隔离）。
 
 ## 实现与使用入口
 

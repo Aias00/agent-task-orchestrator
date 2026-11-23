@@ -247,6 +247,25 @@ class HubLoopTests(unittest.TestCase):
         self.assertEqual(state['notice'],'delivery_unknown');self.assertEqual(len(calls),1)
         self.loop.run('task-one');self.assertEqual(len(calls),1)
 
+    def test_O6_terminal_status_change_notifies_and_worker_codex_home_is_explicit_host_only(self):
+        events=[]
+        self.loop.notifier=lambda event:events.append(event)
+        self.reviewer(sequence=[verdict('blocked'),verdict()])
+        self.create(task='recheck',rounds=3)
+        first=self.loop.run('recheck')
+        self.assertEqual((first['status'],first['notice'],first['notice_status']),('blocked','delivered','blocked'))
+        second=self.loop.run('recheck',review_only=True)
+        self.assertEqual((second['status'],second['notice'],second['notice_status']),
+                         ('ready_for_user_review','delivered','ready_for_user_review'))
+        self.assertEqual([row['status'] for row in events],['blocked','ready_for_user_review'])
+        native=self.root/'explicit-codex-home';native.mkdir(mode=0o700)
+        with self.assertRaisesRegex(ValueError,'UNSAFE_WORKER_CODEX_HOME'):
+            HubLoop(self.ledger,self.registry,worker_codex_home=self.repo)
+        scoped=HubLoop(self.ledger,self.registry,worker_tools=dict(CTASK_CODEX_BIN=str(self.worker)),worker_codex_home=native)
+        with scoped.worker_environment():
+            self.assertEqual(os.environ['CODEX_HOME'],str(native))
+            self.assertEqual(Path(os.environ['ATO_HOME']).name,'worker-ato')
+
     def test_O9_review_only_runs_checks_but_no_worker_or_repair(self):
         self.reviewer(sequence=[verdict('blocked')]);self.create(rounds=3);state=self.loop.run('task-one')
         self.assertEqual(state['status'],'blocked')
