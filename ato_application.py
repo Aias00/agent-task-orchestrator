@@ -55,7 +55,7 @@ class Application:
             principal = host.store._principal(proof)
             _, task, _, _, _ = api._locate(principal, args.request_id)
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
-        elif operation in {"stop", "resume", "accept"} or subcommand in {"cleanup", "handoff", "reviewer", "recheck"}:
+        elif operation in {"stop", "resume", "accept"} or subcommand in {"cleanup", "handoff", "reviewer", "recheck", "ask"}:
             principal = host.store._principal(proof)
             _require(host.store._visible_scope(args.task_id, principal) is not None, "NOT_FOUND")
             task = host.store.load_task(args.task_id)
@@ -97,6 +97,14 @@ class Application:
         if subcommand == "handoff":
             return host.binding.handoff(proof, args.task_id, args.to, getattr(args, "interaction", None),
                                         args.evidence)
+        if subcommand == "ask":
+            continuation = getattr(args, "continuation", None)
+            purpose = getattr(args, "purpose_ref", None)
+            if args.kind == "host_handoff" and continuation is None and purpose is None:
+                continuation = "recheck"
+                purpose = api.host_handoff_purpose(host.store.load_spec(args.task_id))
+            return api.ask(proof, args.task_id, kind=args.kind, question=args.question,
+                           reason=args.reason, continuation=continuation, purpose_ref=purpose)
         reviewer = dict(kind=args.kind, model=getattr(args, "model", None), effort=getattr(args, "effort", None))
         return host.binding.select_reviewer(proof, args.task_id, reviewer, args.evidence)
 

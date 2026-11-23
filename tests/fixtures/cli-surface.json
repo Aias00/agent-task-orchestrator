@@ -19,7 +19,8 @@
     "doctor",
     "binding",
     "handoff",
-    "reviewer"
+    "reviewer",
+    "ask"
   ],
   "system": [
     "status",

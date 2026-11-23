@@ -59,6 +59,9 @@ if mode == "hold":
     time.sleep(35)
 result = dict(status="ready_for_checks", summary="fixture done", next_step="", blocker="",
               retry_after_seconds=0)
+if mode == "host":
+    result.update(status="needs_host", summary="fixture needs host action",
+                  next_step="Record the authorized fixture action")
 Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps(result))
 '''
 
@@ -106,8 +109,8 @@ class InstalledATO(unittest.TestCase):
         return subprocess.run([str(arg) for arg in argv], cwd=self.root, env=env,
                               capture_output=True, text=True, timeout=45)
 
-    def json_command(self, *argv):
-        result = self.command(*argv)
+    def json_command(self, *argv, actor=None):
+        result = self.command(*argv, actor=actor)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
@@ -142,7 +145,11 @@ class InstalledATO(unittest.TestCase):
         self.store = TaskStore(self.env["ATO_HOME"], native_home=self.env["CODEX_HOME"],
                                runtime_seal=installed["release"])
 
-    def profile(self, mode="normal"):
+    def host_setup(self, *args, actor=None):
+        return self.json_command(self.python, "-IB", self.source / "scripts/ato_host_setup.py",
+                                 *args, "--source", "offline operator fixture", actor=actor)
+
+    def profile(self, mode="normal", *, via_setup=False):
         self.worker_home = self.root / "worker home"
         self.native = self.worker_home / ".codex"
         self.reviewer_home = self.root / "reviewer home"
@@ -152,9 +159,14 @@ class InstalledATO(unittest.TestCase):
         write(self.native, "mode", mode)
         worker = self.tool("worker", WORKER)
         reviewer = self.tool("reviewer", REVIEWER)
-        self.registry("profile", dict(worker_executable=str(worker), worker_home=str(self.worker_home),
-                                     proof_roots=[str(self.proofs)],
-                                     review_tools=[["codex", str(reviewer), str(self.reviewer_home)]]))
+        profile = dict(worker_executable=str(worker), worker_home=str(self.worker_home),
+                       proof_roots=[str(self.proofs)],
+                       review_tools=[["codex", str(reviewer), str(self.reviewer_home)]])
+        if via_setup:
+            self.host_setup("configure", "--profile",
+                            write(self.root, "profile-input.json", json.dumps(profile)))
+        else:
+            self.registry("profile", profile)
         self.host = Host(store=self.store).compose()
 
     def tool(self, name, script):
@@ -181,7 +193,7 @@ class InstalledATO(unittest.TestCase):
         self.registry(reference, dict(enabled=True, reference=reference, repo_key=repo_key,
                                      role=role, revisions=[revision]))
 
-    def submission(self, name, origin, interaction, *, reviewer=False):
+    def submission(self, name, origin, interaction, *, reviewer=False, via_setup=False, host_handoff=False):
         repo = self.root / name
         repo.mkdir()
         git(repo, "init", "-q")
@@ -194,12 +206,20 @@ class InstalledATO(unittest.TestCase):
                         authorization="Synthetic evaluation", limits=dict(max_attempts=3), acceptance=[
                             dict(id="host", kind="command", description="Baseline regression", checks=[check]),
                             dict(id="human", kind="manual", description="Accept the checked fixture product")])
+        if host_handoff:
+            check[-1] = "host-finished.txt"
+            contract["host_handoff"] = dict(source="offline operator fixture",
+                                            instructions="Record the completed local host action")
         spec = dict(schema_version=1, repo=str(repo), base_ref="HEAD", worker_contract=contract)
         if reviewer:
             spec["reviewer"] = dict(agent=dict(kind="codex"), max_review_rounds=2)
         spec_file = write(self.root, name + ".json", json.dumps(spec))
         normalized = self.cli("project", "validate", "--repo", repo, "--spec", spec_file)
         self.assertEqual(normalized["repo"], str(repo))
+        if via_setup:
+            enrolled = self.host_setup("submission", "--repo", repo, "--spec", spec_file)
+            self.assertEqual(enrolled["spec_sha256"], normalized["spec_sha256"])
+            return repo, spec_file, Path(enrolled["controller_proof"])
         repo_key = normalize_repository(repo).key
         controller, endpoint = agent_ref(origin), agent_ref(interaction)
         self.endpoint(repo_key, controller, "controller", 1)
@@ -287,6 +307,56 @@ class InstalledATO(unittest.TestCase):
                          dict(valid=False, action="end_silently", reason="stale_or_unavailable"))
         self.assertFalse(self.store.home.exists())
         self.assertFalse(self.store.native_home.exists())
+
+    def test_installed_host_enrollment_and_scoped_question_without_fixture_grants(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, bootstrap = self.submission("enrollment fixture", "1", "2", via_setup=True)
+        work = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
+        task = work["task_id"]
+        controller = self.host_setup("scope", task, "--role", "controller")["proof"]
+        user = self.host_setup("scope", task, "--role", "user")["proof"]
+        ask = ("agent", "ask", task, "--kind", "decision", "--question", "Review this candidate?",
+               "--reason", "Fixture decision")
+        self.cli(*ask, actor=user, error=(3, "FORBIDDEN"))
+        request = self.cli(*ask, actor=controller)["request_id"]
+        self.assertEqual([r["request_id"] for r in self.cli("inbox", actor=user)["items"]], [request])
+        self.cli("answer", request, "--answer", "Ready to review", actor=user)
+        self.assertEqual(self.cli("inbox", actor=user)["items"][0]["kind"], "manual_acceptance")
+        evidence = self.acceptance(work, "enrollment acceptance")
+        self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
+
+    def test_installed_host_handoff_requires_actual_attestation_and_continues_checks(self):
+        self.install()
+        self.profile(mode="host", via_setup=True)
+        repo, spec, bootstrap = self.submission("host action fixture", "1", "2",
+                                                via_setup=True, host_handoff=True)
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap,
+                          error=(4, "RUN_UNSETTLED"))
+        task_id = result["task_id"]
+        status = self.cli("status", task_id, actor=bootstrap)
+        self.assertEqual(status["status"], "needs_host")
+        controller = self.host_setup("scope", task_id, "--role", "controller")["proof"]
+        user = self.host_setup("scope", task_id, "--role", "user")["proof"]
+        recheck = ("project", "recheck", task_id, "--checks-only")
+        self.cli(*recheck, actor=controller, error=(4, "NOT_RESUMABLE"))
+        request = self.cli("agent", "ask", task_id, "--kind", "host_handoff", "--question",
+                           "Has the approved host action finished?", "--reason", "Frozen check is blocked",
+                           actor=controller)["request_id"]
+        self.assertEqual([r["request_id"] for r in self.cli("inbox", actor=user)["items"]], [request])
+        self.cli(*recheck, actor=controller, error=(4, "NOT_RESUMABLE"))
+        path = Path(self.store.load_task(task_id)["worktree"]["path"])
+        write(path, "host-finished.txt", "The fixture operator completed the local action.")
+        answer = "The fixture action finished"
+        self.host_setup("attest", request, "--answer", answer, "--performed", actor=user)
+        self.cli("answer", request, "--answer", answer, actor=user)
+        delivered = self.cli(*recheck, actor=controller)
+        self.assertEqual(delivered["status"], "needs_acceptance")
+        self.assertEqual([r["kind"] for r in delivered["run_history"]], ["initial", "recheck"])
+        self.assertEqual((self.native / "attempts").read_text().splitlines(), [str(path)])
+        user = self.host_setup("scope", task_id, "--role", "user")["proof"]
+        evidence = self.acceptance(delivered, "host action acceptance")
+        self.assertEqual(self.cli("accept", task_id, "--evidence", evidence, actor=user)["status"], "completed")
 
     def test_two_repositories_with_explicit_answer_review_and_versioned_acceptance(self):
         self.install()

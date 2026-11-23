@@ -54,7 +54,7 @@ def snapshot(root, *, legacy=False, executable=False, commit=None):
     elif executable:
         for source in ROOT.glob('*.py'):
             write(root, source.name, source.read_text())
-        for name in ('ato_cli/__init__.py', 'scripts/install.py', 'scripts/release_snapshot.py',
+        for name in ('ato_cli/__init__.py', 'scripts/install.py', 'scripts/release_snapshot.py', 'scripts/ato_host_setup.py',
                      'skills/ato/SKILL.md', 'integrations/pi-acp/compatibility.json'):
             write(root, name, (ROOT/name).read_text())
     else:

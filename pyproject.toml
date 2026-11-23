@@ -103,6 +103,6 @@ py-modules = [
 [tool.setuptools.data-files]
 "share/agent-task-orchestrator/integrations/pi-acp" = ["integrations/pi-acp/compatibility.json"]
 
-"share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py"]
+"share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py", "scripts/ato_host_setup.py"]
 
 "share/agent-task-orchestrator/skills/ato" = ["skills/ato/SKILL.md"]

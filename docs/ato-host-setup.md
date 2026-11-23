@@ -9,6 +9,28 @@ proof through `ATO_ACTOR_FILE`.
 
 ## Profile and private records
 
+From the selected sealed source, the trusted local operator can run
+`.venv/bin/python -IB scripts/ato_host_setup.py`. The script issues passive
+local credentials under the operator's authority. It starts no sessions.
+
+1. Run `configure --profile FILE --source SOURCE` once to publish the private
+   execution profile described below.
+2. Run `submission --repo PATH --spec FILE --source SOURCE` for an approved
+   specification. The returned controller proof authorizes the exact normalized
+   submission. Select it in `ATO_ACTOR_FILE` for `ato run`.
+3. Run `scope TASK_ID --role controller|interaction|user --source SOURCE`
+   from the trusted host for the approved role. Give the resulting proof only
+   to that role. Reissue scoped proofs after a Run or binding change.
+4. With the scoped controller proof, run
+   `ato agent ask TASK_ID --kind decision --question TEXT --reason REASON`.
+   The actual scoped user can then use `ato inbox` and `ato answer`.
+   Use `--continuation resume` when the decision authorizes a frozen
+   continuation. For a verified pending host action, use `--kind host_handoff`.
+5. For a privileged answer, the trusted operator records the actual event
+   with `attest REQUEST_ID --answer TEXT --source SOURCE` and the scoped
+   user proof. Add `--performed` only for a host action that actually finished.
+   The user records the same answer through `ato answer`.
+
 The host writes JSON files under `$ATO_HOME/unified-v1/host`. Use owner-only
 directories and mode `0600` files. Preserve exact Task, Run, repository and
 generation values from the ledger for scoped grants. An adapter integration can

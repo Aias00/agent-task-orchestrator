@@ -234,13 +234,18 @@ class Host:
         # Privileged approvals and performed host actions require a host receipt.
         if source is not None or actor.role != "user" or action not in ("answer", "accept"):
             return None
-        key = _sha(canonical_json([asdict(scope), binding["revision"], actor.actor_id, action, item, value]))
-        approved = self.record("event-" + key)
+        key = self.event_ref(actor, scope, binding, action, item, value)
+        approved = self.record(key)
         if approved:
-            _fields(approved, ("grant_ref", "performed"))
-            return VerifiedEvent("event-" + key, **approved)
+            _fields(approved, ("grant_ref", "performed"), ("source",))
+            return VerifiedEvent(key, approved["grant_ref"], approved["performed"])
         # An answer alone never materializes a permission or host action.
-        return VerifiedEvent("event-" + key)
+        return VerifiedEvent(key)
+
+    @staticmethod
+    def event_ref(actor, scope, binding, action, item, value):
+        return "event-" + _sha(canonical_json(
+            [asdict(scope), binding["revision"], actor.actor_id, action, item, value]))
 
     def verify_continuation(self, scope, binding, request, answer):
         actor = self.credential(answer["actor_ref"])

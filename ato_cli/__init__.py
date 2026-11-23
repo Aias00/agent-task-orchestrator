@@ -72,6 +72,11 @@ def build_parser():
     option(reviewer, "model")
     option(reviewer, "effort")
     option(reviewer, "evidence", required=True)
+    ask = command(agent, "ask", "Record a scoped question for the actual user.", "task_id")
+    for name in ("kind", "question", "reason"):
+        option(ask, name, required=True)
+    option(ask, "continuation")
+    option(ask, "purpose-ref")
 
     system = command(daily, "system", "Read-only runtime diagnostics.")
     system = system.add_subparsers(dest="subcommand", required=True)
