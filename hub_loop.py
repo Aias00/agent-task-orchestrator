@@ -206,6 +206,16 @@ class HubLoop:
                 tasks=[dict(id='fix_blockers',prompt='Fix only these blocker findings:\n'+json.dumps(blockers),
                             checks=[copy.deepcopy(argv) for c in commands for argv in c['checks']])])
             contract['stages']=[dict(id='hub-fix',covers=[c['id'] for c in commands],plan=plan)]
+        if not checks_only and not contract['stages']:
+            commands=[c for c in contract['acceptance'] if c['kind']=='command']
+            if not commands:
+                self.transition(identifier,state,'blocked','INITIAL_WORK_CHECKS_REQUIRED');return False
+            # Existing green regression checks do not implement a new objective.
+            # Use only the frozen goal/checks; never invent an acceptance gate.
+            plan=dict(objective=contract['objective'],memory=False,tasks=[dict(id='implement',
+                prompt='Implement the frozen objective within its scope, even if existing regression checks already pass.',
+                checks=[copy.deepcopy(argv) for c in commands for argv in c['checks']])])
+            contract['stages']=[dict(id='hub-initial',covers=[c['id'] for c in commands],plan=plan)]
         self.transition(identifier,state,'running_worker')
         source=self.ledger.task(identifier)/('worker-contract-'+uuid.uuid4().hex+'.json');save(source,contract)
         signals={signum:signal.getsignal(signum) for signum in (signal.SIGINT,signal.SIGTERM)}
@@ -219,11 +229,11 @@ class HubLoop:
             try:
                 if checks_only:owner.verify_only()
                 else:
-                    # A reviewed repair must execute even when original command
-                    # checks already pass. Prestage without modifying Workflow.
-                    if fix:
-                        preset=owner.contract['stages'][0]
-                        owner.stage(preset['plan'],preset['covers'],preset['id'])
+                    # Initial work and reviewed repairs both require an actual
+                    # worker turn, even when all regression checks already pass.
+                    # Further stages retain the ordinary criterion-driven flow.
+                    preset=owner.contract['stages'][0]
+                    owner.stage(preset['plan'],preset['covers'],preset['id'])
                     owner.execute()
             finally:
                 for signum,handler in signals.items():signal.signal(signum,handler)

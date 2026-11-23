@@ -76,7 +76,12 @@ Hub 入口。原三入口混合收敛、observer、策略、mailbox 与任务状
 
 ## 闭环与硬停点
 
-首次 Worker 按原 Workflow 冻结合约执行。命令检查全过、仅 manual 待确认且无活动
+首次 task-run 先预置并执行冻结的首个 stage，现有回归检查全绿也不会略过 Worker。
+未提供 stage 时，以冻结 objective 和原 command 检查生成一次 hub-initial 实现任务；
+既无预置阶段也无 command 检查时，以 INITIAL_WORK_CHECKS_REQUIRED 拒绝启动。
+其余阶段继续由未改动 Workflow 按未通过 criterion 选择，不改原检查、授权或预算。
+只需检查/审阅已有代码时使用 task-review-only，不通过 task-run 隐式跳过工作。
+命令检查全过、仅 manual 待确认且无活动
 owner/process/child 时才审阅。返修使用同一 worktree，新建 workflow 保留累计历史，
 逐项复制原 acceptance、授权、sandbox、permissions、agent 和预算边界，只有 blocker
 文本进入修复 prompt。原检查已通过时，外层预置修复阶段，避免 Workflow 因全绿而跳过修复。

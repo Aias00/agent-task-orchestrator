@@ -26,6 +26,7 @@ else:
     if mode!='blocked':
         Path('result.txt').write_text('bad' if mode=='fail' else
             'done-fixed' if mode!='unchanged' and 'Fix only these blocker findings' in prompt else 'done')
+        if cfg.get('artifact'):Path(cfg['artifact']).write_text('synthetic implementation')
     result=dict(status='blocked' if mode=='blocked' else 'ready_for_checks',summary='Synthetic worker',
         blocker='Synthetic blocker' if mode=='blocked' else '',next_step='Inspect synthetic evidence',retry_after_seconds=0)
 Path(args[args.index('-o')+1]).write_text(json.dumps(result))

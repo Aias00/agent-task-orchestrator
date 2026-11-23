@@ -30,6 +30,13 @@ prove a background process exists. Terminal notifications default to durable
 `recorded_only` evidence. No interactive wake-up is promised without a separately
 configured trusted notification hook.
 
+The first `task-run` executes the frozen first stage even if regression checks
+already pass. With no preset stage, it constructs one initial implementation
+task from the frozen objective and original command checks; with neither, it
+refuses to launch a worker. Further stages keep the ordinary criterion-driven
+selection. Use `task-review-only` for existing code that needs checks/review
+without implementation. Do not replace original checks, authority or budgets.
+
 Shared dependencies are explicit: `shared_env_links` allows only `.venv`, `venv`,
 `node_modules`, `integrations/pi-acp/node_modules`. Each source must be an
 existing ignored, untracked directory, with no symlink alias or existing target.

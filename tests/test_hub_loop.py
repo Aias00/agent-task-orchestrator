@@ -103,6 +103,73 @@ class HubLoopTests(unittest.TestCase):
         self.assertTrue(worktree.exists());self.assertEqual(state['notice'],'recorded_only')
         self.assertEqual(original['worker_contract']['acceptance'],frozen['acceptance'])
 
+    def green_baseline(self):
+        (self.repo/'result.txt').write_text('done')
+        git(self.repo,'add','result.txt');git(self.repo,'commit','-qm','existing green regression suite')
+
+    def test_initial_work_runs_with_green_regressions_with_or_without_preset(self):
+        self.green_baseline();self.worker_config(mode='ok',artifact='requested.txt')
+        baseline=git(self.repo,'rev-parse','HEAD')
+        for preset in (True,False):
+            identifier='green-preset' if preset else 'green-generated'
+            with self.subTest(preset=preset):
+                value=spec(self.repo,task=identifier)
+                contract=value['worker_contract']
+                contract.update(objective='Create requested.txt and preserve regression checks',
+                    scope='result.txt and requested.txt only')
+                contract['stages'][0]['plan']['tasks'][0]['prompt']='Create requested.txt; existing regression checks must still pass'
+                if not preset:contract['stages']=[]
+                self.loop.create_task(value)
+                frozen=(self.ledger.task(identifier)/'spec.json').read_bytes()
+                state=self.loop.run(identifier)
+                self.assertEqual(state['status'],'ready_for_user_review',state)
+                root=Path(state['worktree']['path'])
+                self.assertEqual((root/'requested.txt').read_text(),'synthetic implementation')
+                directory=Path(state['active_workflow_dir']);row=runner.read(directory/'state.json')
+                self.assertEqual(len(row['stages']),1)
+                child=Path(row['stages'][0]['run_dir']);plan=runner.read(child/'plan.json')
+                child_state=runner.read(child/'state.json')
+                self.assertEqual(list(child_state['tasks'].values())[0]['attempt_sequence'],1)
+                self.assertEqual(plan['tasks'][0]['checks'],contract['acceptance'][0]['checks'])
+                self.assertEqual(row['criteria']['human']['status'],'needs_input')
+                self.assertEqual(list((directory/'acknowledgements').iterdir()),[])
+                self.assertEqual((self.ledger.task(identifier)/'spec.json').read_bytes(),frozen)
+                with patch.object(runner.Runner,'attempt',side_effect=AssertionError('no terminal replay')):
+                    self.assertEqual(self.loop.run(identifier),state)
+        self.assertEqual(git(self.repo,'rev-parse','main'),baseline)
+        self.assertFalse((self.repo/'requested.txt').exists());self.assertEqual(git(self.repo,'status','--porcelain'),'')
+
+    def test_initial_worker_blockers_are_not_masked_by_green_regression_checks(self):
+        self.green_baseline()
+        for mode in ('fail','blocked'):
+            with self.subTest(mode=mode):
+                self.worker_config(mode=mode);self.create(task='green-'+mode)
+                with patch.object(self.adapter,'run_turn',side_effect=AssertionError('worker must be ready first')):
+                    state=self.loop.run('green-'+mode)
+                self.assertEqual(state['status'],'blocked');self.assertEqual(state['review_round'],0)
+
+    def test_review_only_green_worktree_never_runs_initial_work(self):
+        self.create();specification,state=self.ledger.read_task('task-one')
+        state['worktree']=hub_worktree.provision(str(self.repo),'task-one',specification['branch'],'main')
+        (Path(state['worktree']['path'])/'result.txt').write_text('done')
+        self.ledger.update_task('task-one',state)
+        with patch.object(runner.Runner,'attempt',side_effect=AssertionError('no worker')),patch.object(
+                workflow_type(),'propose',side_effect=AssertionError('no planner')):
+            state=self.loop.run('task-one',review_only=True)
+        self.assertEqual(state['status'],'ready_for_user_review')
+        row=runner.read(Path(state['active_workflow_dir'])/'state.json')
+        self.assertEqual(row['stages'],[]);self.assertEqual(row['criteria']['human']['status'],'needs_input')
+
+    def test_initial_work_without_preset_requires_independent_command_checks(self):
+        value=spec(self.repo);value['worker_contract']['stages']=[]
+        value['worker_contract']['acceptance']=[dict(id='human',description='human final review',kind='manual')]
+        self.loop.create_task(value)
+        with patch.object(runner.Runner,'attempt',side_effect=AssertionError('no independent checks')),patch.object(
+                self.adapter,'run_turn',side_effect=AssertionError('initial work refused')):
+            state=self.loop.run('task-one')
+        self.assertEqual((state['status'],state['code']),('blocked','INITIAL_WORK_CHECKS_REQUIRED'))
+        self.assertIsNone(state['active_workflow_dir']);self.assertEqual(state['review_round'],0)
+
     def test_O6_round_cap_and_repeated_source_blockers_stop(self):
         self.reviewer(sequence=[verdict('request_changes','blocker')])
         self.create(rounds=1);state=self.loop.run('task-one')
