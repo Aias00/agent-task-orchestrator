@@ -83,7 +83,8 @@ class ACPStderrTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_insecure_directory_symlinks_and_hardlinks_are_rejected_without_truncating_target(self):
-        self.runtime.mkdir(mode=0o755)
+        self.runtime.mkdir(mode=0o700)
+        self.runtime.chmod(0o755)  # mkdir applies the process umask.
         log = self.runtime/'stderr.log'
         with self.assertRaisesRegex(ValueError, 'private runtime'):
             with acp_bridge.private_stderr(log, self.directory): pass

@@ -41,9 +41,12 @@ class HubFoundationTests(unittest.TestCase):
         self.assertFalse((self.root/'ato').exists())
         base=self.root/'ato';base.mkdir(mode=0o700)
         target=self.root/'outside';target.mkdir(mode=0o700)
-        (base/'hubs').symlink_to(target,target_is_directory=True)
+        hubs = base/'hubs'
+        hubs.symlink_to(target, target_is_directory=True)
         with self.assertRaises(ValueError):ledger.HubLedger.list_hubs()
-        (base/'hubs').unlink();(base/'hubs').mkdir(mode=0o755)
+        hubs.unlink()
+        hubs.mkdir(mode=0o700)
+        hubs.chmod(0o755)  # mkdir applies the process umask.
         with self.assertRaises(ValueError):ledger.HubLedger.list_hubs()
 
     def test_hub_list_sorted_private_summaries_filter_busy_and_never_create_lock(self):
