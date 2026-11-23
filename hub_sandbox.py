@@ -1,5 +1,6 @@
 """Read-only launch and owned process cleanup. No adapter or core imports."""
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 from pi_toolchain import write_exclusions
 
 LIMIT = 1024*1024
+process_host = ContextVar("hub_process_host", default=None)
 
 
 def canonical(path, *, exists=True):
@@ -112,9 +114,10 @@ class OwnedGroup:
     process: object
     leader_identity: str | None
     known: dict = field(default_factory=dict)
+    members: object = None
 
     def observe(self):
-        rows=group_members(self.process.pid)
+        rows=(self.members or group_members)(self.process.pid)
         if rows is None:return None,False
         if self.process.pid in rows and rows[self.process.pid]!=self.leader_identity:return rows,False
         trusted=any(value and self.known.get(pid)==value for pid,value in rows.items())
@@ -147,9 +150,11 @@ class ProcessResult:
     stdout: bytes = field(repr=False,default=b'')
     stderr: bytes = field(repr=False,default=b'')
     cleaned: bool = True
+    truncated: bool = False
 
 
-def run(command, *, workspace, runtime, environment, prompt='', timeout=300, stop=lambda:False):
+def run(command, *, workspace, runtime, environment, prompt='', timeout=300, stop=lambda:False,
+        truncate=False):
     """Bounded pipes, private bounded stderr, and no adopted process identities."""
     runtime=private_dir(runtime);workspace=canonical(workspace)
     if type(timeout) not in (int,float) or timeout<=0:raise ValueError('INVALID_TURN_TIMEOUT')
@@ -158,14 +163,21 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
         fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'wb') as stream:
             if path==stdin:stream.write(prompt.encode())
-    output,errors=bytearray(),bytearray();code='PROCESS_ERROR';process=None;clean=True
+    output,errors=bytearray(),bytearray();code='PROCESS_ERROR';process=None;owner=None;clean=True
+    truncated=False
+    host=process_host.get()
     try:
         if stop():return ProcessResult('STOPPED',None)
         with stdin.open('rb') as source,error.open('ab') as log:
             deadline=time.monotonic()+timeout
+            if host is not None:
+                host.before_spawn(runtime)
             process=subprocess.Popen(list(command),cwd=workspace,env=environment,stdin=source,
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,umask=0o077)
-            birth=identity(process.pid);owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})
+            if host is None:
+                birth=identity(process.pid);owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})
+            else:
+                owner=host.own(process, runtime)
             selector=selectors.DefaultSelector()
             for stream in (process.stdout,process.stderr):
                 os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ)
@@ -181,7 +193,9 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
                         remaining=LIMIT-len(target)
                         target.extend(chunk[:max(0,remaining)])
                         if key.fileobj is process.stderr:log.write(chunk[:max(0,remaining)])
-                        if len(chunk)>remaining:code='OUTPUT_LIMIT';break
+                        if len(chunk)>remaining:
+                            truncated=True
+                            if not truncate:code='OUTPUT_LIMIT';break
                     if code=='OUTPUT_LIMIT':break
                     if process.poll() is not None:
                         if not selector.get_map():code='OK' if process.returncode==0 else 'PROCESS_ERROR';break
@@ -196,9 +210,11 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
     except Exception:
         code='PROCESS_ERROR'
         if process is not None:
-            clean=owner.close()
+            clean=owner is not None and owner.close()
+    if host is not None:
+        host.finished(runtime, process, clean)
     return ProcessResult(code if clean else 'CLEANUP_BLOCKED',process.returncode if process else None,
-                         bytes(output),bytes(errors),clean)
+                         bytes(output),bytes(errors),clean,truncated)
 
 
 def checked_turn(request, invoke):

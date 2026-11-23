@@ -4,6 +4,7 @@ The frozen contract remains unchanged. Policy, charges and automatic grants are
 bound to its hash in a separate, locked, append-only-in-spirit audit ledger.
 """
 import contextlib
+from contextvars import ContextVar
 import copy
 import fcntl
 import hashlib
@@ -13,12 +14,29 @@ import signal
 
 import runner as core
 
+_run_time_policy = ContextVar("run_time_policy", default=None)
+
+
+@contextlib.contextmanager
+def use_time_policy(policy):
+    """Pin the already verified elapsed-time policy for this unified Run."""
+    token = _run_time_policy.set(policy)
+    try:
+        yield
+    finally:
+        _run_time_policy.reset(token)
+
 
 def time_policy():
     """Machine-local user policy; absence preserves legacy installations exactly."""
+    if (pinned := _run_time_policy.get()) is not None:
+        return dict(pinned)
     import interaction
+    import ato_config
     path = interaction.directory()/'time-policy.json'
     if not path.exists():
+        if ato_config.in_unified_kernel():
+            return dict(mode='advisory', source='Unified execution default', revision=None)
         return dict(mode='enforced', source='Legacy installation; no advisory policy recorded', revision=None)
     value = core.read(path)
     prior = 'ctask-time-policy-v1'

@@ -16,6 +16,10 @@ import shlex
 _unified_kernel = ContextVar('unified_kernel', default=None)
 
 
+def in_unified_kernel():
+    return _unified_kernel.get() is not None
+
+
 def unified_home():
     """Locate the new namespace without resolving away redirected components."""
     configured = os.environ.get('ATO_HOME')

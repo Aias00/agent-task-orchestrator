@@ -12,6 +12,10 @@ from hub_contract import SHARED_ENV_LINKS
 SHARED = SHARED_ENV_LINKS
 
 
+def unified_runtime(name):
+    return name == '.codex/tasks' or name.startswith('.codex/tasks/')
+
+
 def canonical(value, *, exists=True):
     path=Path(value)
     if not path.is_absolute() or path!=path.resolve(strict=exists):raise ValueError('UNSAFE_WORKTREE_PATH')
@@ -68,15 +72,18 @@ def provision(repo, task_id, branch, base_ref, *, parent_dir=None, shared_env_li
                 common_dir=str(Path(git(target,'rev-parse','--git-common-dir').strip()).resolve()),shared_env_links=list(shared_env_links))
 
 
-def snapshot_integrity(worktree):
+def snapshot_integrity(worktree, *, trusted_stop=None, verified_shared=None):
     root=repository(worktree);files={};total=0;shared=set()
     for name in SHARED:
         path=root/name
         # Vendored/tracked directories are source, even when their basename is
         # a supported dependency name. Only shared links/ignored untracked dirs
         # are excluded from traversal.
-        excluded=path.is_symlink() or (path.is_dir() and not git(root,'ls-files','--',name).strip()
-            and subprocess.run(['git','-C',str(root),'check-ignore','--no-index','-q','--',name],capture_output=True).returncode==0)
+        if verified_shared is None:
+            excluded=path.is_symlink() or (path.is_dir() and not git(root,'ls-files','--',name).strip()
+                and subprocess.run(['git','-C',str(root),'check-ignore','--no-index','-q','--',name],capture_output=True).returncode==0)
+        else:
+            excluded=name in verified_shared and path.is_symlink()
         if excluded:
             shared.add(name)
             info=path.lstat()
@@ -89,6 +96,7 @@ def snapshot_integrity(worktree):
             and str((base/name).relative_to(root)) not in shared)
         for name in sorted([*names,*[n for n in folders if (base/n).is_symlink()]]):
             path=base/name;relative=str(path.relative_to(root));info=path.lstat()
+            if path==trusted_stop:continue
             if relative in shared:continue
             if stat.S_ISLNK(info.st_mode):value=['link',os.readlink(path)]
             elif stat.S_ISREG(info.st_mode):
@@ -102,9 +110,11 @@ def snapshot_integrity(worktree):
     # just HEAD. Ignore task receipts for this fingerprint, but retain them in
     # files_sha above so a reviewer cannot mutate ignored files unnoticed.
     source_names=git(root,'ls-files','--cached','--others','--exclude-standard','-z').split('\x00')
-    source={name:files.get(name,['missing']) for name in source_names if name and name not in shared}
+    source={name:files.get(name,['missing']) for name in source_names if name and name not in shared
+        and not (verified_shared is not None and unified_runtime(name))}
     return dict(head_sha=head,tree_sha=core.digest(source),head_tree_sha=git(root,'rev-parse','HEAD^{tree}').strip(),
-        status_porcelain=git(root,'status','--porcelain=v1','--untracked-files=all'),files_sha=core.digest(files),
+        status_porcelain=(git(root,'status','--porcelain=v1','--untracked-files=all') if verified_shared is None else None),
+        files_sha=core.digest(files),
         index_sha=hashlib.sha256(git(root,'diff','--cached','--binary','HEAD').encode()).hexdigest())
 
 
@@ -112,21 +122,23 @@ def assert_integrity(before, after):
     if before!=after:raise ValueError('REVIEWER_MUTATION_VIOLATION')
 
 
-def diff_bundle(binding):
+def diff_bundle(binding, *, verified_shared=None):
     root=repository(binding['path']);base=resolve_base(root,binding['base_commit'])
-    diff=git(root,'diff','--no-ext-diff','--binary',base,'--')
+    diff=git(root,'diff','--no-ext-diff','--no-textconv','--binary',base,'--')
     if len(diff.encode())>256*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
     untracked={}
     for name in git(root,'ls-files','--others','--exclude-standard','-z').split('\x00'):
-        if not name or name in SHARED:continue
+        if not name or name in (SHARED if verified_shared is None else verified_shared):continue
+        if verified_shared is not None and unified_runtime(name):continue
         path=root/name
         if path.is_symlink():untracked[name]={'symlink':os.readlink(path)}
         else:
             if path.stat().st_size>128*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
             untracked[name]=path.read_text(errors='replace')
     if len(str(untracked).encode())+len(diff.encode())>256*1024:raise ValueError('REVIEW_DIFF_BOUND_EXCEEDED')
-    return dict(base_commit=base,head=git(root,'rev-parse','HEAD').strip(),diff=diff,untracked=untracked,
-                status=git(root,'status','--porcelain=v1','--untracked-files=all'),snapshot=snapshot_integrity(root))
+    snapshot=snapshot_integrity(root,verified_shared=verified_shared)
+    return dict(base_commit=base,head=snapshot['head_sha'],diff=diff,untracked=untracked,
+                status=snapshot['status_porcelain'],snapshot=snapshot)
 
 
 def cleanup(binding):

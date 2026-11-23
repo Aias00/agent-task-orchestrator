@@ -869,6 +869,7 @@ class TaskStore:
         self.authenticate = authenticate
         self.can_observe = can_observe
         self.authorize_submit = authorize_submit
+        self.execution_projection = None
 
     def normalize_spec(self, repo, spec_file):
         return normalize_spec(repo, spec_file, home=self.home, native_homes=self.native_homes)
@@ -909,13 +910,15 @@ class TaskStore:
         _fields(task, ("schema_version", "task_id", "repo", "spec_sha256", "input_sha256",
                        "authorization_ref", "binding", "revision", "created_at", "updated_at",
                        "creation", "worktree", "workflow", "run_id", "run_count", "run_hashes", "run_heads",
-                       "stop_epoch", "worktree_removed"))
+                       "stop_epoch", "worktree_removed"), ("stop_retired_epoch",))
         _require(type(task["schema_version"]) is int and task["schema_version"] == 1
                  and task["task_id"] == task_id and _matches(_SHA, task["input_sha256"])
                  and task["spec_sha256"] == scope.spec_sha256
                  and task["authorization_ref"] == scope.authorization_ref
                  and _positive(task["revision"]) and _time(task["created_at"]) and _time(task["updated_at"])
                  and _binding_valid(task["binding"]) and _nonnegative(task["stop_epoch"])
+                 and _nonnegative(task.get("stop_retired_epoch", 0))
+                 and task.get("stop_retired_epoch", 0) <= task["stop_epoch"]
                  and type(task["worktree_removed"]) is bool)
         repo = task["repo"]
         _fields(repo, ("root", "key", "root_identity", "common_identity"))
@@ -1669,7 +1672,7 @@ class TaskStore:
         phase = last["phase"] if last else ("reserved" if history else None)
         status, reason, next_step = "preparing", None, "PROVISION_TASK"
         execution = dict(state="idle", run_id=task["run_id"], pid=None, owner_role=None,
-                         verified=False, stop_requested=bool(task["stop_epoch"]), lease=None)
+                         verified=False, stop_requested=task["stop_epoch"] > task.get("stop_retired_epoch", 0), lease=None)
         stage, generation, checks, updated = None, None, [], task["updated_at"]
         worktree_state = None if worktree is None else "present"
         status_data = None
@@ -1729,12 +1732,15 @@ class TaskStore:
             next_step = "ADMIT_INITIAL_RUN"
             execution["verified"] = bool(status_data and status_data[0] == "created")
         manual = [row["id"] for row in spec["worker_contract"]["acceptance"] if row["kind"] == "manual"]
-        return dict(task_id=task["task_id"], repo=task["repo"]["root"], status=status, reason=reason,
+        projection = dict(task_id=task["task_id"], repo=task["repo"]["root"], status=status, reason=reason,
                     updated_at=updated, spec_sha256=task["spec_sha256"], execution=execution,
                     run_history=[self._run_summary(run, receipts) for run, receipts in history],
                     stage=stage, checks=checks, review=None, product=None,
                     acceptance=dict(disposition="pending", criteria=manual, receipt_id=None),
-                    pending=[], delivery=[], worktree_state=worktree_state, next_step=next_step), generation
+                    pending=[], delivery=[], worktree_state=worktree_state, next_step=next_step)
+        if self.execution_projection is not None:
+            self.execution_projection(task, spec, history, generation, projection)
+        return projection, generation
 
     @staticmethod
     def _run_summary(run, receipts):
