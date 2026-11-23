@@ -155,7 +155,8 @@ def cleanup(binding, *, worker_locked=False, before_remove=None):
     for name in binding.get('shared_env_links',[]):
         path=root/name
         source=repo/name
-        if (name not in SHARED or not path.is_symlink() or not source.is_dir() or source!=source.resolve()
+        if (name not in SHARED or not path.is_symlink() or path.parent!=path.parent.resolve()
+                or not source.is_dir() or source!=source.resolve()
                 or os.readlink(path)!=os.path.relpath(source,path.parent) or path.resolve()!=source):
             raise ValueError('SHARED_DEPENDENCY_CHANGED')
         status=[line for line in status if line!='?? '+name]
@@ -180,15 +181,16 @@ def cleanup(binding, *, worker_locked=False, before_remove=None):
             return
         with tempfile.TemporaryDirectory(prefix='.ato-cleanup-', dir=root.parent) as folder:
             staged = Path(folder)
+            staged_links = [(root/name, staged/str(index)) for index, name in enumerate(links)]
             try:
-                for name in links:
-                    (root/name).rename(staged/name)
+                for path, backup in staged_links:
+                    path.rename(backup)
                 git(repo, 'worktree', 'remove', str(root))  # Retain the branch.
             except (OSError, ValueError, subprocess.SubprocessError):
                 if root.is_dir() and root == root.resolve():
-                    for name in links:
-                        if (staged/name).is_symlink() and not os.path.lexists(root/name):
-                            (staged/name).rename(root/name)
+                    for path, backup in staged_links:
+                        if backup.is_symlink() and path.parent == path.parent.resolve() and not os.path.lexists(path):
+                            backup.rename(path)
                 raise
     finally:
         for stream in handles:stream.close()

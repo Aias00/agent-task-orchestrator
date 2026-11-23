@@ -104,6 +104,37 @@ class HubFoundationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'SHARED_DEPENDENCY_NOT_IGNORED'):
                 worktree.provision(self.repo,'tracked-'+name,'feat/tracked-'+name,'main',shared_env_links=[name])
 
+    def test_nested_shared_dependency_is_removed_and_restored_on_git_failure(self):
+        names = ['venv', 'integrations/pi-acp/node_modules']
+        (self.repo/'.gitignore').write_text('.codex/\nvenv/\nnode_modules/\n')
+        git(self.repo, 'add', '.gitignore')
+        git(self.repo, 'commit', '-qm', 'ignore fixture dependencies')
+        for name in names:
+            dependency = self.repo/name
+            dependency.mkdir(parents=True)
+            (dependency/'marker').write_text(name)
+        binding = worktree.provision(self.repo, 'nested', 'feat/nested', 'main', shared_env_links=names)
+        path = Path(binding['path'])
+        before = worktree.snapshot_integrity(path)
+        run_git = worktree.git
+
+        def refuse_remove(repo, *args):
+            if args[:2] == ('worktree', 'remove'):
+                self.assertTrue(all(not os.path.lexists(path/name) for name in names))
+                raise ValueError('GIT_OPERATION_REFUSED')
+            return run_git(repo, *args)
+
+        with patch.object(worktree, 'git', side_effect=refuse_remove):
+            with self.assertRaisesRegex(ValueError, 'GIT_OPERATION_REFUSED'):
+                worktree.cleanup(binding)
+        self.assertEqual(worktree.snapshot_integrity(path), before)
+        for name in names:
+            self.assertEqual((path/name).resolve(), self.repo/name)
+        worktree.cleanup(binding)
+        self.assertFalse(path.exists())
+        for name in names:
+            self.assertEqual((self.repo/name/'marker').read_text(), name)
+
     def test_multilanguage_nonignored_or_symlink_dependency_is_refused(self):
         for name in ('node_modules','venv'):
             path=self.repo/name;path.mkdir()
