@@ -558,7 +558,8 @@ class ExecutionService:
             _require(stop is None, "STOPPED")
             return None, None
         if phase == "reserved":
-            _require(kind == "resume" and stop is not None and state["status"] == "created"
+            _require(kind == "resume" and (stop is not None or run["kind"] == "initial")
+                     and state["status"] == "created"
                      and not state["stages"], "NOT_RESUMABLE")
             return stop, None
         proof = _evidence(self.store, task["task_id"], last)
@@ -659,7 +660,9 @@ class ExecutionService:
                             raise
                         raise TaskError("RUN_UNSETTLED", task_id) from None
             # Intent creation is fenced against an intervening STOP/handoff.
-            if kind != "initial" and not reserved:
+            reuse_initial = (kind == "resume" and not current_receipts
+                             and current_run["kind"] == "initial" and stop is None)
+            if kind != "initial" and not reserved and not reuse_initial:
                 if not history[-1][1]:
                     task = _publish_receipt(self.store, history[-1][0], "launch_failed", generation,
                                             {"cleanup_verified": True, "reason": "STOPPED"}, "launch_failed",

@@ -519,6 +519,47 @@ class InstalledATO(unittest.TestCase):
         self.assertNotEqual(finished["execution"]["run_id"], first_run)
         self.assertFalse((repo / "delivery.txt").exists())
 
+    def test_busy_repository_can_resume_its_reserved_initial_run_once(self):
+        self.install()
+        self.profile(mode="hold")
+        repo, spec_file, origin = self.submission("busy repo", "1", "2")
+        run_args = ("run", "--repo", repo, "--spec", spec_file)
+        first = self.cli(*run_args, actor=origin)["task_id"]
+        self.running[first] = origin
+        self.wait_for(lambda: self.cli("status", first, actor=origin),
+                      lambda _: (self.native / "ready.json").is_file())
+
+        busy = self.cli(*run_args, actor=origin, error=(4, "BUSY"))
+        second = busy["task_id"]
+        self.assertNotEqual(second, first)
+        reserved = self.cli("status", second, actor=origin)
+        self.assertEqual(reserved["next_step"], "ADMIT_INITIAL_RUN")
+        self.assertEqual([row["phase"] for row in reserved["run_history"]], ["reserved"])
+        run_id = reserved["execution"]["run_id"]
+        self.cli("resume", second, actor=origin, error=(4, "BUSY"))
+        self.assertEqual(len((self.native / "attempts").read_text().splitlines()), 1)
+
+        self.cli("stop", first, actor=origin)
+        stopped = self.wait_for(lambda: self.cli("status", first, actor=origin),
+                                lambda status: status["status"] == "stopped")
+        self.assertTrue(stopped["execution"]["verified"])
+        self.running.pop(first)
+        write(self.native, "mode", "normal")
+        resumed = self.cli("resume", second, actor=origin)
+        self.assertEqual(resumed["task_id"], second)
+        self.running[second] = origin
+        resumed = self.wait_for(lambda: self.cli("status", second, actor=origin),
+                                lambda status: status["status"] == "needs_acceptance",
+                                terminal={"blocked", "cleanup_blocked", "delivery_unknown"})
+        self.running.pop(second)
+        self.assertEqual((resumed["task_id"], resumed["status"]), (second, "needs_acceptance"))
+        self.assertEqual(resumed["execution"]["run_id"], run_id)
+        self.assertEqual([row["kind"] for row in resumed["run_history"]], ["initial"])
+        self.cli("resume", second, actor=origin, error=(4, "NOT_RESUMABLE"))
+        attempts = (self.native / "attempts").read_text().splitlines()
+        self.assertEqual(attempts, [self.store.load_task(task_id)["worktree"]["path"]
+                                    for task_id in (first, second)])
+
     def test_unknown_worker_result_fences_explicit_resume_without_replay(self):
         self.install()
         self.profile(mode="unknown")

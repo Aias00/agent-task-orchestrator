@@ -26,7 +26,7 @@ There is no human/JSON mode switch. Shell scripts consume named fields.
 | `ato list [--repo PATH]` | `{tasks: [TaskSummary], warnings: [code]}` sorted by Task ID. Omitting the repo lists visible Tasks across repositories. Filtering is exact by normalized Git identity. |
 | `ato status TASK_ID` | Returns `TaskStatus` with overall state, actual execution, Run history, stage, checks, review, product, acceptance, pending items, delivery, and next step. |
 | `ato stop TASK_ID` | Durably fences the observed Run, then returns `TaskStatus` with the actual stop or cleanup progress. Repetition returns the existing disposition. |
-| `ato resume TASK_ID` | Explicitly admits a new Run of an existing Task under its current scoped grant and completed recovery checks. Returns `TaskStatus`. Background admission and startup proof are the same as for run. |
+| `ato resume TASK_ID` | Explicitly admits execution for an existing Task under its current scoped grant and recovery checks. When repository contention left an untouched initial reservation, resumes the same initial Run. A proved retryable prior execution requires a successor Run. Returns `TaskStatus` with the same background admission and startup proof as run. |
 | `ato inbox` | `{items: [InboxItem]}` containing authorized pending items, in creation order with ID as tie breaker. A read has no presentation or delivery effect. |
 | `ato answer REQUEST_ID --answer TEXT` | Records the actual user's answer to the exact pending request. Returns `{request_id, task_id, state, delivery, recorded_at}`, where `delivery` reports the canonical disposition. The execution owner consumes a valid decision separately. |
 | `ato accept TASK_ID --evidence FILE` | Records the current product's explicit human acceptance after independent checks and authority verification. Returns `TaskStatus` with the acceptance receipt reference. Repetition of the same decision returns that receipt. |
@@ -847,7 +847,7 @@ on authorized submission in the new namespace.
 | `read` | Retired alias of `read-question`. Use scoped `ato inbox` for pending items or the private host reader for addressed material. |
 | `read-question` | Split. User sees authorized pending material via `ato inbox`. Private exact-request readers can verify material without updating it. Display uses a separate presentation record. |
 | `respond` | Retired alias of `answer`. Use `ato answer` with the verified user decision. |
-| `resume` | Retained as `ato resume TASK_ID`. A new fenced Run replaces unconditional legacy STOP unlink or request-specific flags. Legacy recovery subprocess call is private and must pass the same admission checks. |
+| `resume` | Retained as `ato resume TASK_ID`. Fenced admission replaces unconditional legacy STOP unlink and request-specific flags. It can start an untouched initial reservation or admit an eligible successor. The private legacy recovery subprocess must pass the same admission checks. |
 | `run` | Retained as task submission and start with `--repo`, `--spec`, optional `--foreground`. Previously created Task IDs continue via `ato resume`. Directory inputs are invalid. |
 | `session-register` | Internal. Code-owned trusted registry verifies kind, endpoint identity, exact project and capabilities. Status/binding report redacted results. No public session proof assertion. |
 | `start` | Replaced by background default `ato run` on submission and `ato resume` for a current Task. Legacy delegation's helper spawn remains historical. |
