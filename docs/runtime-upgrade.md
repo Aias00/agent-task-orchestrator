@@ -84,5 +84,9 @@ changed source, ambiguous PID, or busy mailbox records `recovery_required`
 for inspection. Retain the journal and the sealed snapshots for recovery.
 
 Task and Run ledgers, STOP, attempt histories, worktrees and delivery claims
-remain available in their original namespaces. Fixture qualification and
-source installation leave real activation and provider verification pending.
+remain available in their original namespaces. Before switching away from a
+unified release in either direction, complete or clean up its unfinished Tasks,
+including those awaiting acceptance. If a different release is already selected,
+`ato status` reports `RUNTIME_MISMATCH` and `SELECT_TASK_RUNTIME` for the
+unfinished Task. Fixture qualification and source installation leave real
+activation and provider verification pending.

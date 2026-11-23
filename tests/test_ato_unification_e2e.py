@@ -568,6 +568,18 @@ class InstalledATO(unittest.TestCase):
         recorded = release.read(journal / "transaction.json")
         self.assertEqual(recorded["before"]["entries"], saved)
         self.assertEqual(recorded["target"], dict(source, python_sha256=release.sha(self.python)))
+        replacement = snapshot(self.root / "next source", executable=True, commit="d" * 40)
+        self.addCleanup(unseal, replacement)
+        with self.assertRaisesRegex(release.Refused, "unfinished Task requires its selected release"):
+            release.activate(replacement, "d" * 40, paths, self.root / "refused switch")
+        with self.assertRaisesRegex(release.Refused, "unfinished Task requires its selected release"):
+            release.rollback(journal, paths)
+        self.assertEqual(self.launcher.read_bytes(), release.launcher_bytes(self.source, self.python, source["seal"]))
+        user = self.scoped(delivered["task_id"], "3", "user", agent_ref("2"), 1, "observe", "read", "accept")
+        evidence = self.acceptance(delivered, "accept before rolling back")
+        self.assertEqual(self.cli("accept", delivered["task_id"], "--evidence", evidence, actor=user)["status"],
+                         "completed")
+        task = self.store.load_task(delivered["task_id"])
         for _ in range(2):
             result = self.json_command(self.python, "-IB", script, "--rollback", *common)
             self.assertEqual(result["state"], "rolled_back")

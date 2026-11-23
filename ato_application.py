@@ -65,7 +65,12 @@ class Application:
         if operation == "list":
             return host.store.list_tasks(proof, getattr(args, "repo", None))
         if operation == "status":
-            return api.task_status(proof, args.task_id)
+            status = api.task_status(proof, args.task_id)
+            task = host.store.load_task(args.task_id)
+            if (host.store.runtime_seal is not None and status["status"] != "completed"
+                    and task["creation"]["runtime_seal"] != host.store.runtime_seal):
+                status.update(reason="RUNTIME_MISMATCH", next_step="SELECT_TASK_RUNTIME")
+            return status
         if operation == "stop":
             result = host.execution.request_stop(proof, args.task_id)
             return api.task_status(proof, result["task_id"])
