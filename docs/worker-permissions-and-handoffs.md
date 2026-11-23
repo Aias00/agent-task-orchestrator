@@ -106,6 +106,15 @@ After performing the **already authorized** host action, origin/operator runs:
 ctask host-checks /absolute/workflow --source 'Actual host work and evidence source'
 ```
 
+Use `budget-run` to meter an already authorized host command against the same
+workflow. It acquires both the repository flock and the existing execution
+lease before running argv or advancing the workflow generation. A live origin
+or session-host lease refuses admission even when the flock is free; an expired
+lease still requires verified absence/idle activity. It never adopts another
+owner's token. Generation changes fence old credentials, active commands renew
+their own lease, and exit releases only that ownership. Reconcile an existing
+owner through its normal protocol before starting another host command.
+
 This foreground command obtains the repository lock, checks STOP and contract
 integrity, charges execution against the same remaining cumulative workflow
 budget, and runs the original stage/final checks. It does not launch a model,

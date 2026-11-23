@@ -17,6 +17,7 @@ from hub_registry import HubRegistry
 from hub_sandbox import validate_loopback_proxy
 import hub_worktree
 import runner
+import recovery
 import workflow
 
 
@@ -51,19 +52,23 @@ class GuardedWorkflow(workflow.Workflow):
         """Run only frozen host checks under the ordinary repository lock."""
         with (self.repo/'.codex/tasks/.worker.lock').open('a+') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.state=core.read(self.dir/'state.json')
+            self.guard()
             runner.ensure_resumable(self.dir)
-            self.state.update(status='verifying',owner_pid=os.getpid(),owner_identity=core.process_identity(os.getpid()))
-            self.persist()
-            try:
-                self.check_total()
-                self.state['status']='needs_input' if all(v['status'] in ('passed','needs_input')
-                    for v in self.state['criteria'].values()) else 'blocked'
-            except core.Halt as error:self.state['status']=str(error)
-            finally:
-                try:self.kill()
-                except OSError:self.state['status']='cleanup_blocked'
-                else:self.state['active_process']=None
-                self.state['owner_pid']=None;self.persist()
+            with recovery.execution_owner(self.dir,self.state,explicit_run=True) as ownership:
+                self._execution_owner=ownership
+                self.state.update(status='verifying',owner_pid=os.getpid(),owner_identity=core.process_identity(os.getpid()))
+                self.persist()
+                try:
+                    self.check_total()
+                    self.state['status']='needs_input' if all(v['status'] in ('passed','needs_input')
+                        for v in self.state['criteria'].values()) else 'blocked'
+                except core.Halt as error:self.state['status']=str(error)
+                finally:
+                    try:self.kill()
+                    except OSError:self.state['status']='cleanup_blocked'
+                    else:self.state['active_process']=None
+                    self.state['owner_pid']=None;self.persist()
 
 
 class HubLoop:

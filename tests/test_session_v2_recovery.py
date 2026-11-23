@@ -17,6 +17,7 @@ import uuid
 
 import agent_registry
 import agents
+import budget
 import control
 import failure_attention
 import host_recheck
@@ -28,6 +29,7 @@ import runner
 import session_router
 import transport
 import workflow
+from hub_loop import GuardedWorkflow
 
 
 class RecoveryAdapter:
@@ -298,6 +300,90 @@ class SessionV2RecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.host_resume()
         self.assertEqual(self.loads, [])
         self.assertEqual(recovery.handler_status(self.d, s, self.origin), 'execution_owned')
+
+    def host_entry(self, kind):
+        if kind == 'budget':
+            return budget.host_run(self.d, [sys.executable, '-c', 'pass'], 'Isolated host verification')
+        return GuardedWorkflow(self.d, lambda: None).verify_only()
+
+    def acquire_host_lease(self, bus, role):
+        state = runner.read(self.d/'state.json')
+        return bus.acquire_execution(recovery.execution_resource(self.repo), project=str(self.repo),
+            task_id=str(self.d), contract_hash=state['contract_hash'], generation=recovery.generation(self.d, state),
+            role=role, owner='synthetic-existing-owner', source='Isolated lease fixture')
+
+    def test_host_entries_refuse_active_origin_and_session_host_leases_without_mutation(self):
+        bus = transport.managed_bus(); resource = recovery.execution_resource(self.repo)
+        for kind in ('budget', 'hub'):
+            for role in ('origin', 'session_host'):
+                with self.subTest(entry=kind, role=role):
+                    token, fence = self.acquire_host_lease(bus, role)
+                    before = (self.d/'state.json').read_bytes(); lease = bus.execution_lease(resource)
+                    with patch.object(runner.Runner, 'command', side_effect=AssertionError('no command allowed')):
+                        with self.assertRaises(ConflictError): self.host_entry(kind)
+                    self.assertEqual((self.d/'state.json').read_bytes(), before)
+                    self.assertEqual(bus.execution_lease(resource), lease)
+                    bus.release_execution(resource, token, fence, generation=json.loads(lease['generation']))
+
+    def test_host_entries_refuse_expired_unknown_native_activity_without_mutation(self):
+        for kind in ('budget', 'hub'):
+            for role in ('origin', 'session_host'):
+                with self.subTest(entry=kind, role=role):
+                    moment = [100]
+                    bus = MessageBus(self.root/(kind+'-'+role+'.sqlite'), clock=lambda: moment[0])
+                    self.acquire_host_lease(bus, role); moment[0] = 131; self.activity = 'unknown'
+                    before = (self.d/'state.json').read_bytes()
+                    with patch('transport.managed_bus', return_value=bus), patch.object(
+                            runner.Runner, 'command', side_effect=AssertionError('no command allowed')):
+                        with self.assertRaisesRegex(ValueError, 'unknown native activity'): self.host_entry(kind)
+                    self.assertEqual((self.d/'state.json').read_bytes(), before)
+                    self.assertEqual(bus.execution_lease(recovery.execution_resource(self.repo))['state'], 'active')
+
+    def test_host_entries_reconcile_expired_idle_lease_and_fence_late_release(self):
+        (self.repo/'artifact').write_text('synthetic artifact')
+        for kind in ('budget', 'hub'):
+            with self.subTest(entry=kind):
+                moment = [100]; bus = MessageBus(self.root/(kind+'-idle.sqlite'), clock=lambda: moment[0])
+                token, fence = self.acquire_host_lease(bus, 'session_host')
+                resource = recovery.execution_resource(self.repo); prior = bus.execution_lease(resource)
+                moment[0] = 131; self.activity = 'idle'
+                with patch('transport.managed_bus', return_value=bus): self.host_entry(kind)
+                current = bus.execution_lease(resource)
+                self.assertEqual(current['state'], 'released'); self.assertGreater(current['fence'], fence)
+                with self.assertRaises(ConflictError):
+                    bus.release_execution(resource, token, fence, generation=json.loads(prior['generation']))
+                state = runner.read(self.d/'state.json')
+                self.assertEqual(json.loads(current['generation']), recovery.generation(self.d, state))
+                self.assertNotEqual(state['status'], 'completed')
+                self.assertEqual(list((self.d/'acknowledgements').iterdir()), [])
+
+    def test_host_entries_publish_renew_and_release_their_exact_execution_generation(self):
+        bus = transport.managed_bus(); resource = recovery.execution_resource(self.repo)
+        for kind in ('budget', 'hub'):
+            with self.subTest(entry=kind):
+                observed = []
+                def command(owner, *args, **kwargs):
+                    lease = bus.execution_lease(resource); state = runner.read(self.d/'state.json')
+                    self.assertEqual(lease['state'], 'active')
+                    self.assertEqual(json.loads(lease['generation']), recovery.generation(self.d, state))
+                    self.assertEqual(lease['role'], 'origin' if kind == 'budget' else 'worker')
+                    # Advance only the injected lease clock; guard must renew it
+                    # before the original 30-second admission window expires.
+                    expires = lease['lease_until']; bus.clock = lambda: expires-1
+                    owner._last_heartbeat = 0
+                    owner.guard()
+                    self.assertGreater(bus.execution_lease(resource)['lease_until'], expires)
+                    observed.append(lease['fence'])
+                    raise runner.Halt('stopped')
+                with patch('transport.managed_bus', return_value=bus), patch.object(runner.Runner, 'command', command):
+                    if kind == 'budget':
+                        with self.assertRaises(runner.Halt): self.host_entry(kind)
+                    else: self.host_entry(kind)
+                self.assertEqual(len(observed), 1)
+                self.assertEqual(bus.execution_lease(resource)['state'], 'released')
+                self.assertIsNone(runner.read(self.d/'state.json')['owner_pid'])
+                bus.clock = time.time
+                self.set_state(status='blocked')
 
     def test_origin_disposition_releases_lease_without_resetting_failure_or_grants(self):
         q = self.queued(); self.claim(q); before = runner.read(self.d/'state.json'); grant = self.ledger()
