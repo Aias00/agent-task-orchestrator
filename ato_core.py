@@ -41,11 +41,34 @@ def digest(plan):
 
 
 def process_identity(pid):
-    """Best-effort kernel process start identity; never infer it from a trace."""
+    """Best-effort UTC/C process start identity, independent of caller settings."""
     if type(pid) is not int or pid <= 0:
         return None
     try:
         data = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'lstart='],
+                              env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TZ': 'UTC'},
+                              capture_output=True, text=True, timeout=2, check=True).stdout.strip()
+        return hashlib.sha256(data.encode()).hexdigest() if data else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# Keep the genuine callable separate from the patchable public facade. A test
+# replacing process_identity must never trigger a real ps through the fallback.
+_PROCESS_IDENTITY = process_identity
+
+
+def _legacy_localtime_identity(pid):
+    """Read an old host-local start hash, ignoring the caller's TZ and locale.
+
+    Deliberately omit TZ so macOS uses /etc/localtime. This is a comparison-only
+    migration bridge; new records always use process_identity's canonical UTC.
+    """
+    if type(pid) is not int or pid <= 0:
+        return None
+    try:
+        data = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'lstart='],
+                              env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'},
                               capture_output=True, text=True, timeout=2, check=True).stdout.strip()
         return hashlib.sha256(data.encode()).hexdigest() if data else None
     except (OSError, subprocess.SubprocessError):
@@ -79,8 +102,14 @@ def pid_alive(info, *, alive_fn=None, identity_fn=None):
     """Optional callables preserve compatibility facade injection points."""
     check_alive = alive if alive_fn is None else alive_fn
     identity = process_identity if identity_fn is None else identity_fn
-    return check_alive(info.get('pid')) and ('pid_identity' not in info
-        or identity(info['pid']) == info['pid_identity'])
+    if not check_alive(info.get('pid')):
+        return False
+    if 'pid_identity' not in info:
+        return True
+    if identity(info['pid']) == info['pid_identity']:
+        return True
+    return (identity is process_identity and identity is _PROCESS_IDENTITY
+        and _legacy_localtime_identity(info['pid']) == info['pid_identity'])
 
 
 def private_save(path, value):

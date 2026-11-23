@@ -93,7 +93,7 @@ def readonly_profile(runtime, *, protected, writable_native=()):
 def identity(pid):
     try:
         data=subprocess.check_output(['/bin/ps','-p',str(pid),'-o','lstart='],timeout=2,
-            env=dict(PATH='/usr/bin:/bin',LANG='C'),stderr=subprocess.DEVNULL)
+            env={'PATH':'/usr/bin:/bin','LC_ALL':'C','TZ':'UTC'},stderr=subprocess.DEVNULL)
         return hashlib.sha256(data.strip()).hexdigest() if data.strip() else None
     except (OSError,subprocess.SubprocessError):return None
 
@@ -101,7 +101,7 @@ def identity(pid):
 def group_members(group):
     try:
         data=subprocess.check_output(['/bin/ps','-axo','pid=,pgid=,stat='],text=True,timeout=2,
-            env=dict(PATH='/usr/bin:/bin',LANG='C'),stderr=subprocess.DEVNULL)
+            env={'PATH':'/usr/bin:/bin','LC_ALL':'C','TZ':'UTC'},stderr=subprocess.DEVNULL)
         return {int(pid):identity(int(pid)) for pid,pgid,state in (row.split() for row in data.splitlines())
                 if int(pgid)==group and not state.startswith('Z')}
     except (OSError,ValueError,subprocess.SubprocessError):return None

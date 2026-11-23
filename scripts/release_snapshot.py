@@ -399,10 +399,30 @@ class System:
 
     def identity(self, pid):
         try:
-            start = command(['/bin/ps', '-p', str(pid), '-o', 'lstart='])
+            start = command(['/bin/ps', '-p', str(pid), '-o', 'lstart='],
+                            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'TZ': 'UTC'})
             return hashlib.sha256(start.encode()).hexdigest() if start else None
         except subprocess.CalledProcessError:
             return None
+
+    # Preserve the real implementation when identity is overridden on an
+    # instance, subclass or the class itself by an offline test facade.
+    _native_identity = identity
+
+    def _legacy_localtime_identity(self, pid):
+        try:
+            start = command(['/bin/ps', '-p', str(pid), '-o', 'lstart='],
+                            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+            return hashlib.sha256(start.encode()).hexdigest() if start else None
+        except subprocess.CalledProcessError:
+            return None
+
+    def matches_identity(self, pid, expected):
+        identity = self.identity
+        if identity(pid) == expected:
+            return True
+        return (getattr(identity, '__func__', None) is System._native_identity
+                and self._legacy_localtime_identity(pid) == expected)
 
     def observer(self, state, source, *, healthy=True):
         row = read(state/'control/process.json')
@@ -411,7 +431,7 @@ class System:
         require(len(processes) == 1 and processes[0]['pid'] == row.get('pid') and
                 processes[0]['command'] == expected,
                 'expected exactly one controller selecting the installed source')
-        require(row.get('pid_identity') is not None and self.identity(row['pid']) == row['pid_identity'],
+        require(row.get('pid_identity') is not None and self.matches_identity(row['pid'], row['pid_identity']),
                 'controller pid_identity mismatch (possible PID reuse)')
         require(not healthy or (row.get('state') == 'watching' and row.get('consecutive_failures', 0) == 0
                 and isinstance(row.get('heartbeat'), (int, float)) and 0 <= time.time()-row['heartbeat'] <= 30),
@@ -420,12 +440,12 @@ class System:
                     heartbeat=row.get('heartbeat'))
 
     def stop(self, observer):
-        require(self.identity(observer['pid']) == observer['pid_identity'], 'PID identity changed before SIGTERM')
+        require(self.matches_identity(observer['pid'], observer['pid_identity']), 'PID identity changed before SIGTERM')
         require(any(p == dict(pid=observer['pid'], command=observer['command']) for p in self.processes()),
                 'controller command changed before SIGTERM')
         os.kill(observer['pid'], signal.SIGTERM)
         deadline = time.monotonic()+45
-        while self.identity(observer['pid']) == observer['pid_identity']:
+        while self.matches_identity(observer['pid'], observer['pid_identity']):
             require(time.monotonic() < deadline, 'controller did not exit gracefully; refusing SIGKILL')
             time.sleep(.1)
         require(not self.processes(), 'another controller appeared during graceful stop')

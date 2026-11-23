@@ -277,7 +277,7 @@ class PiCoordinator:
     def _production_members(self):
         import subprocess
         raw = subprocess.check_output(['/bin/ps','-axo','pid=,pgid=,lstart='],
-            env={'PATH':'/usr/bin:/bin'},text=True,timeout=2)
+            env={'PATH':'/usr/bin:/bin','LC_ALL':'C','TZ':'UTC'},text=True,timeout=2)
         members = {}
         for line in raw.splitlines():
             parts = line.split(None,2)
