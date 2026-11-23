@@ -9,6 +9,7 @@ import signal
 import shutil
 import uuid
 
+import budget
 import ato_core as core
 from hub_contract import (HubAgentSpec, HubTurnRequest, blocker_fingerprint,
                           require, validate_review_verdict, validate_task_spec)
@@ -57,6 +58,9 @@ class GuardedWorkflow(workflow.Workflow):
             runner.ensure_resumable(self.dir)
             with recovery.execution_owner(self.dir,self.state,explicit_run=True) as ownership:
                 self._execution_owner=ownership
+                started=core.now()
+                self.deadline=budget.deadline(self.dir,self.state,started=started)
+                self._accounted_at=started
                 self.state.update(status='verifying',owner_pid=os.getpid(),owner_identity=core.process_identity(os.getpid()))
                 self.persist()
                 try:

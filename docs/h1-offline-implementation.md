@@ -94,6 +94,9 @@ running_worker/reviewing/fixing 再执行只标记阻塞，不认领旧 PID 或�
 仅复核的宿主检查也须在仓库锁内取得既有 execution lease；有效 origin/session-host
 租约、或过期但原生活动未知的租约均拒绝执行。检查期间续租，退出只释放本次所有权，
 不能以仓库锁空闲代替持久执行归属核验。
+检查沿用该 workflow 的既有预算和累计 elapsed_seconds：enforced 模式在剩余总额度
+耗尽时停为 limit，advisory 模式只记账和显示超估；单条 check_seconds 与 Hub STOP
+继续有效。成功、失败、超时及停止的清理耗时均计入，复核不会清零历史或确认 manual。
 
 Hub STOP 不等待 `.hub.lock`；外层 Workflow guard 传至子 Runner，复用有界组清理。
 Reviewer 使用独占组、出生身份、≤100ms 轮询与 TERM/KILL；未知/回收身份报 cleanup_blocked。

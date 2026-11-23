@@ -14,9 +14,10 @@ import unittest
 from unittest.mock import patch
 
 import hub_cli
+import budget
 from hub_contract import HubAgentSpec, HubError
 from hub_ledger import HubLedger
-from hub_loop import HubLoop
+from hub_loop import GuardedWorkflow, HubLoop
 from hub_registry import HubRegistry
 from hub_adapter_agy import AgyHubAdapter
 from hub_adapter_claude import ClaudeHubAdapter
@@ -339,6 +340,67 @@ class HubLoopTests(unittest.TestCase):
         self.assertEqual(state['code'],'REVIEW_ONLY_CHANGES_REQUIRED',state)
         self.assertEqual(len(state['workflow_history']),2)
         self.assertEqual(json.loads((Path(state['active_workflow_dir'])/'state.json').read_text())['stages'],[])
+
+    def verification_workflow(self, script, *, runtime=5, check=4):
+        import workflow
+        contract=spec(self.repo)['worker_contract'];contract['stages']=[]
+        contract['acceptance'][0]['checks']=[[sys.executable,'-c',script]]
+        contract['limits']=dict(runtime_seconds=runtime,check_seconds=check)
+        source=self.root/'verification-contract.json';source.write_text(json.dumps(contract))
+        return workflow.create(self.repo,source)
+
+    def test_review_only_enforces_total_deadline_and_accounts_cleanup(self):
+        with self.loop.worker_environment():
+            directory=self.verification_workflow('import time;time.sleep(2)',runtime=1)
+            before=(directory/'contract.json').read_bytes()
+            with patch.object(runner.Runner,'attempt',side_effect=AssertionError('no worker')):
+                started=time.monotonic();GuardedWorkflow(directory,lambda:None).verify_only()
+            row=runner.read(directory/'state.json')
+            self.assertEqual(row['status'],'limit');self.assertGreaterEqual(row['elapsed_seconds'],1)
+            self.assertLess(time.monotonic()-started,3)
+            self.assertIsNone(row['owner_pid']);self.assertIsNone(row['active_process'])
+            self.assertNotEqual(row['criteria']['result']['status'],'passed')
+            self.assertEqual((directory/'contract.json').read_bytes(),before)
+            self.assertEqual(list((directory/'acknowledgements').iterdir()),[])
+
+    def test_review_only_carries_elapsed_between_runs_and_refuses_exhausted_check(self):
+        with self.loop.worker_environment():
+            directory=self.verification_workflow('import time;time.sleep(.2)')
+            GuardedWorkflow(directory,lambda:None).verify_only()
+            first=runner.read(directory/'state.json')
+            self.assertEqual(first['status'],'needs_input');self.assertGreaterEqual(first['elapsed_seconds'],.2)
+            GuardedWorkflow(directory,lambda:None).verify_only()
+            second=runner.read(directory/'state.json')
+            self.assertGreaterEqual(second['elapsed_seconds'],first['elapsed_seconds']+.2)
+            self.assertEqual(second['criteria']['human']['status'],'needs_input')
+            second['elapsed_seconds']=5;runner.save(directory/'state.json',second)
+            with patch.object(runner.Runner,'command',side_effect=AssertionError('exhausted before command')):
+                GuardedWorkflow(directory,lambda:None).verify_only()
+            self.assertEqual(runner.read(directory/'state.json')['status'],'limit')
+
+    def test_review_only_advisory_records_overrun_without_changing_policy(self):
+        with self.loop.worker_environment():
+            budget.set_time_policy('advisory','Synthetic advisory fixture','advisory-review')
+            directory=self.verification_workflow('import time;time.sleep(1.2)',runtime=1)
+            policy=budget.time_policy();GuardedWorkflow(directory,lambda:None).verify_only()
+            row=runner.read(directory/'state.json');info=budget.summary(directory)
+            self.assertEqual(row['status'],'needs_input');self.assertGreaterEqual(row['elapsed_seconds'],1.2)
+            self.assertEqual(row['criteria']['result']['status'],'passed')
+            self.assertEqual(row['criteria']['human']['status'],'needs_input')
+            self.assertTrue(info['forecast_exceeded']);self.assertFalse(info['exhausted'])
+            self.assertEqual(budget.time_policy(),policy)
+
+    def test_review_only_hub_STOP_accounts_and_cleans_the_active_check(self):
+        stop=self.root/'synthetic-hub-STOP'
+        script='from pathlib import Path;import time;Path('+repr(str(stop))+').touch();time.sleep(5)'
+        def guard():
+            if stop.exists():raise runner.Halt('stopped')
+        with self.loop.worker_environment():
+            directory=self.verification_workflow(script,runtime=10,check=8)
+            GuardedWorkflow(directory,guard).verify_only();row=runner.read(directory/'state.json')
+            self.assertEqual(row['status'],'stopped');self.assertGreater(row['elapsed_seconds'],0)
+            self.assertIsNone(row['owner_pid']);self.assertIsNone(row['active_process'])
+            self.assertEqual(row['stages'],[]);self.assertEqual(list((directory/'acknowledgements').iterdir()),[])
 
     def test_O10_independent_CLI_busy_attach_STOP_and_terminal_authority(self):
         self.create();self.loop.run('task-one')
