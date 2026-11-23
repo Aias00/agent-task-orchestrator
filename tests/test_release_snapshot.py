@@ -368,6 +368,28 @@ class ProcessSafetyTests(unittest.TestCase):
             with patch.object(system, 'processes', return_value=[process, process]), self.assertRaises(release.Refused):
                 system.observer(Path('/fixture-state'), source)
 
+    def test_legacy_exit_with_cleared_pid_still_requires_no_matching_process(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder).resolve()
+            source = dict(root='/fixture', python='/fixture/python')
+            row = dict(pid=None, pid_identity=None, state='exited', consecutive_failures=0,
+                       error=None, heartbeat=time.time())
+            write(state, 'control/process.json', json.dumps(row))
+            system = release.System()
+            process = dict(pid=12345, command=' '.join(release.observer_argv(source)))
+            with patch.object(system, 'processes', return_value=[]):
+                self.assertIsNone(system.observer(state, source))
+                self.assertIsNone(system.observer(state, None))
+                with self.assertRaisesRegex(release.Refused, 'invalid observer process record'):
+                    system.observer(state, dict(source, surface=release.SURFACE, seal='fixture'))
+                write(state, 'control/process.json', json.dumps(dict(row, pid_identity='unexpected')))
+                with self.assertRaisesRegex(release.Refused, 'invalid legacy observer exit'):
+                    system.observer(state, source)
+            write(state, 'control/process.json', json.dumps(row))
+            with patch.object(system, 'processes', return_value=[process]):
+                with self.assertRaisesRegex(release.Refused, 'invalid legacy observer exit'):
+                    system.observer(state, source)
+
     def test_start_requires_two_advancing_heartbeats_from_same_process(self):
         system = release.System()
         source = dict(root='/fixture-source', python='/fixture-source/python')

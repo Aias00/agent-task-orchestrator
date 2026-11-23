@@ -522,6 +522,13 @@ class System:
         except FileNotFoundError:
             require(not matching, 'observer has no durable process record')
             return None
+        # Legacy recovery.watch_ticks clears the PID and birth record on a
+        # graceful exit. A live matching command still requires an identity.
+        if row.get('state') == 'exited' and (source or {}).get('surface') != SURFACE:
+            require('pid' in row and row['pid'] is None and 'pid_identity' in row
+                    and row['pid_identity'] is None and not matching,
+                    'invalid legacy observer exit record')
+            return None
         pid = row.get('pid')
         require(type(pid) is int and pid > 0, 'invalid observer process record')
         occupied = next((p for p in processes if p['pid'] == pid), None)
