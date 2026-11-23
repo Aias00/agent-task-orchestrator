@@ -98,7 +98,13 @@ def has_secret(value, private_values):
     return any(secret in encoded for secret in private_values)
 
 
-def readonly_profile(runtime, *, protected, writable_native=()):
+def read_denials(runtime, protected):
+    return ['(deny file-read* (require-all (subpath ' +
+            json.dumps(str(canonical(path, exists=False))) + ') (require-not (subpath ' +
+            json.dumps(str(runtime)) + '))))' for path in protected]
+
+
+def readonly_profile(runtime, *, protected, writable_native=(), protected_reads=()):
     runtime=private_dir(runtime)
     roots=tuple(canonical(p) for p in protected)
     if any(runtime==p or runtime.is_relative_to(p) or p.is_relative_to(runtime) for p in roots):
@@ -115,6 +121,7 @@ def readonly_profile(runtime, *, protected, writable_native=()):
     # Explicit denies prevail even if a future allow-rule is broadened.
     for path in (*roots,runtime/'trusted',runtime/'adapter'):
         rules.append('(deny file-write* (subpath '+q(path)+'))')
+    rules.extend(read_denials(runtime, protected_reads))
     return '\n'.join(rules)+'\n'
 
 
@@ -311,7 +318,8 @@ def turn_context(request, tool, home, *, outer=True, writable_native=(), codex=F
         if result.returncode:raise ValueError('INVALID_PROTOCOL')
         common=Path(result.stdout.strip());common=(workspace/common).resolve() if not common.is_absolute() else common.resolve()
         protected.add(common)
-        policy=readonly_profile(rt,protected=protected,writable_native=writable_native)
+        policy=readonly_profile(rt,protected=protected,writable_native=writable_native,
+                                protected_reads=request.protected_reads)
         write_private(rt/'readonly.sb',policy);prefix=['/usr/bin/sandbox-exec','-f',str(rt/'readonly.sb')]
     return rt,env,prefix
 

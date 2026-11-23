@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from hub_contract import (HubCapabilities,HubTurnResult,REVIEW_VERDICT_SCHEMA,HUB_TASK_SPEC_SCHEMA,
     failed,require,strict_json,token,validate_review_verdict,validate_task_spec)
@@ -38,13 +39,23 @@ class CodexHubAdapter:
                 sandbox.write_private(rt/'schema.json',json.dumps(schema))
                 resumed=request.session_mode!='fresh_only' and request.resume_session_id
                 command=[str(self.executable),'exec']
-                if resumed:command+=['resume',request.resume_session_id,'-c','sandbox_mode="read-only"']
-                else:command+=['--sandbox','read-only']
+                if resumed:command+=['resume',request.resume_session_id]
+                if not request.protected_reads:
+                    command+=['-c','sandbox_mode="read-only"'] if resumed else ['--sandbox','read-only']
                 command+=['-c','approval_policy="never"','--json','--output-schema',str(rt/'schema.json'),'-o',str(rt/'output.json')]
                 if request.agent.model:command+=['--model',request.agent.model]
                 if request.agent.effort:command+=['-c','model_reasoning_effort='+json.dumps(request.agent.effort)]
-                result=sandbox.run(command+['-'],workspace=request.workspace,runtime=rt,environment=env,prompt=request.prompt,
-                    timeout=request.timeout_seconds,stop=request.stop)
+                def run(argv):
+                    return sandbox.run(argv+['-'],workspace=request.workspace,runtime=rt,environment=env,
+                        prompt=request.prompt,timeout=request.timeout_seconds,stop=request.stop)
+                if request.protected_reads:
+                    with TemporaryDirectory(prefix='ato-review-tool-') as scratch:
+                        temporary=Path(scratch).resolve()
+                        env['TMPDIR']=str(temporary)
+                        result=run(command+sandbox.guarded_codex_args(request.workspace,temporary,
+                            writable=False,denied=request.protected_reads))
+                else:
+                    result=run(command)
                 if result.code!='OK':return failed('AUTH_BLOCKED' if b'not logged in' in result.stderr.lower() else result.code)
                 events=[strict_json(line) for line in result.stdout.splitlines() if line.strip()]
                 started=[row.get('thread_id') for row in events if isinstance(row,dict) and row.get('type')=='thread.started']

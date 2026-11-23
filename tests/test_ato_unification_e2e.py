@@ -74,7 +74,8 @@ if sys.argv[1:] == ["--version"]:
     print("codex-cli 0.171.0")
     sys.exit(0)
 assert sys.argv[1] == "exec"
-assert sys.argv[sys.argv.index("--sandbox") + 1] == "read-only"
+assert "--sandbox" not in sys.argv
+assert 'default_permissions="ato-host"' in sys.argv
 assert "fixture output" in Path("delivery.txt").read_text()
 assert "Perform a read-only technical review" in sys.stdin.read()
 verdict = dict(verdict="approve", summary="Synthetic review passed", findings=[],
@@ -145,12 +146,14 @@ class InstalledATO(unittest.TestCase):
         self.worker_home = self.root / "worker home"
         self.native = self.worker_home / ".codex"
         self.reviewer_home = self.root / "reviewer home"
-        for home in (self.worker_home, self.native, self.reviewer_home):
+        self.proofs = self.root / "actors"
+        for home in (self.worker_home, self.native, self.reviewer_home, self.proofs):
             home.mkdir(mode=0o700)
         write(self.native, "mode", mode)
         worker = self.tool("worker", WORKER)
         reviewer = self.tool("reviewer", REVIEWER)
         self.registry("profile", dict(worker_executable=str(worker), worker_home=str(self.worker_home),
+                                     proof_roots=[str(self.proofs)],
                                      review_tools=[["codex", str(reviewer), str(self.reviewer_home)]]))
         self.host = Host(store=self.store).compose()
 

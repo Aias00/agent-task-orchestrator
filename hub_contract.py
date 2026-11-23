@@ -155,6 +155,7 @@ class HubTurnRequest:
     session_mode: str = 'resume_if_supported'
     timeout_seconds: int = 300
     provenance: str = 'fresh_only'
+    protected_reads: tuple = field(repr=False, default=())
 
     def __post_init__(self):
         require(type(self.agent) is HubAgentSpec and self.role in ('review','plan'))

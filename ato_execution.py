@@ -1086,6 +1086,8 @@ class _RunDriver:
         request = HubTurnRequest(agent, Path(self.run["worktree"]), self.host.runtime(), prompt,
             snapshot=self._snapshot_for_review, stop=self.host.stop, session_mode="fresh_only",
             timeout_seconds=policy["timeout_seconds"],
+            protected_reads=(*self.profile.reviewer_read_fences(self.store, agent.kind),
+                             Path(self.run["worktree"]) / ".codex/tasks"),
             provenance="fresh_only" if policy["session_mode"] == "fresh_only" else "ledger_reconstruction")
         if not self.profile.fixture:
             caps = adapter.capabilities()

@@ -26,15 +26,32 @@ class HostProfile:
     worker_home: str
     review_tools: tuple[tuple[str, str, str], ...] = ()
     fixture: bool = False
+    proof_roots: tuple[str, ...] = ()
 
     def document(self):
         return asdict(self)
 
     @classmethod
     def from_document(cls, row):
-        _fields(row, ("worker_executable", "worker_home", "review_tools", "fixture"))
+        _fields(row, ("worker_executable", "worker_home", "review_tools", "fixture"), ("proof_roots",))
         return cls(row["worker_executable"], row["worker_home"],
-                   tuple(tuple(tool) for tool in row["review_tools"]), row["fixture"])
+                   tuple(tuple(tool) for tool in row["review_tools"]), row["fixture"],
+                   tuple(row.get("proof_roots", ())))
+
+    def proof_directories(self, store):
+        roles = (Path(self.worker_home), *(Path(home) for _, _, home in self.review_tools))
+        roots = tuple(hub_sandbox.private_dir(Path(path)) for path in self.proof_roots)
+        _require(bool(roots) or self.fixture, "UNSUPPORTED_CAPABILITY")
+        _require(len(set(roots)) == len(roots) and not any(
+            _overlaps(path, other) for path in roots
+            for other in (store.home, *store.native_homes, *roles)
+        ), "UNSUPPORTED_CAPABILITY")
+        return roots
+
+    def protected_reads(self, store, *, own_home=None):
+        roles = (Path(self.worker_home), *(Path(home) for _, _, home in self.review_tools))
+        return (store.home, *store.native_homes, *self.proof_directories(store),
+                *(path for path in roles if path != own_home))
 
     def verify(self, store, task, spec, *, work):
         protected = (store.home, Path(task["repo"]["root"]), Path(task["worktree"]["path"]),
@@ -42,6 +59,10 @@ class HostProfile:
         _require(type(self.fixture) is bool, "UNSUPPORTED_CAPABILITY")
         if not self.fixture:
             _require(Path("/usr/bin/sandbox-exec").is_file(), "UNSUPPORTED_CAPABILITY")
+        proof_roots = self.proof_directories(store)
+        _require(not any(_overlaps(path, other) for path in proof_roots for other in protected),
+                 "UNSUPPORTED_CAPABILITY")
+        protected += (*store.native_homes, *proof_roots)
         homes = set()
         for executable, home in [(self.worker_executable, self.worker_home),
                                  *((tool, home) for _, tool, home in self.review_tools)]:
@@ -71,6 +92,14 @@ class HostProfile:
                     return _FixtureReview(path, home)
                 return FACTORIES[kind](executable=path, home=home)
         raise TaskError("UNSUPPORTED_CAPABILITY")
+
+    def reviewer_read_fences(self, store, kind):
+        if self.fixture:
+            return ()
+        own_home = next(Path(home) for vendor, _, home in self.review_tools if vendor == kind)
+        # A Codex tool runs in a separate native sandbox from its frontend.
+        # AGY/Claude frontends authenticate inside the outer fence.
+        return self.protected_reads(store, own_home=None if kind == "codex" else own_home)
 
 
 @dataclass(frozen=True)
@@ -169,9 +198,8 @@ class CommandHost:
                      *(root / name for name in binding["shared_link_identities"]),
                      *(Path(binding["repo"]) / name for name in binding["shared_link_identities"])):
             rules.append("(deny file-write* (subpath " + q(path) + "))")
-        rules.append("(deny file-read* (require-all (subpath " + q(self.driver.store.root)
-                     + ") (require-not (subpath " + q(runtime) + "))))")
-        rules.append("(deny file-read* (subpath " + q(root / ".codex/tasks") + "))")
+        rules.extend(hub_sandbox.read_denials(runtime,
+            (*self.profile.protected_reads(self.driver.store), root / ".codex/tasks")))
         profile = runtime / "profile.sb"
         hub_sandbox.write_private(profile, "\n".join(rules))
         return ["/usr/bin/sandbox-exec", "-f", str(profile), *argv]
@@ -196,7 +224,7 @@ class CommandHost:
             environment["TMPDIR"] = str(temporary)
             mode = args.index("--sandbox")
             args[mode:mode + 2] = hub_sandbox.guarded_codex_args(root, temporary,
-                writable=write, denied=(self.driver.store.root, root / ".codex/tasks"),
+                writable=write, denied=(*self.profile.protected_reads(self.driver.store), root / ".codex/tasks"),
                 read_only=(root / ".git", root / ".codex", root / ".ato",
                            *(root / name for name in binding["shared_link_identities"])))
             return run(args)
@@ -236,6 +264,9 @@ class CommandHost:
         # the sanitized child PATH for unqualified executable names.
         if "/" in executable and not Path(executable).is_absolute():
             args[0] = str(owner.repo / executable)
+        if output is None and not self.profile.fixture:
+            environment = hub_sandbox.clean_environment(tmp, tmp)
+            environment["GIT_OPTIONAL_LOCKS"] = "0"
         result = self._invoke(args, owner, runtime, environment, input_text or "", timeout, output, write)
         with log.open("xb") as stream:
             stream.write(result.stdout)

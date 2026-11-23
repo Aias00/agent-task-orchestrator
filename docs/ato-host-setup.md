@@ -14,10 +14,15 @@ directories and mode `0600` files. Preserve exact Task, Run, repository and
 generation values from the ledger for scoped grants. An adapter integration can
 call [Host](../ato_host.py) to compose the same services as the CLI.
 
-- `profile.json` contains `worker_executable`, `worker_home`, and
+- `profile.json` contains `worker_executable`, `worker_home`, `proof_roots`, and
   `review_tools` as an array of `[kind, executable, home]` triples. Use
-  canonical absolute executables and private homes. The bounded Worker profile
-  requires the local write sandbox. `ato agent doctor` reports local file
+  canonical absolute executables and private homes. Set `proof_roots` to the
+  existing, canonical `0700` directories that hold actor proof files. These
+  roots must be separate from repositories, ATO state and every configured
+  native home. Actor proofs are accepted only inside these roots. Command
+  tools and independent checks cannot read the proof roots, state or native
+  homes. AGY and Claude can read their own authentication home inside their
+  outer sandbox. `ato agent doctor` reports local file
   availability and capability evidence.
 - A proof file contains `version: 2`, an opaque `reference`, and
   `proof: {method, credential_ref, challenge}`. Use the local CLI proof

@@ -58,7 +58,7 @@ class Host:
         row = self.record("profile")
         if row is None:
             return None
-        _fields(row, ("worker_executable", "worker_home", "review_tools"))
+        _fields(row, ("worker_executable", "worker_home", "review_tools", "proof_roots"))
         return HostProfile.from_document(dict(row, fixture=False))
 
     def actor_file(self):
@@ -90,6 +90,10 @@ class Host:
         if locator is None:
             return None
         proof, ref, path = locator
+        profile = self.configured_profile()
+        if profile is None or (not profile.fixture and not any(
+                path.is_relative_to(parent) for parent in profile.proof_directories(self.store))):
+            return None
         row = self.credential(proof.credential_ref)
         if (row is None or row["reference"] != ref or not _matches(_SHA, row["token_hash"])
                 or not hmac.compare_digest(row["token_hash"], _sha(proof.challenge.encode()))):
