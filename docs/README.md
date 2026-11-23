@@ -30,6 +30,7 @@
 - [ATO 统一入口实施基线（T0）](ato-unified-baseline.md)
 - [ATO 统一公开接口与内部契约（T1）](ato-unified-contract.md)
 - [ATO 统一执行服务与 T4/T5 接口（T3）](ato-unified-execution.md)
+- [ATO 统一入口离线验收与审阅交接（T7）](ato-unified-review.md)
 - [W3 四个历史候选快照源码审计与处置建议（已评审通过，仅定性未实施）](w3-candidate-snapshots-audit.md)
 - [H1 可换长期主控（AGY / Claude / Codex）与隔离执行闭环设计（已批准，前置 Spike 通过）](hub-orchestrator-design.md)
 - [H1 前置只读 CLI 能力实测 Spike 记录（S1–S4）](h1-cli-spike.md)

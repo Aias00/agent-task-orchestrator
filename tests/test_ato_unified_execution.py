@@ -330,6 +330,30 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertFalse((self.worker_home / "attempts").exists())
         self.assert_error("RUN_UNSETTLED", self.service.resume, self.actor, task)
 
+    def test_startup_retries_a_task_read_during_atomic_replacement(self):
+        task = self.create()
+        await_start = self.service._await_start
+        load_task = self.store.load_task
+
+        def wait_during_replacement(*args):
+            raced = False
+
+            def load(task_id):
+                nonlocal raced
+                if not raced:
+                    raced = True
+                    raise TaskError("BUSY")
+                return load_task(task_id)
+
+            with patch.object(self.store, "load_task", side_effect=load):
+                await_start(*args)
+
+        with patch.object(self.service, "_await_start", side_effect=wait_during_replacement):
+            status = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(status["status"], "needs_acceptance")
+        self.assertEqual(status["stage"]["attempts"], 1)
+        self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work"])
+
     def test_current_native_lease_refuses_a_new_driver_despite_free_flock(self):
         task = self.create()
         stored = self.store.load_task(task)

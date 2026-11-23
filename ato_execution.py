@@ -726,8 +726,16 @@ class ExecutionService:
         deadline = time.monotonic() + self.startup_seconds
         birth = ato_process.identity(process.pid)
         while True:
-            task = self.store.load_task(run["task_id"])
-            _, receipts = self.store._run(task, run["run_id"])
+            try:
+                task = self.store.load_task(run["task_id"])
+                _, receipts = self.store._run(task, run["run_id"])
+            except TaskError as exc:
+                # The child can replace task.json between open and fstat.
+                # Retry observation within the startup deadline.
+                if exc.code != "BUSY" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.025)
+                continue
             if receipts:
                 last = receipts[-1][1]
                 if last["phase"] == "launch_failed":
