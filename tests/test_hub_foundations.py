@@ -45,6 +45,15 @@ class HubFoundationTests(unittest.TestCase):
         for kwargs in (dict(kind='agy',model='--model'),dict(kind='other'),dict(kind='agy',effort='--flag')):
             with self.assertRaises(ValueError):contract.HubAgentSpec(**kwargs)
 
+    def test_task_id_matches_worktree_identifier_before_provision(self):
+        for value in ('a','A0_-','x'*128):
+            with self.subTest(value=value):
+                self.assertEqual(contract.validate_task_spec(spec(self.repo,task=value))['task_id'],value)
+        for value in ('task.one','.', '..','a/b','-start','_start','x'*129,'',None,True):
+            with self.subTest(value=value),self.assertRaises(contract.HubError):
+                contract.validate_task_spec(dict(spec(self.repo),task_id=value))
+        self.assertEqual(contract.token('finding.1'),'finding.1')
+
     def test_O4_provision_fixed_commit_dependency_and_collision_refusals(self):
         (self.repo/'.venv').mkdir();(self.repo/'.venv/marker').write_text('synthetic dependency')
         base=git(self.repo,'rev-parse','HEAD')
@@ -155,7 +164,9 @@ class HubFoundationTests(unittest.TestCase):
     def test_O8_loopback_proxy_opt_in_rejects_remote_or_credentialed_urls(self):
         self.assertEqual(sandbox.validate_loopback_proxy('http://127.0.0.1:7890'),'http://127.0.0.1:7890')
         self.assertEqual(sandbox.validate_loopback_proxy('socks5h://localhost:7890'),'socks5h://localhost:7890')
-        for bad in ('http://evil.example:8080','http://user:pass@127.0.0.1:7890','http://127.0.0.1:7890/path',
+        for bad in ('http://evil.example:8080','http://@127.0.0.1:7890','http://:@127.0.0.1:7890',
+                    'http://user@127.0.0.1:7890','http://:pass@127.0.0.1:7890','http://@localhost:7890',
+                    'http://@[::1]:7890','http://user:pass@127.0.0.1:7890','http://127.0.0.1:7890/path',
                     'http://127.0.0.1','ftp://127.0.0.1:21','http://127.0.0.1:7890?a=1'):
             with self.subTest(bad=bad),self.assertRaisesRegex(ValueError,'INVALID_LOOPBACK_PROXY'):
                 sandbox.validate_loopback_proxy(bad)

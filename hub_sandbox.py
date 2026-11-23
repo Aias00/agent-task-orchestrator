@@ -44,7 +44,7 @@ def validate_loopback_proxy(value):
     if (parsed.scheme not in ('http','https','socks5','socks5h')
             or parsed.hostname not in ('127.0.0.1','::1','localhost')
             or port is None or not (1<=port<=65535)
-            or parsed.username or parsed.password
+            or parsed.username is not None or parsed.password is not None or '@' in parsed.netloc
             or parsed.path not in ('','/') or parsed.query or parsed.fragment):
         raise ValueError('INVALID_LOOPBACK_PROXY')
     return value

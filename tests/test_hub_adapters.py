@@ -61,6 +61,23 @@ class HubAdapterTests(unittest.TestCase):
                 self.assertIn(first.session_id,adapter.attach_argv(first.session_id,self.repo))
                 self.assertNotIn(self.secret,json.dumps([doctor,asdict(first),asdict(second)]))
 
+    def test_doctor_error_codes_survive_without_launch_or_diagnostics_leak(self):
+        for klass in CLASSES:
+            folder=self.root/klass.kind;folder.mkdir()
+            adapter=adapter_fixture(folder,klass,dict(verdict=verdict()))
+            for code in ('EXECUTABLE_UNAVAILABLE','TIMEOUT','VERSION_MISMATCH'):
+                with self.subTest(kind=klass.kind,code=code):
+                    diagnostic=dict(available=False,code=code,stderr=self.secret+' /private/fixture-path')
+                    with patch.object(adapter,'doctor',return_value=diagnostic) as doctor,patch(
+                            'hub_sandbox.turn_context',side_effect=AssertionError('must not launch')):
+                        result=adapter.run_turn(self.request(adapter))
+                    doctor.assert_called_once_with()
+                    self.assertEqual(result.code,code)
+                    encoded=json.dumps(asdict(result))
+                    self.assertNotIn(self.secret,encoded)
+                    self.assertNotIn('/private/fixture-path',encoded)
+                    self.assertNotIn('stderr',encoded)
+
     def test_O2_each_malformed_auth_failure_timeout_is_closed(self):
         for klass in CLASSES:
             folder=self.root/klass.kind;folder.mkdir()

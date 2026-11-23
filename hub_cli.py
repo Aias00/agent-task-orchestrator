@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-from hub_contract import HubAgentSpec, KINDS, require, strict_json
+from hub_contract import HubAgentSpec, HubError, KINDS, require, strict_json
 from hub_ledger import HubLedger, canonical
 from hub_loop import HubLoop
 from hub_registry import HubRegistry
@@ -74,7 +74,9 @@ def dispatch(args,*,registry=None,worker_tools=None):
 def main(argv=None):
     args=parser().parse_args(argv)
     try:result=dispatch(args)
-    except (ValueError,OSError,KeyError,TypeError):
+    except HubError as error:
+        print(json.dumps(dict(status='refused',code=str(error))));return 2
+    except Exception:
         print(json.dumps(dict(status='refused',code='HUB_COMMAND_REFUSED')));return 2
     print(json.dumps(result,ensure_ascii=False,allow_nan=False));return 0
 

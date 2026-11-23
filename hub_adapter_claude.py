@@ -34,7 +34,7 @@ class ClaudeHubAdapter:
             require(request.agent.kind==self.kind)
             require(request.session_mode!='require_resume','RESUME_NOT_QUALIFIED')
             def invoke():
-                require(self.doctor()['available'],'VERSION_MISMATCH')
+                doc=self.doctor();require(doc['available'],doc['code'])
                 rt,env,prefix=sandbox.turn_context(request,self.executable,self.home,
                     writable_native=(self.home/'.claude',self.home/'.claude.json',Path('/tmp').resolve()/('claude-'+str(os.getuid()))),
                     proxy=self.proxy)

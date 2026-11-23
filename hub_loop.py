@@ -78,7 +78,9 @@ class HubLoop:
         if worker_codex_home is not None:
             path=canonical(worker_codex_home)
             repo=Path(self.ledger.hub()['repo'])
-            require(path.is_dir() and path!=repo and not path.is_relative_to(repo),'UNSAFE_WORKER_CODEX_HOME')
+            require(path.is_dir() and path!=repo and not path.is_relative_to(repo)
+                and not path.is_relative_to(self.ledger.root)
+                and not self.ledger.root.is_relative_to(path),'UNSAFE_WORKER_CODEX_HOME')
             self.worker_codex_home=path
         else:
             self.worker_codex_home=None
@@ -277,7 +279,7 @@ class HubLoop:
             # ready is a hard terminal; interrupted execution never adopts a
             # saved process/session automatically. An operator must investigate.
             if state['status']=='ready_for_user_review':return state
-            if state['status'] in ('stopped','cleanup_blocked','cleaned','error','limit') or state.get('code')=='INTERRUPTED_OPERATION':
+            if state['status'] in ('stopped','cleanup_blocked','cleaned','error','limit') or state.get('code') in ('INTERRUPTED_OPERATION','REVIEWER_MUTATION_VIOLATION'):
                 return state
             if state['status'] in ('running_worker','reviewing','fixing'):
                 self.transition(identifier,state,'blocked','INTERRUPTED_OPERATION');return state

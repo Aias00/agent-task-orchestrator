@@ -1,4 +1,6 @@
 import ast
+from contextlib import redirect_stdout, redirect_stderr
+import io
 import hashlib
 import json
 import os
@@ -12,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 import hub_cli
-from hub_contract import HubAgentSpec
+from hub_contract import HubAgentSpec, HubError
 from hub_ledger import HubLedger
 from hub_loop import HubLoop
 from hub_registry import HubRegistry
@@ -110,6 +112,47 @@ class HubLoopTests(unittest.TestCase):
                 state=self.loop.run(mode);self.assertEqual(state['status'],'blocked',state)
                 if mode=='mutation':self.assertEqual(state['code'],'REVIEWER_MUTATION_VIOLATION')
                 self.assertEqual(state['review_round'],1)
+
+    def test_mutation_violation_is_terminal_for_run_and_review_only(self):
+        codex=adapter_fixture(self.root,CodexHubAdapter,dict(verdict=verdict(),mode='mutate'))
+        self.registry.register(codex)
+        self.ledger.switch_agent(HubAgentSpec('codex'),'synthetic mutation regression')
+        self.create()
+        state=self.loop.run('task-one')
+        self.assertEqual((state['status'],state['code']),('blocked','REVIEWER_MUTATION_VIOLATION'))
+        frozen=json.dumps(self.state(),sort_keys=True)
+        with patch.object(self.loop,'worker',side_effect=AssertionError('must not run worker')),patch.object(
+                codex,'run_turn',side_effect=AssertionError('must not run reviewer')),patch(
+                'hub_worktree.provision',side_effect=AssertionError('must not provision')):
+            for review_only in (False,True,True):
+                self.assertEqual(self.loop.run('task-one',review_only=review_only),state)
+                self.assertEqual(json.dumps(self.state(),sort_keys=True),frozen)
+                self.assertNotEqual(self.state()['status'],'ready_for_user_review')
+
+    def test_worker_codex_home_cannot_overlap_ledger_in_either_direction(self):
+        child=self.ledger.root/'native-home';child.mkdir(mode=0o700)
+        for path in (self.ledger.root,child,self.ledger.root.parent):
+            with self.subTest(path=path),self.assertRaisesRegex(HubError,'UNSAFE_WORKER_CODEX_HOME'):
+                HubLoop(self.ledger,self.registry,worker_codex_home=path)
+        outside=self.root/'separate-native';outside.mkdir(mode=0o700)
+        self.assertEqual(HubLoop(self.ledger,self.registry,worker_codex_home=outside).worker_codex_home,outside)
+
+    def test_cli_preserves_safe_hub_codes_but_redacts_other_exceptions(self):
+        for code in ('HUB_BUSY','ATTACH_NOT_QUALIFIED','EXPLICIT_ATO_HOME_REQUIRED'):
+            out=io.StringIO();err=io.StringIO()
+            with patch.object(hub_cli,'dispatch',side_effect=HubError(code)),redirect_stdout(out),redirect_stderr(err):
+                result=hub_cli.main(['hub-status',self.ledger.identifier])
+            self.assertEqual(result,2)
+            self.assertEqual(json.loads(out.getvalue()),dict(status='refused',code=code))
+            self.assertEqual(err.getvalue(),'')
+        for klass in (ValueError,OSError,KeyError,TypeError,RuntimeError):
+            detail=self.secret+' /private/fixture-path raw-stderr'
+            out=io.StringIO();err=io.StringIO()
+            with patch.object(hub_cli,'dispatch',side_effect=klass(detail)),redirect_stdout(out),redirect_stderr(err):
+                self.assertEqual(hub_cli.main(['hub-status',self.ledger.identifier]),2)
+            self.assertEqual(json.loads(out.getvalue()),dict(status='refused',code='HUB_COMMAND_REFUSED'))
+            self.assertEqual(err.getvalue(),'')
+            self.assertNotIn(detail,out.getvalue())
 
     def test_O6_STOP_reaches_real_TERM_ignoring_worker_group(self):
         pids=self.root/'worker-pids.json';self.worker_config(mode='stall',pids=str(pids));self.create()

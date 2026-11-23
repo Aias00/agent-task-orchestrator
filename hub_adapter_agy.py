@@ -33,7 +33,7 @@ class AgyHubAdapter:
         try:
             require(request.agent.kind==self.kind)
             def invoke():
-                require(self.doctor()['available'],'VERSION_MISMATCH')
+                doc=self.doctor();require(doc['available'],doc['code'])
                 persistent=request.session_mode!='fresh_only'
                 writable=(self.home/'.gemini/antigravity-cli',) if persistent else ()
                 rt,env,prefix=sandbox.turn_context(request,self.executable,self.home,writable_native=writable,proxy=self.proxy)

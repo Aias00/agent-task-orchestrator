@@ -199,7 +199,8 @@ HUB_TASK_SPEC_SCHEMA = dict(type='object',additionalProperties=False,
 
 def validate_task_spec(value):
     exact(value,HUB_TASK_SPEC_SCHEMA['required']);require(type(value['schema_version']) is int and value['schema_version']==1)
-    token(value['task_id']);text(value['repo'],4096);require(value['repo'].startswith('/'))
+    require(isinstance(value['task_id'],str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}',value['task_id']))
+    text(value['repo'],4096);require(value['repo'].startswith('/'))
     for key in ('base_ref','branch'):
         text(value[key],255);require(not value[key].startswith('-') and '\n' not in value[key])
     require(value['branch'] not in ('main','master'))

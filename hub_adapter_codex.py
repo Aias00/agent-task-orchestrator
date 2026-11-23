@@ -32,7 +32,7 @@ class CodexHubAdapter:
         try:
             require(request.agent.kind==self.kind)
             def invoke():
-                require(self.doctor()['available'],'VERSION_MISMATCH')
+                doc=self.doctor();require(doc['available'],doc['code'])
                 rt,env,_=sandbox.turn_context(request,self.executable,self.home,outer=False,codex=True,proxy=self.proxy)
                 schema=REVIEW_VERDICT_SCHEMA if request.role=='review' else HUB_TASK_SPEC_SCHEMA
                 sandbox.write_private(rt/'schema.json',json.dumps(schema))
