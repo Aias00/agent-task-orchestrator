@@ -7,8 +7,9 @@ import stat
 import subprocess
 
 import ato_core as core
+from hub_contract import SHARED_ENV_LINKS
 
-SHARED = frozenset(('.venv','integrations/pi-acp/node_modules'))
+SHARED = SHARED_ENV_LINKS
 
 
 def canonical(value, *, exists=True):
@@ -52,7 +53,7 @@ def provision(repo, task_id, branch, base_ref, *, parent_dir=None, shared_env_li
         raise ValueError('UNREVIEWED_SHARED_DEPENDENCY')
     for name in shared_env_links:
         source=repo/name
-        if (not source.exists() or source.is_symlink() or git(repo,'ls-files','--',name).strip()
+        if (not source.is_dir() or source.is_symlink() or source!=source.resolve() or git(repo,'ls-files','--',name).strip()
                 or subprocess.run(['git','-C',str(repo),'check-ignore','--no-index','-q','--',name],capture_output=True).returncode):
             raise ValueError('SHARED_DEPENDENCY_NOT_IGNORED')
     git(repo,'worktree','add','-b',branch,str(target),base)
@@ -68,10 +69,16 @@ def provision(repo, task_id, branch, base_ref, *, parent_dir=None, shared_env_li
 
 
 def snapshot_integrity(worktree):
-    root=repository(worktree);files={};total=0
+    root=repository(worktree);files={};total=0;shared=set()
     for name in SHARED:
         path=root/name
-        if path.exists() or path.is_symlink():
+        # Vendored/tracked directories are source, even when their basename is
+        # a supported dependency name. Only shared links/ignored untracked dirs
+        # are excluded from traversal.
+        excluded=path.is_symlink() or (path.is_dir() and not git(root,'ls-files','--',name).strip()
+            and subprocess.run(['git','-C',str(root),'check-ignore','--no-index','-q','--',name],capture_output=True).returncode==0)
+        if excluded:
+            shared.add(name)
             info=path.lstat()
             files[name]=['shared-entry',info.st_mode,info.st_ino,os.readlink(path) if path.is_symlink() else None]
     # Include ignored task/scratch files as well, except explicitly shared
@@ -79,10 +86,10 @@ def snapshot_integrity(worktree):
     for directory,folders,names in os.walk(root,followlinks=False):
         base=Path(directory)
         folders[:]=sorted(name for name in folders if name!='.git'
-            and str((base/name).relative_to(root)) not in SHARED)
+            and str((base/name).relative_to(root)) not in shared)
         for name in sorted([*names,*[n for n in folders if (base/n).is_symlink()]]):
             path=base/name;relative=str(path.relative_to(root));info=path.lstat()
-            if relative in SHARED:continue
+            if relative in shared:continue
             if stat.S_ISLNK(info.st_mode):value=['link',os.readlink(path)]
             elif stat.S_ISREG(info.st_mode):
                 total+=info.st_size
@@ -95,7 +102,7 @@ def snapshot_integrity(worktree):
     # just HEAD. Ignore task receipts for this fingerprint, but retain them in
     # files_sha above so a reviewer cannot mutate ignored files unnoticed.
     source_names=git(root,'ls-files','--cached','--others','--exclude-standard','-z').split('\x00')
-    source={name:files.get(name,['missing']) for name in source_names if name and name not in SHARED}
+    source={name:files.get(name,['missing']) for name in source_names if name and name not in shared}
     return dict(head_sha=head,tree_sha=core.digest(source),head_tree_sha=git(root,'rev-parse','HEAD^{tree}').strip(),
         status_porcelain=git(root,'status','--porcelain=v1','--untracked-files=all'),files_sha=core.digest(files),
         index_sha=hashlib.sha256(git(root,'diff','--cached','--binary','HEAD').encode()).hexdigest())
@@ -134,7 +141,9 @@ def cleanup(binding):
     # this never changes the main repository's Git config/excludes or sources.
     for name in binding.get('shared_env_links',[]):
         path=root/name
-        if name not in SHARED or not path.is_symlink() or path.resolve()!= (repo/name).resolve():
+        source=repo/name
+        if (name not in SHARED or not path.is_symlink() or not source.is_dir() or source!=source.resolve()
+                or os.readlink(path)!=os.path.relpath(source,path.parent) or path.resolve()!=source):
             raise ValueError('SHARED_DEPENDENCY_CHANGED')
         status=[line for line in status if line!='?? '+name]
     if status:raise ValueError('DIRTY_WORKTREE')

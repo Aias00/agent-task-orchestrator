@@ -7,6 +7,7 @@ import re
 from typing import Callable, Protocol
 
 KINDS = ('agy', 'claude', 'codex')
+SHARED_ENV_LINKS = frozenset(('.venv', 'venv', 'node_modules', 'integrations/pi-acp/node_modules'))
 CAPABILITIES = ('structured_output', 'session_resume', 'interactive_attach',
                 'read_only_cli', 'os_sandbox_compatible', 'long_lived_stream')
 MODES = ('fresh_only', 'resume_if_supported', 'require_resume')
@@ -233,5 +234,5 @@ def validate_task_spec(value):
     worktree=value['worktree_policy'];exact(worktree,('parent_dir','shared_env_links'))
     require(worktree['parent_dir'] is None or isinstance(worktree['parent_dir'],str) and worktree['parent_dir'].startswith('/'))
     require(isinstance(worktree['shared_env_links'],list) and len(set(worktree['shared_env_links']))==len(worktree['shared_env_links']))
-    require(set(worktree['shared_env_links'])<={'.venv','integrations/pi-acp/node_modules'})
+    require(set(worktree['shared_env_links'])<=SHARED_ENV_LINKS)
     return value

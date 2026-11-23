@@ -6,8 +6,12 @@ description: Drive an approved isolated ATO work/check/read-only-review workflow
 # ATO hub orchestration
 
 Read [the implementation guide](../../docs/h1-offline-implementation.md) for the
-source-only CLI and qualification boundaries. Use the reviewed checkout's Python
-and `hub_cli.py`; this skill does not install launchers or enable a service.
+CLI and qualification boundaries. Use `ato-hub` when explicitly installed from
+the reviewed checkout; otherwise use that checkout's Python and `hub_cli.py`
+with an explicit private `ATO_HOME`. Installation is a separate authorized action
+(`install.py --hub`, optional `--hub-skills-dir`), never an automatic skill step.
+The launcher defaults unset `ATO_HOME` to `$HOME/.local/share/ato-hub-state`;
+an existing value is retained. This skill enables no service.
 
 For an approved objective, freeze a hub task spec with the original scope,
 authorization, worker agent, sandbox/permissions and independent host check argv.
@@ -16,12 +20,28 @@ the hub's active agent controls subsequent review turns. Keep memory disabled.
 Use an explicit private `ATO_HOME` outside the repository. A new task provisions
 one new external worktree/branch and refuses collisions.
 
-Create a hub (`hub-create`) and task (`task-create --spec`), then execute
+First run `ato-hub hub-list --repo REPO` with the canonical repository path.
+Reuse a matching logical Hub; create one (`hub-create`) when none matches.
+The list is a read-only, redacted summary, not a resume grant. Create the task
+(`task-create --spec`), then execute
 `task-run HUB_ID TASK_ID`. For authorized background execution, keep its actual
 process/log identity and inspect `task-status`; a tool call returning does not
 prove a background process exists. Terminal notifications default to durable
 `recorded_only` evidence. No interactive wake-up is promised without a separately
 configured trusted notification hook.
+
+Shared dependencies are explicit: `shared_env_links` allows only `.venv`, `venv`,
+`node_modules`, `integrations/pi-acp/node_modules`. Each source must be an
+existing ignored, untracked directory, with no symlink alias or existing target.
+The link grants no additional write authority; cleanup retains the source.
+
+Only for authorized network/model work, pass the reviewed native home and a
+credential-free loopback proxy explicitly, for example:
+`ato-hub task-run HUB_ID TASK_ID --worker-codex-home NATIVE_HOME --proxy http://127.0.0.1:7890`.
+Native home must be canonical and outside the ledger. `ATO_HOME` stays isolated;
+never copy credentials into the spec or ledger. `task-review-only` accepts
+`--proxy`, not worker credentials. Ambient authentication/proxy settings are not
+implicitly adopted, and offline fixture success grants no network permission.
 
 On completion, read the state, frozen host check evidence and `reviews/round-N.md`.
 Report branch, base, worktree, checks, review verdict and remaining manual

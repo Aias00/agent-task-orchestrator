@@ -36,6 +36,93 @@ class HubFoundationTests(unittest.TestCase):
             value=copy.deepcopy(a);value['findings'][0]['file']=path
             with self.assertRaises(contract.HubError):contract.validate_review_verdict(value)
 
+    def test_hub_list_empty_is_read_only_and_rejects_indirect_or_nonprivate_roots(self):
+        self.assertEqual(ledger.HubLedger.list_hubs(),[])
+        self.assertFalse((self.root/'ato').exists())
+        base=self.root/'ato';base.mkdir(mode=0o700)
+        target=self.root/'outside';target.mkdir(mode=0o700)
+        (base/'hubs').symlink_to(target,target_is_directory=True)
+        with self.assertRaises(ValueError):ledger.HubLedger.list_hubs()
+        (base/'hubs').unlink();(base/'hubs').mkdir(mode=0o755)
+        with self.assertRaises(ValueError):ledger.HubLedger.list_hubs()
+
+    def test_hub_list_sorted_private_summaries_filter_busy_and_never_create_lock(self):
+        books=[ledger.HubLedger.create(self.repo,contract.HubAgentSpec(kind)) for kind in ('agy','codex')]
+        second=self.root/'project-more';second.mkdir();other=repository(second)
+        books.append(ledger.HubLedger.create(other,contract.HubAgentSpec('claude')))
+        books[0].create_task(spec(self.repo))
+        secret='synthetic-list-secret-must-not-escape'
+        row=books[0].hub();row['api_key']=secret;row['active_agent']['api_key']=secret
+        row['native_sessions']['agy']=dict(session_id=secret,state='active',transcript=secret)
+        ledger.save(books[0].root/'hub.json',row)
+        for book in books:(book.root/'.hub.lock').unlink()
+        def snapshot():
+            return {str(p): (p.stat().st_mode,p.stat().st_mtime_ns,p.read_bytes() if p.is_file() else None)
+                    for p in (self.root/'ato').rglob('*')}
+        before=snapshot();result=ledger.HubLedger.list_hubs()
+        self.assertEqual(before,snapshot())
+        self.assertEqual([r['hub_id'] for r in result],sorted(b.identifier for b in books))
+        self.assertNotIn(secret,json.dumps(result))
+        filtered=ledger.HubLedger.list_hubs(self.repo)
+        self.assertEqual({r['hub_id'] for r in filtered},{b.identifier for b in books[:2]})
+        self.assertEqual(set(filtered[0]),{'hub_id','repo','active_agent','hub_busy','active_session_state','task_count'})
+        first=next(r for r in filtered if r['hub_id']==books[0].identifier)
+        self.assertEqual((first['task_count'],first['active_session_state']),(1,'active'))
+        with books[0].locked():
+            self.assertTrue(next(r for r in ledger.HubLedger.list_hubs() if r['hub_id']==books[0].identifier)['hub_busy'])
+        alias=self.root/'alias';alias.symlink_to(self.repo,target_is_directory=True)
+        with self.assertRaises(ValueError):ledger.HubLedger.list_hubs(alias)
+        link=self.root/'ato/hubs/hub-link';link.symlink_to(books[0].root,target_is_directory=True)
+        with self.assertRaises(ValueError):ledger.HubLedger.list_hubs()
+
+    def test_multilanguage_shared_dependencies_ignore_tracking_tripwire_and_cleanup(self):
+        self.assertEqual(worktree.SHARED,contract.SHARED_ENV_LINKS)
+        (self.repo/'.gitignore').write_text('.codex/\nnode_modules/\nvenv/\n')
+        git(self.repo,'add','.gitignore');git(self.repo,'commit','-qm','ignore development dependencies')
+        for name in ('node_modules','venv'):
+            dependency=self.repo/name;dependency.mkdir();(dependency/'marker').write_text('dependency')
+        value=spec(self.repo);value['worktree_policy']['shared_env_links']=['node_modules','venv']
+        contract.validate_task_spec(value)
+        binding=worktree.provision(self.repo,'poly','feat/poly','main',shared_env_links=['node_modules','venv'])
+        path=Path(binding['path']);before=worktree.snapshot_integrity(path)
+        for name in ('node_modules','venv'):
+            self.assertTrue((path/name).is_symlink());(self.repo/name/'marker').write_text('updated dependency')
+        self.assertEqual(before,worktree.snapshot_integrity(path))
+        link=path/'venv';original=os.readlink(link);link.unlink();link.symlink_to(self.repo/'venv',target_is_directory=True)
+        self.assertNotEqual(before,worktree.snapshot_integrity(path))
+        with self.assertRaisesRegex(ValueError,'SHARED_DEPENDENCY_CHANGED'):worktree.cleanup(binding)
+        link.unlink();link.symlink_to(original,target_is_directory=True)
+        worktree.cleanup(binding);self.assertFalse(path.exists())
+        self.assertEqual((self.repo/'venv/marker').read_text(),'updated dependency')
+        for name in ('node_modules','venv'):
+            git(self.repo,'add','-f',name);git(self.repo,'commit','-qm','vendored '+name)
+            old=worktree.snapshot_integrity(self.repo);(self.repo/name/'marker').write_text('vendored change')
+            self.assertNotEqual(old,worktree.snapshot_integrity(self.repo))
+            with self.assertRaisesRegex(ValueError,'SHARED_DEPENDENCY_NOT_IGNORED'):
+                worktree.provision(self.repo,'tracked-'+name,'feat/tracked-'+name,'main',shared_env_links=[name])
+
+    def test_multilanguage_nonignored_or_symlink_dependency_is_refused(self):
+        for name in ('node_modules','venv'):
+            path=self.repo/name;path.mkdir()
+            with self.assertRaisesRegex(ValueError,'SHARED_DEPENDENCY_NOT_IGNORED'):
+                worktree.provision(self.repo,name,'feat/'+name,'main',shared_env_links=[name])
+            path.rmdir();target=self.root/name;target.mkdir();path.symlink_to(target,target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'SHARED_DEPENDENCY_NOT_IGNORED'):
+                worktree.provision(self.repo,name,'feat/'+name,'main',shared_env_links=[name])
+
+    def test_multilanguage_dependency_cannot_overwrite_an_older_base_tree_target(self):
+        (self.repo/'.gitignore').write_text('.codex/\nnode_modules/\nvenv/\n')
+        git(self.repo,'add','.gitignore');git(self.repo,'commit','-qm','ignored development roots')
+        for name in ('node_modules','venv'):
+            source=self.repo/name;source.mkdir();(source/'file').write_text('original dependency')
+            git(self.repo,'add','-f',name);git(self.repo,'commit','-qm','old tracked dependency')
+            old=git(self.repo,'rev-parse','HEAD')
+            git(self.repo,'rm','-r','--cached',name);git(self.repo,'commit','-qm','untrack dependency')
+            with self.assertRaisesRegex(ValueError,'SHARED_DEPENDENCY_COLLISION'):
+                worktree.provision(self.repo,'collision-'+name,'feat/collision-'+name,old,shared_env_links=[name])
+            target=self.root/('project-hub-collision-'+name)/name
+            self.assertFalse(target.is_symlink());self.assertEqual((target/'file').read_text(),'original dependency')
+
     def test_O1_spec_manual_gate_and_no_flag_injection(self):
         value=spec(self.repo);self.assertIs(contract.validate_task_spec(value),value)
         for change in (dict(schema_version=True),dict(unknown=True),dict(branch='main')):

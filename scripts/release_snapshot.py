@@ -25,6 +25,7 @@ import time
 import uuid
 
 ENTRIES = ('ctask', 'ctask-notify', 'ato-read-handoff')
+HUB_ENTRY = 'ato-hub'
 BUSY = frozenset(('queued', 'claimed', 'dispatching', 'delivery_unknown'))
 POLICIES = ('hub.json', 'notification-policy.json', 'notification-project-mutes.json',
             'time-policy.json', 'failure-alerts.json', 'control/config.json')
@@ -106,16 +107,34 @@ def file_record(path):
                 mode=stat.S_IMODE(path.stat().st_mode), sha256=sha(path))
 
 
-def entrypoints(bin_dir):
-    return {name: file_record(bin_dir/name) for name in ENTRIES}
+def hub_selected(bin_dir, include_hub=False):
+    path = bin_dir/HUB_ENTRY
+    return include_hub or path.exists() or path.is_symlink()
+
+
+def entry_names(entries):
+    # JSON journals sort object keys; replacement order remains the historical
+    # three-entry order with the optional hub appended last.
+    return ENTRIES + ((HUB_ENTRY,) if HUB_ENTRY in entries else ())
+
+
+def entrypoints(bin_dir, *, include_hub=False):
+    result = {name: file_record(bin_dir/name) for name in ENTRIES}
+    if hub_selected(bin_dir, include_hub):
+        path = bin_dir/HUB_ENTRY
+        # None is an explicit prior absence, never a fabricated backup.
+        result[HUB_ENTRY] = file_record(path) if path.exists() or path.is_symlink() else None
+    return result
 
 
 def launcher_sources(entries):
     """Parse every launcher without running it; a mixed installation is valid input."""
-    require(set(entries) == set(ENTRIES), 'expected all three installed entrypoints')
+    require(set(ENTRIES) <= set(entries) <= set((*ENTRIES, HUB_ENTRY)), 'expected all three installed entrypoints')
     selected = {}
-    for name in ENTRIES:
+    for name in entry_names(entries):
         row = entries[name]
+        if name == HUB_ENTRY and row is None:
+            continue
         data = base64.b64decode(row['data'], validate=True)
         require(hashlib.sha256(data).hexdigest() == row['sha256'], 'entrypoint backup checksum mismatch: '+name)
         lines = data.decode().splitlines()
@@ -125,7 +144,8 @@ def launcher_sources(entries):
         _, python, script, _ = commands[0]
         root = Path(script).parent
         require(Path(python).is_absolute() and root.is_absolute() and
-                Path(script).name == ('coordination.py' if name == 'ato-read-handoff' else 'runner.py'),
+                Path(script).name == ('hub_cli.py' if name == HUB_ENTRY else
+                                     'coordination.py' if name == 'ato-read-handoff' else 'runner.py'),
                 'unrecognized installed source: '+name)
         require(Path(python).is_file() and Path(script).is_file(),
                 'previous source is unavailable: '+name)
@@ -135,7 +155,7 @@ def launcher_sources(entries):
 
 def launcher_source(entries):
     sources = launcher_sources(entries)
-    require(len({(s['root'], s['python']) for s in sources.values()}) == 1,
+    require(len({(sources[name]['root'], sources[name]['python']) for name in ENTRIES}) == 1,
             'entrypoints select different sources')
     return {k: sources['ctask-notify'][k] for k in ('root', 'python')}
 
@@ -233,7 +253,7 @@ def seal(root):
     root.chmod(0o500)
 
 
-def verify_snapshot(root, commit):
+def verify_snapshot(root, commit, *, include_hub=False):
     require(root.is_dir() and not root.is_symlink(), 'snapshot must be a real directory')
     manifest = read(root/MANIFEST)
     require(manifest.get('version') == 1 and manifest.get('qualified') is True and
@@ -249,6 +269,8 @@ def verify_snapshot(root, commit):
     require(all(not row.get('mode', 0) & 0o222 for row in actual.values()), 'snapshot contains writable files')
     for name in ('runner.py', 'coordination.py', '.venv/bin/python', 'scripts/install.py'):
         require((root/name).is_file(), 'incomplete snapshot: '+name)
+    if include_hub:
+        require((root/'hub_cli.py').is_file(), 'incomplete snapshot: hub_cli.py')
     return manifest
 
 
@@ -333,7 +355,7 @@ def qualify(root, env):
     run_logged([python, '-m', 'py_compile', *[p for p in sources if p.endswith('.py')]], root, env, 'compile')
 
 
-def stage(repo, commit, root, *, node_bin=None, npm_bin=None):
+def stage(repo, commit, root, *, node_bin=None, npm_bin=None, include_hub=False):
     require(sys.version_info >= (3, 12), 'Python 3.12 or later is required')
     commit, tree = git_commit(repo, commit)
     require(not root.exists() and not root.is_symlink(), 'snapshot destination already exists; never reuse it')
@@ -376,7 +398,10 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None):
         save(root/MANIFEST, manifest)
         (root/MANIFEST).chmod(0o400)
         root.chmod(0o500)
-        verify_snapshot(root, commit)
+        if include_hub:
+            verify_snapshot(root, commit, include_hub=True)
+        else:
+            verify_snapshot(root, commit)
         return dict(snapshot=str(root), commit=commit, tree=tree, qualified=True, activated=False)
     except BaseException:
         # Keep failed evidence; absence of a sealed qualified manifest prevents
@@ -472,10 +497,10 @@ class System:
         raise Refused('controller did not produce two independently verified healthy heartbeats')
 
 
-def inspect(bin_dir, state, system, *, allow_mixed=False):
-    entries = entrypoints(bin_dir)
+def inspect(bin_dir, state, system, *, allow_mixed=False, include_hub=False):
+    entries = entrypoints(bin_dir, include_hub=True) if hub_selected(bin_dir, include_hub) else entrypoints(bin_dir)
     sources = launcher_sources(entries)
-    mixed = len({(s['root'], s['python']) for s in sources.values()}) != 1
+    mixed = len({(sources[name]['root'], sources[name]['python']) for name in ENTRIES}) != 1
     require(not mixed or allow_mixed,
             'entrypoints select different sources; explicit --converge-mixed-entrypoints is required')
     # The notification launcher owns the observer, independently of ctask and
@@ -514,12 +539,15 @@ def atomic_entry(path, row):
         temp.unlink(missing_ok=True)
 
 
-def generated_entries(root, bin_dir):
+def generated_entries(root, bin_dir, *, include_hub=False):
+    include_hub = hub_selected(bin_dir, include_hub)
     with tempfile.TemporaryDirectory(prefix='ato-release-launchers-') as folder:
         stage_bin = Path(folder)
         env = environment(stage_bin/'ato', stage_bin/'native', bin_dir)
-        subprocess.run([str(root/'.venv/bin/python'), str(root/'scripts/install.py'),
-                        '--helpers', '--bin-dir', str(stage_bin)], env=env,
+        argv = [str(root/'.venv/bin/python'), str(root/'scripts/install.py'), '--helpers', '--bin-dir', str(stage_bin)]
+        if include_hub:
+            argv.append('--hub')
+        subprocess.run(argv, env=env,
                        check=True, capture_output=True, timeout=30)
         result = entrypoints(stage_bin)
         for row in result.values():
@@ -553,10 +581,15 @@ def restore(journal, bin_dir, state, env, system):
             'recorded prior observer differs from notification launcher')
     # A crash can leave a partial set. Restore only our old/new bytes, never
     # overwrite a third party's later installation.
-    current = entrypoints(bin_dir)
-    for name in ENTRIES:
-        require(current[name]['sha256'] in (old['entries'][name]['sha256'], journal['after_entries'][name]['sha256']),
-                'entrypoint changed outside this transaction: '+name)
+    current = entrypoints(bin_dir, include_hub=True) if HUB_ENTRY in old['entries'] else entrypoints(bin_dir)
+    require(set(current) == set(old['entries']) == set(journal['after_entries']), 'entrypoint set changed outside this transaction')
+    for name in old['entries']:
+        if name == HUB_ENTRY:
+            require(current[name] in (old['entries'][name], journal['after_entries'][name]),
+                    'entrypoint changed outside this transaction: '+name)
+        else:
+            require(current[name]['sha256'] in (old['entries'][name]['sha256'], journal['after_entries'][name]['sha256']),
+                    'entrypoint changed outside this transaction: '+name)
     processes = system.processes()
     if processes:
         # A partially replaced wrapper set may coexist with either source;
@@ -569,22 +602,36 @@ def restore(journal, bin_dir, state, env, system):
     require(not mailbox(state)['busy'], 'mailbox is busy; rollback does not restore or replay it')
     with idle_boundary(state):
         same_policies(state, old['policies'])
-        for name in ENTRIES:
-            atomic_entry(bin_dir/name, old['entries'][name])
+        for name in entry_names(old['entries']):
+            row = old['entries'][name]
+            if name == HUB_ENTRY and row is None:
+                (bin_dir/name).unlink(missing_ok=True)
+                sync_directory(bin_dir)
+            else:
+                atomic_entry(bin_dir/name, row)
     observer = system.start(old['source'], state, env)
     same_policies(state, old['policies'])
     return observer
 
 
-def activate(root, commit, bin_dir, state, transaction, env, system=None, *, converge_mixed=False):
+def activate(root, commit, bin_dir, state, transaction, env, system=None, *, converge_mixed=False, include_hub=False):
     system = system or System()
-    verify_snapshot(root, commit)
+    include_hub = hub_selected(bin_dir, include_hub)
+    if include_hub:
+        verify_snapshot(root, commit, include_hub=True)
+    else:
+        verify_snapshot(root, commit)
     with release_lock(bin_dir):
-        before = inspect(bin_dir, state, system, allow_mixed=converge_mixed)
+        before = (inspect(bin_dir, state, system, allow_mixed=converge_mixed, include_hub=True) if include_hub else
+                  inspect(bin_dir, state, system, allow_mixed=converge_mixed))
         require(not before['mailbox']['busy'], 'mailbox is not idle; queued/unknown messages are never replayed')
-        after = generated_entries(root, bin_dir)
+        after = generated_entries(root, bin_dir, include_hub=True) if include_hub else generated_entries(root, bin_dir)
+        require(set(after) == set(before['entries']) and all(after.values()), 'generated entrypoint set differs')
         target = launcher_source(after)
         require(target['root'] == str(root), 'generated launchers select another snapshot')
+        if include_hub:
+            require({k: launcher_sources(after)[HUB_ENTRY][k] for k in ('root', 'python')} == target,
+                    'generated hub launcher selects another snapshot')
         transaction.mkdir(mode=0o700, parents=False)
         journal = dict(version=1, state='prepared', bin_dir=str(bin_dir), interaction=str(state),
                        environment={k: env.get(k) for k in ('ATO_HOME', 'CODEX_HOME')},
@@ -593,19 +640,21 @@ def activate(root, commit, bin_dir, state, transaction, env, system=None, *, con
         save(path, journal)
         try:
             same_policies(state, before['policies'])
-            require(entrypoints(bin_dir) == before['entries'], 'entrypoints changed during preparation')
+            current = entrypoints(bin_dir, include_hub=True) if include_hub else entrypoints(bin_dir)
+            require(current == before['entries'], 'entrypoints changed during preparation')
             system.stop(before['observer'])
             journal['state'] = 'observer_stopped'
             save(path, journal)
             with idle_boundary(state):
                 same_policies(state, before['policies'])
-                for name in ENTRIES:
+                for name in entry_names(after):
                     atomic_entry(bin_dir/name, after[name])
             journal['state'] = 'entries_switched'
             save(path, journal)
             journal['observer'] = system.start(target, state, env)
             same_policies(state, before['policies'])
-            require(entrypoints(bin_dir) == after, 'entrypoints changed during cutover')
+            current = entrypoints(bin_dir, include_hub=True) if include_hub else entrypoints(bin_dir)
+            require(current == after, 'entrypoints changed during cutover')
             journal['state'] = 'activated'
             save(path, journal)
             return dict(state='activated', transaction=str(path), observer=journal['observer'])
@@ -650,6 +699,7 @@ def main(argv=None):
     parser.add_argument('--node-bin', type=Path, help='Trusted host Node path for staging (otherwise resolve operator PATH once)')
     parser.add_argument('--npm-bin', type=Path, help='Trusted host npm CLI for staging (otherwise resolve operator PATH once)')
     parser.add_argument('--commit', help='Explicit trusted Git revision; no implicit HEAD')
+    parser.add_argument('--include-hub', action='store_true', help='Include optional ato-hub launcher, recording absence for rollback')
     parser.add_argument('--allow-runtime-change', action='store_true', help='Required for activate/rollback; starts/stops only the observer')
     parser.add_argument('--converge-mixed-entrypoints', action='store_true',
                         help='Activate only: explicitly converge three validated sources, retaining per-entry rollback')
@@ -676,7 +726,10 @@ def main(argv=None):
                 require(value.expanduser().is_absolute() and not value.is_symlink(), '--'+key+' must be an absolute non-symlink path')
                 setattr(args, key, value.expanduser().resolve())
         if args.stage:
-            result = stage(args.repo, args.commit, args.snapshot, node_bin=args.node_bin, npm_bin=args.npm_bin)
+            options = dict(node_bin=args.node_bin, npm_bin=args.npm_bin)
+            if args.include_hub or (args.bin_dir is not None and hub_selected(args.bin_dir)):
+                options['include_hub'] = True
+            result = stage(args.repo, args.commit, args.snapshot, **options)
         else:
             state = context(args.ato_home, args.codex_home, args.legacy_context)
             env = environment(args.ato_home, args.codex_home, args.bin_dir)
@@ -690,9 +743,14 @@ def main(argv=None):
                         'transaction backups must be outside runtime homes, snapshot and bin-dir')
             if args.dry_run:
                 commit, tree = git_commit(args.repo, args.commit)
-                report = inspect(args.bin_dir, state, System(), allow_mixed=True)
+                include_hub = hub_selected(args.bin_dir, args.include_hub)
+                report = (inspect(args.bin_dir, state, System(), allow_mixed=True, include_hub=True) if include_hub else
+                          inspect(args.bin_dir, state, System(), allow_mixed=True))
                 if args.snapshot.exists():
-                    verify_snapshot(args.snapshot, commit)
+                    if include_hub:
+                        verify_snapshot(args.snapshot, commit, include_hub=True)
+                    else:
+                        verify_snapshot(args.snapshot, commit)
                 blockers = []
                 if not args.snapshot.exists():
                     blockers.append('snapshot must be staged and qualified')
@@ -701,7 +759,7 @@ def main(argv=None):
                 if report['mailbox']['busy']:
                     blockers.append('mailbox is not idle; no queue draining or replay is allowed')
                 result = dict(mode='dry-run', commit=commit, tree=tree, snapshot=str(args.snapshot),
-                    entrypoints={k: dict(sha256=v['sha256'], mode=v['mode'], **report['sources'][k])
+                    entrypoints={k: dict(present=False) if v is None else dict(sha256=v['sha256'], mode=v['mode'], **report['sources'][k])
                                  for k, v in report['entries'].items()},
                     mixed_sources=report['mixed_sources'], converge_required=report['converge_required'],
                     source=report['source'], observer_source=report['observer_source'],
@@ -713,10 +771,14 @@ def main(argv=None):
                     plan=['git archive, isolated dependencies, full qualification, read-only seal',
                           'explicit activation: backup entrypoints, SIGTERM observer, idle writer barrier, atomic per-entry replace, verify observer',
                           'rollback: executable entrypoints and observer only; no task or ledger restoration'])
+                if include_hub:
+                    result['include_hub'] = True
+                    result['activation_requires'].append('--include-hub')
             elif args.activate:
                 require(len(args.commit) == 40 and all(c in '0123456789abcdef' for c in args.commit), 'activate requires the full commit hash')
-                result = activate(args.snapshot, args.commit, args.bin_dir, state, args.transaction, env,
-                                  converge_mixed=args.converge_mixed_entrypoints)
+                options = dict(converge_mixed=args.converge_mixed_entrypoints)
+                if hub_selected(args.bin_dir, args.include_hub):options['include_hub'] = True
+                result = activate(args.snapshot, args.commit, args.bin_dir, state, args.transaction, env, **options)
             else:
                 result = rollback(args.transaction, args.bin_dir, state, env)
         print(json.dumps(result, indent=2, sort_keys=True))

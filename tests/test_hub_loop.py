@@ -60,6 +60,26 @@ class HubLoopTests(unittest.TestCase):
 
     def state(self,identifier='task-one'):return self.ledger.read_task(identifier)[1]
 
+    def test_hub_list_CLI_emits_filtered_redacted_JSON_without_running_agents(self):
+        self.create()
+        with patch.object(self.registry,'get',side_effect=AssertionError('no native agent lookup')):
+            args=hub_cli.parser().parse_args(['hub-list','--repo',str(self.repo)])
+            rows=hub_cli.dispatch(args,registry=self.registry)
+        self.assertEqual([r['hub_id'] for r in rows],[self.ledger.identifier])
+        stream=io.StringIO()
+        with redirect_stdout(stream):self.assertEqual(hub_cli.main(['hub-list','--repo',str(self.repo)]),0)
+        self.assertEqual(json.loads(stream.getvalue()),rows);self.assertNotIn(self.secret,stream.getvalue())
+        alias=self.root/'repo-alias';alias.symlink_to(self.repo,target_is_directory=True)
+        with redirect_stdout(io.StringIO()):self.assertEqual(hub_cli.main(['hub-list','--repo',str(alias)]),2)
+
+    def test_hub_list_invalid_repository_metadata_does_not_expose_nested_secrets(self):
+        from hub_ledger import save
+        row=self.ledger.hub();row['repo']={'credential':self.secret}
+        save(self.ledger.root/'hub.json',row);stream=io.StringIO()
+        with redirect_stdout(stream):self.assertEqual(hub_cli.main(['hub-list']),2)
+        self.assertEqual(json.loads(stream.getvalue())['code'],'INVALID_HUB_REPOSITORY')
+        self.assertNotIn(self.secret,stream.getvalue())
+
     def test_O5_real_workflow_host_checks_review_fix_then_human_terminal(self):
         self.reviewer(sequence=[verdict('request_changes','blocker'),verdict()])
         original=self.create();handlers=[signal.getsignal(s) for s in (signal.SIGINT,signal.SIGTERM)]

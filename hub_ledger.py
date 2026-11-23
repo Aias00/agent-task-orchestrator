@@ -13,6 +13,7 @@ import uuid
 
 import ato_config
 import ato_core as core
+import hub_worktree
 from hub_contract import HubAgentSpec, HubError, digest, integer, require, strict_json, token, validate_task_spec
 
 
@@ -54,6 +55,37 @@ class HubLedger:
         self.identifier=token(identifier)
         self._lock_owner=None
         self.root=canonical(ato_config.ato_home(),exists=False)/'hubs'/identifier
+
+    @classmethod
+    def list_hubs(cls, repo=None):
+        require(os.environ.get('ATO_HOME'),'EXPLICIT_ATO_HOME_REQUIRED')
+        selected=str(hub_worktree.repository(repo)) if repo is not None else None
+        parent=canonical(ato_config.ato_home(),exists=False)/'hubs'
+        if not parent.exists() and not parent.is_symlink():return []
+        private(parent,directory=True);result=[]
+        for path in sorted(parent.glob('hub-*')):
+            private(path,directory=True);ledger=cls(path.name);row=ledger.hub()
+            require(isinstance(row['repo'],str),'INVALID_HUB_REPOSITORY')
+            stored_repo=str(canonical(row['repo'],exists=False))
+            if selected is not None and stored_repo!=selected:continue
+            agent=HubAgentSpec(**{name:row['active_agent'].get(name) for name in ('kind','model','effort')})
+            session=row['native_sessions'].get(agent.kind,{})
+            state=session.get('state','none')
+            require(state in ('none','active','parked','retired'),'INVALID_SESSION_STATE')
+            tasks=private(path/'tasks',directory=True)
+            children=list(tasks.iterdir())
+            for child in children:private(child,directory=True)
+            # Observation must not create .hub.lock (busy() normally does).
+            busy=False;lock=path/'.hub.lock'
+            if lock.exists() or lock.is_symlink():
+                private(lock);fd=os.open(lock,os.O_RDONLY|os.O_NOFOLLOW)
+                try:
+                    try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    except BlockingIOError:busy=True
+                finally:os.close(fd)
+            result.append(dict(hub_id=path.name,repo=stored_repo,active_agent=asdict(agent),
+                hub_busy=busy,active_session_state=state,task_count=len(children)))
+        return result
 
     @classmethod
     def create(cls, repo, agent, *, max_turns=20):

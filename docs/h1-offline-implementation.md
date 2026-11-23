@@ -7,18 +7,38 @@
 ## 实现与使用入口
 
 10 个根模块形成单向依赖图，八核心与原有 55 命令 CLI 保持不变。
-`hub_cli.py` 是独立 argparse 入口；从选定源码 checkout 使用：
+`hub_cli.py` 是独立 argparse 入口；可从选定源码 checkout 使用，也可显式安装 `ato-hub`。
+本次日常可用性补丁是独立候选，尚待评审，不表示安装或运行态已经更新。
+
+安装仅在获得相应授权后执行，`BIN_DIR` 和 `HUB_SKILLS_DIR` 由操作者选定：
+
+```sh
+.venv/bin/python scripts/install.py --bin-dir "$BIN_DIR" --hub --hub-skills-dir "$HUB_SKILLS_DIR"
+```
+
+原有 `ctask` 默认安装及 `--helpers` 保持不变；`--hub` 额外生成 `ato-hub`，
+`--hub-skills-dir` 独立选择 Skill 安装位置。已有目标默认拒绝覆盖，审查后才显式使用 `--force`。
+安装的 Skill 指向该源码版本的说明文档。`ato-hub` 在未设置 `ATO_HOME` 时默认使用
+`$HOME/.local/share/ato-hub-state`，与现有 ctask 状态隔离；已设置的 `ATO_HOME` 则沿用。
+未安装时，使用 `.venv/bin/python hub_cli.py` 并显式设置独立 `ATO_HOME`。
+
+日常先发现已有长期 Hub，避免每个任务重复创建：
 
 ```sh
 export ATO_HOME="$PWD/../h1-private-state"
-.venv/bin/python hub_cli.py --help
-.venv/bin/python hub_cli.py hub-create --repo "$PWD" --kind agy
-.venv/bin/python hub_cli.py task-create HUB_ID --spec "$PWD/hub-task-spec.json"
+ato-hub hub-list --repo "$PWD"
+# 无匹配 Hub 时才创建；已有时复用返回的 hub_id。
+ato-hub hub-create --repo "$PWD" --kind agy
+ato-hub task-create HUB_ID --spec "$PWD/hub-task-spec.json"
 # task-run 会调用 Worker 与当前 Hub 审阅器，仅在具备相应授权时执行。
-.venv/bin/python hub_cli.py task-run HUB_ID TASK_ID
-.venv/bin/python hub_cli.py task-status HUB_ID TASK_ID
-.venv/bin/python hub_cli.py task-stop HUB_ID TASK_ID
+ato-hub task-run HUB_ID TASK_ID
+ato-hub task-status HUB_ID TASK_ID
+ato-hub task-stop HUB_ID TASK_ID
 ```
+
+`hub-list` 只读输出 hub_id、repo、active_agent、hub_busy、active_session_state、task_count，
+按 ID 排序；`--repo` 要求真实 canonical 仓库路径并精确过滤。不存在账本时返回空列表，
+不创建目录或锁文件，不输出会话 ID、凭据、任务 prompt 或 transcript。
 
 任务规格见设计 4.1.1；创建时复用现行 `workflow.validate` / `runner.validate`
 冻结默认值并关闭 memory，再封存 `spec_hash`。仓库、规格文件、父目录、账本路径必须为
@@ -28,12 +48,31 @@ canonical 绝对路径，拒绝软链别名；路径来自操作者输入，不�
 账本位于显式 `$ATO_HOME/hubs/HUB_ID/`，不置于目标仓库。`hub-status`、`task-status`
 展示 busy；`hub-attach-cmd` 只返回命令，锁持有时拒绝；`hub-switch-agent`、`hub-rollover`
 要求 `--source`。新工作树在仓库外，已有分支/目录绝不覆盖。
-共享依赖仅在白名单显式供给软链，不授予写权限，审阅 profile 禁止写入目标。
+`worktree_policy.shared_env_links` 仅允许 `.venv`、`venv`、`node_modules`、
+`integrations/pi-acp/node_modules`，例如 `[".venv", "node_modules"]`。
+主仓源目录须实际存在、非软链、未被 Git 追踪且被忽略，目标已存在则拒绝。
+共享依赖只显式供给软链，不授予写权限，审阅 profile 禁止写入目标。
+完整性采样不遍历共享依赖；Git 追踪的同名目录仍作为源码采样。
+清理先核验原软链目标，保留主仓依赖，只移除供给的软链。
 
 Worker 沿用未改动 Workflow/Runner，使用私有 `worker-ato` 与 `worker-home`，
 不继承当前原会话、actor、loader、proxy 或密钥环境。默认私有 native home 不继承本机认证；
-真实凭据供给、运行资格与业务授权另行评审。测试从可信构造器注入合成 Worker/Reviewer，
+真实凭据供给、运行资格与业务授权另行评审。获准实网运行时，明确选择 canonical native home
+与无凭据回环代理，不依赖继承环境中的登录或代理：
+
+```sh
+ato-hub task-run HUB_ID TASK_ID --worker-codex-home "$WORKER_CODEX_HOME" --proxy http://127.0.0.1:7890
+```
+
+`--worker-codex-home` 仅用于 Worker，不能与 Hub 账本重叠；`ATO_HOME` 仍隔离。
+`--proxy` 也可用于 `task-review-only`，拒绝远端、userinfo/密码、路径或 query。
+本轮测试不读取真实认证、不启动代理、不调用模型。测试从可信构造器注入合成 Worker/Reviewer，
 未将可执行路径放进模型可改规格。宿主 checks 在清洁环境运行，依赖使用明确 argv 或共享依赖。
+
+发布工具保持原 `ENTRIES` 三入口常量。仅在安装目录已有 `ato-hub` 或显式 `--include-hub`
+时，dry-run/activate 纳入第四入口，要求快照包含 `hub_cli.py`，由安装器 `--helpers --hub`
+生成入口。事务保存每个入口原字节、权限及此前不存在的事实；回滚恢复旧 Hub，或删除本次新增的
+Hub 入口。原三入口混合收敛、observer、策略、mailbox 与任务状态边界保持不变。
 
 ## 闭环与硬停点
 

@@ -554,6 +554,103 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(release.Refused):release.context(self.ato,self.native,legacy=True)
 
 
+    def hub_entry(self, root, python, mode=0o755):
+        import shlex
+        data=('#!/bin/sh\nif [ -z "${ATO_HOME:-}" ]; then\n'
+              '  export ATO_HOME="$HOME/.local/share/ato-hub-state"\nfi\nexec '+shlex.quote(str(python))+' '+
+              shlex.quote(str(root/'hub_cli.py'))+' "$@"\n').encode()
+        return dict(data=base64.b64encode(data).decode(),mode=mode,sha256=hashlib.sha256(data).hexdigest())
+
+    def prepare_hub_snapshot(self):
+        self.snapshot.chmod(0o700);(self.snapshot/'hub_cli.py').write_text('synthetic hub source')
+        self.freeze()
+        self.after[release.HUB_ENTRY]=self.hub_entry(self.snapshot,self.snapshot/'.venv/bin/python')
+
+    def test_include_hub_first_dry_run_activate_and_rollback_delete_only_new_entry(self):
+        self.prepare_hub_snapshot();before=self.filesystem_state();protected=self.safety_bytes()
+        with patch.object(release,'System',return_value=self.system),patch.object(
+                release,'git_commit',return_value=(self.commit,'b'*40)),patch('sys.stdout') as out:
+            self.assertEqual(release.main(self.cli_args('dry-run')+['--include-hub']),0)
+            report=json.loads(''.join(call.args[0] for call in out.write.call_args_list))
+        self.assertTrue(report['include_hub']);self.assertEqual(report['entrypoints']['ato-hub'],dict(present=False))
+        self.assertFalse(report['mixed_sources']);self.assertEqual(before,self.filesystem_state())
+        release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
+        self.assertEqual(release.entrypoints(self.bin),self.after)
+        journal=release.read(self.transaction/'transaction.json')
+        self.assertIsNone(journal['before']['entries']['ato-hub'])
+        release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
+        self.assertFalse((self.bin/'ato-hub').exists());self.assertEqual(release.entrypoints(self.bin),self.before)
+        self.assertEqual(self.safety_bytes(),protected)
+
+    def test_existing_hub_is_auto_included_and_rollback_restores_exact_old_bytes_and_mode(self):
+        self.prepare_hub_snapshot()
+        old=self.base/'old independent hub';old.mkdir()
+        (old/'python').write_text('offline Python');(old/'hub_cli.py').write_text('old hub source')
+        row=self.hub_entry(old,old/'python',mode=0o750);release.atomic_entry(self.bin/'ato-hub',row)
+        before=release.entrypoints(self.bin);protected=self.safety_bytes()
+        with patch.object(release,'System',return_value=self.system),patch.object(
+                release,'git_commit',return_value=(self.commit,'b'*40)),patch('sys.stdout') as out:
+            self.assertEqual(release.main(self.cli_args('dry-run')),0)
+            report=json.loads(''.join(call.args[0] for call in out.write.call_args_list))
+        self.assertEqual(report['entrypoints']['ato-hub']['script'],str(old/'hub_cli.py'))
+        self.assertFalse(report['mixed_sources'])  # Hub source does not alter three-entry convergence.
+        self.activate();self.assertEqual(release.entrypoints(self.bin),self.after)
+        release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
+        self.assertEqual(release.entrypoints(self.bin),before);self.assertEqual(self.safety_bytes(),protected)
+
+    def test_include_hub_requires_qualified_hub_source_before_any_switch(self):
+        before=release.entrypoints(self.bin)
+        with self.assertRaisesRegex(release.Refused,'hub_cli.py'):
+            release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
+        self.assertFalse(self.transaction.exists());self.assertEqual(release.entrypoints(self.bin),before)
+        self.assertEqual(self.system.calls,[])
+
+    def test_include_hub_CLI_activate_and_rollback_preserve_prior_absence(self):
+        self.prepare_hub_snapshot()
+        with patch.object(release,'System',return_value=self.system),patch('sys.stdout'):
+            self.assertEqual(release.main(self.cli_args('activate')+['--allow-runtime-change','--include-hub']),0)
+            self.assertTrue((self.bin/'ato-hub').is_file())
+            self.assertEqual(release.main(self.cli_args('rollback')+['--allow-runtime-change']),0)
+        self.assertEqual(release.entrypoints(self.bin),self.before);self.assertFalse((self.bin/'ato-hub').exists())
+
+    def test_hub_install_failure_restores_three_entries_and_preserves_prior_absence(self):
+        self.prepare_hub_snapshot();original=release.atomic_entry;failed=[];protected=self.safety_bytes()
+        def replace(path,row):
+            if path.name=='ato-hub' and not failed:
+                failed.append(True);raise OSError('synthetic hub replace failure')
+            original(path,row)
+        with patch.object(release,'atomic_entry',side_effect=replace),self.assertRaises(OSError):
+            release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
+        self.assertEqual(release.read(self.transaction/'transaction.json')['state'],'rolled_back')
+        self.assertEqual(release.entrypoints(self.bin),self.before);self.assertFalse((self.bin/'ato-hub').exists())
+        self.assertEqual(self.safety_bytes(),protected);self.assertTrue(self.system.running)
+
+    def test_rollback_never_deletes_unrelated_replaced_hub(self):
+        self.prepare_hub_snapshot()
+        release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
+        (self.bin/'ato-hub').write_text('third-party replacement');before=self.safety_bytes();calls=list(self.system.calls)
+        with self.assertRaisesRegex(release.Refused,'outside this transaction'):
+            release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
+        self.assertEqual((self.bin/'ato-hub').read_text(),'third-party replacement')
+        self.assertEqual(self.system.calls,calls);self.assertEqual(self.safety_bytes(),before)
+
+    def test_four_entry_cutover_and_new_hub_removal_hold_the_mailbox_writer_gate(self):
+        self.prepare_hub_snapshot();original=release.atomic_entry;unlink=Path.unlink;calls=[]
+        def writer_gate(name):
+            with sqlite3.connect(self.db,timeout=.01) as con:
+                with self.assertRaises(sqlite3.OperationalError):con.execute("insert into messages values('concurrent','queued',0)")
+            calls.append(name)
+        def replace(path,row):
+            writer_gate(path.name);original(path,row)
+        def remove(path,*args,**kwargs):
+            if path==self.bin/'ato-hub':writer_gate('remove ato-hub')
+            return unlink(path,*args,**kwargs)
+        with patch.object(release,'atomic_entry',side_effect=replace),patch.object(Path,'unlink',remove):
+            release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
+            release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
+        self.assertEqual(calls,[*release.ENTRIES,'ato-hub',*release.ENTRIES,'remove ato-hub'])
+
+
 class ProcessSafetyTests(unittest.TestCase):
     def test_real_facade_checks_identity_and_exact_command_before_sigterm(self):
         system=release.System()
@@ -652,6 +749,22 @@ class StageTests(unittest.TestCase):
 
 
 class LauncherGenerationTests(unittest.TestCase):
+    def test_generated_four_launchers_use_real_installer_and_auto_detect_existing_hub(self):
+        root=Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix='ato-four-entry-') as folder:
+            base=Path(folder).resolve();bin_dir=base/'bin';bin_dir.mkdir()
+            before=release.generated_entries(root,bin_dir)
+            self.assertEqual(set(before),set(release.ENTRIES));self.assertEqual(release.ENTRIES,('ctask','ctask-notify','ato-read-handoff'))
+            result=release.generated_entries(root,bin_dir,include_hub=True)
+            self.assertEqual(set(result),set((*release.ENTRIES,'ato-hub')))
+            for name,row in result.items():release.atomic_entry(bin_dir/name,row)
+            self.assertEqual(release.launcher_sources(result)['ato-hub']['script'],str(root/'hub_cli.py'))
+            self.assertEqual(release.generated_entries(root,bin_dir),result)
+            env=dict(os.environ,HOME=str(base/'home'));env.pop('ATO_HOME',None)
+            completed=subprocess.run([str(bin_dir/'ato-hub'),'--help'],env=env,capture_output=True,text=True,timeout=10)
+            self.assertEqual(completed.returncode,0,completed.stderr);self.assertIn('hub-list',completed.stdout)
+            self.assertFalse((base/'home').exists())
+
     def test_generated_launchers_use_selected_source_and_quote_final_reader_path(self):
         root=Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix='ato-release-bin with spaces ') as folder:

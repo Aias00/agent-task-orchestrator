@@ -16,6 +16,7 @@ def parser():
     cli=argparse.ArgumentParser(description=__doc__)
     sub=cli.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor')
+    listing=sub.add_parser('hub-list');listing.add_argument('--repo')
     create=sub.add_parser('hub-create');create.add_argument('--repo',required=True)
     create.add_argument('--kind',choices=KINDS,required=True);create.add_argument('--model');create.add_argument('--effort')
     create.add_argument('--max-turns',type=int,default=20)
@@ -38,6 +39,7 @@ def dispatch(args,*,registry=None,worker_tools=None):
     registry=registry if registry is not None else HubRegistry(proxy=proxy)
     if args.command=='doctor':return registry.doctor_all()
     require(os.environ.get('ATO_HOME'),'EXPLICIT_ATO_HOME_REQUIRED')
+    if args.command=='hub-list':return HubLedger.list_hubs(args.repo)
     if args.command=='hub-create':
         repo=hub_worktree.repository(args.repo)
         ledger=HubLedger.create(repo,HubAgentSpec(args.kind,args.model,args.effort),max_turns=args.max_turns)
