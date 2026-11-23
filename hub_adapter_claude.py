@@ -12,9 +12,10 @@ import hub_sandbox as sandbox
 class ClaudeHubAdapter:
     kind='claude'
 
-    def __init__(self, executable=None, *, home=None):
+    def __init__(self, executable=None, *, home=None, proxy=None):
         self.executable=sandbox.executable(self.kind,executable)
         self.home=sandbox.canonical(home if home is not None else Path.home())
+        self.proxy=sandbox.validate_loopback_proxy(proxy)
 
     def capabilities(self):
         states=dict(structured_output='unknown',session_resume='unknown',interactive_attach='unknown',
@@ -35,7 +36,8 @@ class ClaudeHubAdapter:
             def invoke():
                 require(self.doctor()['available'],'VERSION_MISMATCH')
                 rt,env,prefix=sandbox.turn_context(request,self.executable,self.home,
-                    writable_native=(self.home/'.claude',self.home/'.claude.json',Path('/tmp').resolve()/('claude-'+str(os.getuid()))))
+                    writable_native=(self.home/'.claude',self.home/'.claude.json',Path('/tmp').resolve()/('claude-'+str(os.getuid()))),
+                    proxy=self.proxy)
                 schema=REVIEW_VERDICT_SCHEMA if request.role=='review' else HUB_TASK_SPEC_SCHEMA
                 sid=str(uuid.uuid4())
                 command=[str(self.executable),'--safe-mode','--restricted','--disable-slash-commands','-p',

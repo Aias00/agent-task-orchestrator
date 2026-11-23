@@ -28,12 +28,14 @@ def parser():
         if name=='task-create':item.add_argument('--spec',required=True)
         if name.startswith('task-') and name!='task-create' or name=='worktree-cleanup':item.add_argument('task_id')
         if name=='task-run':item.add_argument('--worker-codex-home')
+        if name in ('task-run','task-review-only'):item.add_argument('--proxy')
         if name=='worktree-cleanup':item.add_argument('--confirm',action='store_true',required=True)
     return cli
 
 
 def dispatch(args,*,registry=None,worker_tools=None):
-    registry=registry if registry is not None else HubRegistry()
+    proxy=getattr(args,'proxy',None)
+    registry=registry if registry is not None else HubRegistry(proxy=proxy)
     if args.command=='doctor':return registry.doctor_all()
     require(os.environ.get('ATO_HOME'),'EXPLICIT_ATO_HOME_REQUIRED')
     if args.command=='hub-create':
@@ -41,7 +43,7 @@ def dispatch(args,*,registry=None,worker_tools=None):
         ledger=HubLedger.create(repo,HubAgentSpec(args.kind,args.model,args.effort),max_turns=args.max_turns)
         return dict(hub_id=ledger.identifier)
     ledger=HubLedger(args.hub_id);loop=HubLoop(ledger,registry,worker_tools=worker_tools,
-        worker_codex_home=getattr(args,'worker_codex_home',None))
+        worker_codex_home=getattr(args,'worker_codex_home',None),proxy=proxy)
     if args.command=='hub-status':return dict(hub=ledger.hub(),hub_busy=ledger.busy())
     if args.command=='task-status':
         _,state=ledger.read_task(args.task_id);return dict(state=state,hub_busy=ledger.busy())

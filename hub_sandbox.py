@@ -12,6 +12,7 @@ import stat
 import subprocess
 import time
 import tempfile
+from urllib.parse import urlsplit
 
 from pi_toolchain import write_exclusions
 
@@ -33,10 +34,29 @@ def private_dir(path):
     return path
 
 
-def clean_environment(home, temporary, *, native_home=None):
+def validate_loopback_proxy(value):
+    if value is None:return None
+    if not isinstance(value,str) or not value or any(c.isspace() for c in value):
+        raise ValueError('INVALID_LOOPBACK_PROXY')
+    parsed=urlsplit(value)
+    try:port=parsed.port
+    except ValueError:raise ValueError('INVALID_LOOPBACK_PROXY') from None
+    if (parsed.scheme not in ('http','https','socks5','socks5h')
+            or parsed.hostname not in ('127.0.0.1','::1','localhost')
+            or port is None or not (1<=port<=65535)
+            or parsed.username or parsed.password
+            or parsed.path not in ('','/') or parsed.query or parsed.fragment):
+        raise ValueError('INVALID_LOOPBACK_PROXY')
+    return value
+
+
+def clean_environment(home, temporary, *, native_home=None, proxy=None):
     env=dict(HOME=str(canonical(home)),TMPDIR=str(canonical(temporary)),PATH='/usr/bin:/bin',
              LANG='en_US.UTF-8',NO_COLOR='1',NO_BROWSER='1',PYTHONDONTWRITEBYTECODE='1')
     if native_home is not None:env['CODEX_HOME']=str(canonical(native_home,exists=False))
+    if proxy is not None:
+        url=validate_loopback_proxy(proxy)
+        env.update(HTTP_PROXY=url,HTTPS_PROXY=url,http_proxy=url,https_proxy=url,NO_PROXY='127.0.0.1,localhost,::1')
     return env
 
 
@@ -207,8 +227,8 @@ def executable(kind, selected=None):
     return path
 
 
-def tool_environment(home, temporary, tool, *, codex=False):
-    env=clean_environment(home,temporary,native_home=Path(home)/'.codex' if codex else None)
+def tool_environment(home, temporary, tool, *, codex=False, proxy=None):
+    env=clean_environment(home,temporary,native_home=Path(home)/'.codex' if codex else None,proxy=proxy)
     paths=[str(Path(tool).parent),'/usr/bin','/bin']
     # Script CLIs may need their trusted Node loader. Do not inherit the
     # ambient PATH or any loader/proxy/actor/key variables into native tools.
@@ -232,12 +252,12 @@ def read_output(path):
         return stream.read(LIMIT+1)
 
 
-def turn_context(request, tool, home, *, outer=True, writable_native=(), codex=False):
+def turn_context(request, tool, home, *, outer=True, writable_native=(), codex=False, proxy=None):
     if tool is None:raise ValueError('EXECUTABLE_UNAVAILABLE')
     workspace=canonical(request.workspace);rt=private_dir(request.runtime_dir);home=canonical(home)
     if rt.is_relative_to(workspace) or tool.is_relative_to(workspace):raise ValueError('INVALID_PROTOCOL')
     temporary=rt/'tmp';temporary.mkdir(mode=0o700)
-    env=tool_environment(home,temporary,tool,codex=codex)
+    env=tool_environment(home,temporary,tool,codex=codex,proxy=proxy)
     prefix=[]
     if outer:
         from_root=Path(__file__).resolve().parent

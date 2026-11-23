@@ -3,13 +3,15 @@ from hub_contract import KINDS, require
 from hub_adapter_agy import AgyHubAdapter
 from hub_adapter_claude import ClaudeHubAdapter
 from hub_adapter_codex import CodexHubAdapter
+from hub_sandbox import validate_loopback_proxy
 
 FACTORIES = dict(agy=AgyHubAdapter,claude=ClaudeHubAdapter,codex=CodexHubAdapter)
 
 
 class HubRegistry:
-    def __init__(self, adapters=()):
+    def __init__(self, adapters=(), *, proxy=None):
         self.adapters={}
+        self.proxy=validate_loopback_proxy(proxy)
         for adapter in adapters:self.register(adapter)
 
     def register(self, adapter):
@@ -21,7 +23,7 @@ class HubRegistry:
 
     def get(self, kind):
         require(kind in FACTORIES,'UNKNOWN_HUB_ADAPTER')
-        if kind not in self.adapters:self.register(FACTORIES[kind]())
+        if kind not in self.adapters:self.register(FACTORIES[kind](proxy=self.proxy))
         return self.adapters[kind]
 
     def doctor_all(self):

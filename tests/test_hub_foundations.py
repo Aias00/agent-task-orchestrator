@@ -151,3 +151,15 @@ class HubFoundationTests(unittest.TestCase):
         (Path(binding['path'])/'result.txt').write_text('x'*(260*1024))
         with self.assertRaisesRegex(ValueError,'REVIEW_DIFF_BOUND_EXCEEDED'):
             worktree.diff_bundle(binding)
+
+    def test_O8_loopback_proxy_opt_in_rejects_remote_or_credentialed_urls(self):
+        self.assertEqual(sandbox.validate_loopback_proxy('http://127.0.0.1:7890'),'http://127.0.0.1:7890')
+        self.assertEqual(sandbox.validate_loopback_proxy('socks5h://localhost:7890'),'socks5h://localhost:7890')
+        for bad in ('http://evil.example:8080','http://user:pass@127.0.0.1:7890','http://127.0.0.1:7890/path',
+                    'http://127.0.0.1','ftp://127.0.0.1:21','http://127.0.0.1:7890?a=1'):
+            with self.subTest(bad=bad),self.assertRaisesRegex(ValueError,'INVALID_LOOPBACK_PROXY'):
+                sandbox.validate_loopback_proxy(bad)
+        rt=runtime(self.root)
+        env=sandbox.clean_environment(rt/'home',rt/'tmp',proxy='http://127.0.0.1:7890')
+        self.assertEqual(env['HTTPS_PROXY'],'http://127.0.0.1:7890')
+        self.assertNotIn('HTTPS_PROXY',sandbox.clean_environment(rt/'home',rt/'tmp'))

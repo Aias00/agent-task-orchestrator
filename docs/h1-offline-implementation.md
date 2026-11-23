@@ -2,7 +2,7 @@
 
 状态：**已评审合入 `main`（离线候选，未安装激活运行态）**。遵循
 [批准设计](hub-orchestrator-design.md) 与 [CLI Spike](h1-cli-spike.md)。
-离线实现已通过第 8 节 O1–O10 门禁；默认不继承本机 Codex 认证，仅在操作者显式传入 `--worker-codex-home` 时向隔离 Worker 传递指定 `CODEX_HOME`（`ATO_HOME` 仍保持隔离）。
+离线实现已通过第 8 节 O1–O10 门禁；默认不继承本机 Codex 认证与环境代理，仅在操作者显式传入 `--worker-codex-home` 或 `--proxy`（仅允许无凭据回环地址如 `http://127.0.0.1:7890`）时注入对应配置（`ATO_HOME` 仍保持隔离）。
 
 ## 实现与使用入口
 

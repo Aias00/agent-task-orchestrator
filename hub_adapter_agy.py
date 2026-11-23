@@ -11,9 +11,10 @@ import hub_sandbox as sandbox
 class AgyHubAdapter:
     kind='agy'
 
-    def __init__(self, executable=None, *, home=None):
+    def __init__(self, executable=None, *, home=None, proxy=None):
         self.executable=sandbox.executable(self.kind,executable)
         self.home=sandbox.canonical(home if home is not None else Path.home())
+        self.proxy=sandbox.validate_loopback_proxy(proxy)
 
     def capabilities(self):
         states=dict(structured_output='supported',session_resume='supported',interactive_attach='supported',
@@ -35,7 +36,7 @@ class AgyHubAdapter:
                 require(self.doctor()['available'],'VERSION_MISMATCH')
                 persistent=request.session_mode!='fresh_only'
                 writable=(self.home/'.gemini/antigravity-cli',) if persistent else ()
-                rt,env,prefix=sandbox.turn_context(request,self.executable,self.home,writable_native=writable)
+                rt,env,prefix=sandbox.turn_context(request,self.executable,self.home,writable_native=writable,proxy=self.proxy)
                 schema=REVIEW_VERDICT_SCHEMA if request.role=='review' else HUB_TASK_SPEC_SCHEMA
                 sandbox.write_private(rt/'schema.json',json.dumps(schema))
                 command=[str(self.executable),'-p',request.prompt,'--output-format','json',

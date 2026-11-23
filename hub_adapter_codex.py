@@ -11,9 +11,10 @@ import hub_sandbox as sandbox
 class CodexHubAdapter:
     kind='codex'
 
-    def __init__(self, executable=None, *, home=None):
+    def __init__(self, executable=None, *, home=None, proxy=None):
         self.executable=sandbox.executable(self.kind,executable)
         self.home=sandbox.canonical(home if home is not None else Path.home())
+        self.proxy=sandbox.validate_loopback_proxy(proxy)
 
     def capabilities(self):
         return HubCapabilities({name:dict(state='unsupported' if name=='long_lived_stream' else 'supported',
@@ -32,7 +33,7 @@ class CodexHubAdapter:
             require(request.agent.kind==self.kind)
             def invoke():
                 require(self.doctor()['available'],'VERSION_MISMATCH')
-                rt,env,_=sandbox.turn_context(request,self.executable,self.home,outer=False,codex=True)
+                rt,env,_=sandbox.turn_context(request,self.executable,self.home,outer=False,codex=True,proxy=self.proxy)
                 schema=REVIEW_VERDICT_SCHEMA if request.role=='review' else HUB_TASK_SPEC_SCHEMA
                 sandbox.write_private(rt/'schema.json',json.dumps(schema))
                 resumed=request.session_mode!='fresh_only' and request.resume_session_id

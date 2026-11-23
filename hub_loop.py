@@ -14,6 +14,7 @@ from hub_contract import (HubAgentSpec, HubTurnRequest, blocker_fingerprint,
                           require, validate_review_verdict, validate_task_spec)
 from hub_ledger import HubLedger, canonical, private, save
 from hub_registry import HubRegistry
+from hub_sandbox import validate_loopback_proxy
 import hub_worktree
 import runner
 import workflow
@@ -66,9 +67,10 @@ class GuardedWorkflow(workflow.Workflow):
 
 
 class HubLoop:
-    def __init__(self,ledger,registry=None,*,worker_tools=None,worker_codex_home=None,notifier=None):
+    def __init__(self,ledger,registry=None,*,worker_tools=None,worker_codex_home=None,proxy=None,notifier=None):
         require(isinstance(ledger,HubLedger));self.ledger=ledger
-        self.registry=registry if registry is not None else HubRegistry()
+        self.proxy=validate_loopback_proxy(proxy)
+        self.registry=registry if registry is not None else HubRegistry(proxy=self.proxy)
         # Trusted host injection for offline fixtures, never task-controlled.
         self.worker_tools=dict(worker_tools or {})
         require(set(self.worker_tools)<={'CTASK_CODEX_BIN','CTASK_CLAUDE_BIN','CTASK_PI_BIN'},'INVALID_WORKER_TOOLS')
@@ -164,6 +166,9 @@ class HubLoop:
                 if found:tools[name]=str(Path(found).resolve(strict=True))
         env=dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin',HOME=str(home),LANG='C.UTF-8',
             ATO_HOME=str(root),CODEX_HOME=str(native),PYTHONDONTWRITEBYTECODE='1')
+        if self.proxy is not None:
+            env.update(HTTP_PROXY=self.proxy,HTTPS_PROXY=self.proxy,http_proxy=self.proxy,https_proxy=self.proxy,
+                       NO_PROXY='127.0.0.1,localhost,::1')
         # Resolve code-owned executable names before clearing the ambient PATH;
         # retain only selected executable/Node loader directories, not all PATH.
         node=shutil.which('node')
