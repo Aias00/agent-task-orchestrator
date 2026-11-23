@@ -41,9 +41,9 @@ class ArchitectureStructureTests(unittest.TestCase):
         self.assertLessEqual(current['root_mutual_count'], 8)
         self.assertLessEqual(current['runtime_mutual_count'], 8)
         self.assertTrue(set(map(tuple, current['runtime_mutual_pairs'])) <= set(map(tuple, baseline['mutual_pairs'])))
-        self.assertIn('ato_cli.workflow_cmd', current['graph'])
-        self.assertIn('ato_cli.workflow_cmd', current['graph']['ato_cli'])
-        self.assertIn('workflow', current['graph']['ato_cli.workflow_cmd'])
+        self.assertIn('ato_cli', current['graph']['ato'])
+        self.assertIn('ato_application', current['graph']['ato_cli'])
+        self.assertIn('ato_execution', current['graph']['ato_application'])
 
     def test_legacy_modules_export_the_complete_primitive_api(self):
         for name in PRIMITIVES:
@@ -68,10 +68,9 @@ class ArchitectureStructureTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(root.iterdir()), [])
 
-    def test_runner_main_is_a_small_facade_and_core_paths_are_preserved(self):
+    def test_legacy_runner_has_no_cli_facade_and_core_paths_are_preserved(self):
         tree = ast.parse((ROOT/'runner.py').read_text())
-        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
-        self.assertLessEqual(main.end_lineno-main.lineno, 10)
+        self.assertFalse(any(isinstance(node, ast.FunctionDef) and node.name == 'main' for node in tree.body))
         for name in ('control', 'recovery', 'interaction', 'delegation', 'workflow', 'session_router', 'message_bus', 'transport'):
             self.assertTrue((ROOT/(name+'.py')).is_file())
 

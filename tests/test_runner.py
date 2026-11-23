@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import runner
+from legacy_support import LEGACY_CLI
 
 
 FAKE = '''#!/usr/bin/env python3
@@ -65,13 +66,13 @@ class RunnerTests(unittest.TestCase):
         return runner.create(self.repo, p)
 
     def foreground(self, d, retry=False):
-        command = [sys.executable, str(ROOT/'runner.py'), 'run', str(d)]
+        command = [sys.executable, str(LEGACY_CLI), 'run', str(d)]
         if retry: command.append('--retry-failed')
         subprocess.run(command, env=self.env, check=True, timeout=45, capture_output=True)
         return runner.read(d/'state.json')
 
     def background(self, d):
-        p = subprocess.Popen([sys.executable, str(ROOT/'runner.py'), '_worker', str(d)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen([sys.executable, str(LEGACY_CLI), '_worker', str(d)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.processes.append(p)
         return p
 
@@ -153,7 +154,7 @@ class RunnerTests(unittest.TestCase):
         d=self.create([self.task('sleep','sleep')])
         p=self.background(d)
         self.wait_for(lambda:(self.repo/'entered').exists())
-        second=subprocess.run([sys.executable,str(ROOT/'runner.py'),'start',str(d)],env=self.env,capture_output=True)
+        second=subprocess.run([sys.executable,str(LEGACY_CLI),'start',str(d)],env=self.env,capture_output=True)
         self.assertNotEqual(second.returncode,0)
         (d/'STOP').touch();p.wait(timeout=6)
 
@@ -176,13 +177,13 @@ class RunnerTests(unittest.TestCase):
         (d/'STOP').touch()
         self.wait_for(lambda:runner.read(d/'state.json')['status']=='stopped')
         self.fake.write_text(FAKE.replace('time.sleep(30)', 'Path("sleep").write_text("yes")'))
-        launch=subprocess.run([sys.executable,str(ROOT/'runner.py'),'resume',str(d)],env=self.env,capture_output=True,text=True,check=True)
+        launch=subprocess.run([sys.executable,str(LEGACY_CLI),'resume',str(d)],env=self.env,capture_output=True,text=True,check=True)
         self.assertEqual(json.loads(launch.stdout)['status'],'launching')
         self.wait_for(lambda:runner.read(d/'state.json')['status']=='completed')
 
     def test_frozen_plan_change_is_rejected(self):
         d=self.create([self.task('a')]);plan=runner.read(d/'plan.json');plan['objective']='changed';runner.save(d/'plan.json',plan)
-        r=subprocess.run([sys.executable,str(ROOT/'runner.py'),'run',str(d)],env=self.env,capture_output=True)
+        r=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,capture_output=True)
         self.assertNotEqual(r.returncode,0)
         self.assertFalse((self.repo/'a').exists())
 

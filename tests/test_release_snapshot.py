@@ -1,679 +1,358 @@
-"""Offline release transactions: only disposable homes/bin/process facades."""
-import base64
-import copy
-import hashlib
+"""Sealing, read-only diagnostics and journal safeguards with local fixtures."""
+from contextlib import closing, redirect_stdout, redirect_stderr
+import io
 import json
 import os
 from pathlib import Path
-import shutil
 import signal
 import sqlite3
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
 
+from release_support import CURRENT, FakeSystem, legacy_entry, seal, snapshot, unseal, write
 from scripts import release_snapshot as release
-
-
-class FakeSystem:
-    def __init__(self, source):
-        self.source = source
-        self.pid = 120
-        self.calls = []
-        self.running = True
-        self.fail_start = None
-
-    def processes(self):
-        return [dict(pid=self.pid, command='fake-controller')] if self.running else []
-
-    def observer(self, state, source, *, healthy=True):
-        release.require(self.running and source == self.source, 'fake source/identity mismatch')
-        return dict(pid=self.pid, pid_identity='fake-'+str(self.pid), command='fake-controller', heartbeat=2)
-
-    def stop(self, observer):
-        release.require(observer['pid'] == self.pid, 'fake reused pid')
-        self.calls.append(('stop', self.source['root']))
-        self.running = False
-
-    def start(self, source, state, env):
-        self.calls.append(('start', source['root']))
-        if source == self.fail_start:
-            raise release.Refused('injected start failure')
-        self.pid += 1
-        self.source = source
-        self.running = True
-        return self.observer(state, source)
-
-
-def writable_remove(path):
-    if path.exists():
-        for directory, folders, files in os.walk(path, followlinks=False):
-            Path(directory).chmod(0o700)
-            for name in files:
-                p = Path(directory)/name
-                if not p.is_symlink():
-                    p.chmod(0o600)
-        shutil.rmtree(path)
 
 
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='ato-release-test ')
-        self.base = Path(self.tmp.name).resolve()
-        self.addCleanup(self.tmp.cleanup)
-        self.snapshot = self.base/'new snapshot'
-        self.snapshot.mkdir()
-        self.addCleanup(writable_remove, self.snapshot)
-        for name in ('runner.py', 'coordination.py', 'scripts/install.py', '.venv/bin/python'):
-            path = self.snapshot/name
-            path.parent.mkdir(exist_ok=True, parents=True)
-            path.write_text('synthetic offline material')
-        (self.snapshot/'.venv/bin/python').chmod(0o755)
-        self.commit = 'a'*40
-        self.freeze()
-        self.bin = self.base/'bin';self.bin.mkdir()
-        self.old = self.base/'old snapshot';self.old.mkdir()
-        for name in ('runner.py', 'coordination.py', 'python'):
-            (self.old/name).write_text('old offline source')
-        self.source = dict(root=str(self.old), python=str(self.old/'python'))
-        self.after = self.launchers(self.snapshot, self.snapshot/'.venv/bin/python')
-        for name, row in self.launchers(self.old, self.old/'python').items():
-            release.atomic_entry(self.bin/name, row)
-        self.before = release.entrypoints(self.bin)
-        self.ato = self.base/'ato';self.native = self.base/'native'
-        self.state = release.context(self.ato, self.native)
-        (self.state/'control').mkdir(parents=True)
-        release.save(self.state/'hub.json', dict(thread_id='offline-hub'))
-        release.save(self.state/'control/config.json', dict(enabled=True, hub_thread='offline-hub', max_reminders=0))
-        release.save(self.state/'notification-policy.json', dict(mode='user_input_only', completion='once'))
-        release.save(self.state/'time-policy.json', dict(mode='advisory'))
-        (self.state/'mailbox').mkdir()
-        self.db = self.state/'mailbox/state.sqlite'
-        with sqlite3.connect(self.db) as con:
-            con.execute('pragma user_version=2')
-            con.execute('create table messages(id text,state text,busy integer not null default 0)')
-            con.execute('create table execution_leases(id text, fence integer)')
-            con.execute("insert into execution_leases values('never-rewind',17)")
-        self.tasks = self.ato/'task-that-must-not-change';self.tasks.mkdir()
-        (self.tasks/'STOP').touch()
-        release.save(self.tasks/'state.json', dict(attempts=7, elapsed_seconds=900))
-        self.env = release.environment(self.ato, self.native, self.bin)
-        self.system = FakeSystem(self.source)
+        self.base = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='ato-release-fixture-'))).resolve()
+        self.paths = release.scoped_paths(self.base/'bin', self.base/'ato', self.base/'native',
+                                         legacy_hub_home=self.base/'old hub')
+        self.bin = self.paths['bin_dir']
+        self.bin.mkdir()
+        self.snapshot = snapshot(self.base/'target')
+        self.old = snapshot(self.base/'prior', legacy=True)
+        self.addCleanup(unseal, self.snapshot)
+        self.addCleanup(unseal, self.old)
+        self.system = FakeSystem()
         self.transaction = self.base/'transaction'
-        self.patch_entries = patch.object(release, 'generated_entries', return_value=self.after)
-        self.patch_entries.start();self.addCleanup(self.patch_entries.stop)
+        self.legacy_state = self.paths['legacy_state']
+        self.unified_state = self.paths['unified_state']
+        for state in (self.legacy_state, self.unified_state):
+            db = state/'mailbox/state.sqlite'
+            db.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db)) as con:
+                con.executescript("pragma user_version=2;"
+                    "create table messages(id text primary key,state text,busy int default 0);"
+                    "create table execution_leases(state text);")
+            db.chmod(0o600)
 
-    def launchers(self, root, python):
-        result = {}
-        import shlex
-        for name in release.ENTRIES:
-            script = root/('coordination.py' if name == 'ato-read-handoff' else 'runner.py')
-            data = ('#!/bin/sh\nexec '+shlex.quote(str(python))+' '+shlex.quote(str(script))+' "$@"\n').encode()
-            result[name] = dict(data=base64.b64encode(data).decode(), mode=0o755, sha256=hashlib.sha256(data).hexdigest())
-        return result
+    def message(self, state, status, busy=0):
+        with closing(sqlite3.connect(state/'mailbox/state.sqlite')) as con, con:
+            con.execute('insert into messages values(?,?,?)', ('offline-message', status, busy))
 
-    def freeze(self):
-        release.seal(self.snapshot)
-        self.snapshot.chmod(0o700)
-        release.save(self.snapshot/release.MANIFEST, dict(version=1, qualified=True,
-            root=str(self.snapshot), commit=self.commit, tree='b'*40, files=release.inventory(self.snapshot)))
-        (self.snapshot/release.MANIFEST).chmod(0o400)
-        self.snapshot.chmod(0o500)
+    def contents(self, root):
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
-    def activate(self, *, converge_mixed=False):
-        return release.activate(self.snapshot, self.commit, self.bin, self.state,
-                                self.transaction, self.env, self.system, converge_mixed=converge_mixed)
+    def old_observer(self):
+        for name in release.LEGACY:
+            legacy_entry(self.bin, name, self.old)
+        write(self.legacy_state, 'control/config.json', json.dumps(dict(enabled=True, hub_thread='fixture')))
+        write(self.legacy_state, 'hub.json', json.dumps(dict(thread_id='fixture')))
+        write(self.paths['ato_home'], 'unified-v1/host/observation.json', '{"enabled":true}')
+        source = release.launcher_sources(release.entrypoints(self.bin))['ctask-notify']
+        return self.system.seed(self.legacy_state, source)
 
-    def mixed_launchers(self):
-        sources = {}
-        for index, name in enumerate(release.ENTRIES):
-            root = self.base/('old '+name)
-            root.mkdir()
-            for filename in ('python', 'runner.py', 'coordination.py'):
-                (root/filename).write_text('offline '+name)
-            row = self.launchers(root, root/'python')[name]
-            row['mode'] = (0o700, 0o750, 0o755)[index]
-            release.atomic_entry(self.bin/name, row)
-            sources[name] = dict(root=str(root), python=str(root/'python'),
-                                script=str(root/('coordination.py' if name == 'ato-read-handoff' else 'runner.py')))
-        self.source = {k: sources['ctask-notify'][k] for k in ('root', 'python')}
-        self.system.source = self.source
-        self.before = release.entrypoints(self.bin)
-        return sources
+    def activate(self):
+        return release.activate(self.snapshot, CURRENT, self.paths, self.transaction, self.system)
 
-    def cli_args(self, mode, snapshot=None):
-        args = ['--'+mode, '--bin-dir', str(self.bin), '--ato-home', str(self.ato),
-                '--codex-home', str(self.native)]
-        if mode != 'rollback':
-            args += ['--snapshot', str(snapshot or self.snapshot), '--commit', self.commit]
+    def rollback(self):
+        return release.rollback(self.transaction, self.paths, self.system)
+
+    def args(self, mode):
+        args = ['--'+mode, '--bin-dir', str(self.bin), '--ato-home', str(self.paths['ato_home']),
+                '--codex-home', str(self.paths['codex_home']),
+                '--legacy-hub-home', str(self.paths['legacy_hub_home'])]
         if mode == 'dry-run':
             args += ['--repo', str(self.base)]
-        else:
+        if mode != 'rollback':
+            args += ['--commit', CURRENT, '--snapshot', str(self.snapshot)]
+        if mode != 'dry-run':
             args += ['--transaction', str(self.transaction)]
         return args
 
-    def filesystem_state(self):
-        return {str(p.relative_to(self.base)): (p.stat().st_mode, p.stat().st_mtime_ns,
-                    p.read_bytes() if p.is_file() else None) for p in self.base.rglob('*')}
+    def test_dry_run_reports_both_namespaces_and_is_side_effect_free(self):
+        self.old_observer()
+        self.message(self.unified_state, 'delivery_unknown')
+        snapshot_before = self.contents(self.base)
+        with patch.object(release, 'System', return_value=self.system), \
+                patch.object(release, 'git_commit', return_value=(CURRENT, 'fixture')), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(release.main(self.args('dry-run')), 0)
+        report = json.loads(out.getvalue())
+        self.assertFalse(report['activation_ready'])
+        self.assertEqual(report['observer_source']['root'], str(self.old))
+        self.assertEqual(report['mailboxes']['unified_state']['busy'], {'delivery_unknown': 1})
+        self.assertEqual(report['entrypoints']['ato'], {'present': False})
+        self.assertEqual(snapshot_before, self.contents(self.base))
+        self.assertEqual(self.system.calls, [])
+        self.assertFalse(self.transaction.exists())
 
-    def safety_bytes(self):
-        return {str(p.relative_to(self.ato)):p.read_bytes() for p in self.ato.rglob('*') if p.is_file()}
+    def test_dry_run_missing_candidate_does_not_create_it(self):
+        missing = self.base/'missing'
+        args = self.args('dry-run')
+        args[-1] = str(missing)
+        with patch.object(release, 'System', return_value=self.system), \
+                patch.object(release, 'git_commit', return_value=(CURRENT, 'fixture')), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(release.main(args), 0)
+        self.assertIn('snapshot must be staged and qualified', json.loads(out.getvalue())['blockers'])
+        self.assertFalse(missing.exists())
 
-    def test_mixed_dry_run_reports_all_sources_observer_slots_policies_and_blockers_without_writes(self):
-        sources = self.mixed_launchers()
-        for staged in (False, True):
-            for busy in (False, True):
-                with self.subTest(staged=staged, busy=busy):
-                    with sqlite3.connect(self.db) as con:
+    def test_active_mailbox_and_turn_slots_refuse_both_directions_before_stop(self):
+        self.old_observer()
+        for state in (self.legacy_state, self.unified_state):
+            for status, busy in [('queued', 0), ('claimed', 0), ('dispatching', 0),
+                                 ('delivery_unknown', 0), ('delivered', 1), ('cancelled', 1)]:
+                with self.subTest(state=state, status=status):
+                    self.message(state, status, busy)
+                    with self.assertRaisesRegex(release.Refused, 'mailbox is busy'):
+                        self.activate()
+                    with closing(sqlite3.connect(state/'mailbox/state.sqlite')) as con, con:
                         con.execute('delete from messages')
-                        con.execute("insert into messages values('done','delivered',0)")
-                        if busy:
-                            con.execute("insert into messages values('active','cancelled',1)")
-                            con.execute("insert into messages values('unknown','delivery_unknown',0)")
-                    snapshot = self.snapshot if staged else self.base/'not-staged'
-                    before = self.filesystem_state()
-                    with patch.object(release, 'System', return_value=self.system), patch.object(
-                            release, 'git_commit', return_value=(self.commit, 'b'*40)), patch('sys.stdout') as out:
-                        self.assertEqual(release.main(self.cli_args('dry-run', snapshot)), 0)
-                        report = json.loads(''.join(call.args[0] for call in out.write.call_args_list))
-                    self.assertEqual(self.filesystem_state(), before)
-                    self.assertTrue(report['mixed_sources'])
-                    self.assertTrue(report['converge_required'])
-                    self.assertFalse(report['activation_ready'])
-                    self.assertEqual(report['stage_required'], not staged)
-                    for name, source in sources.items():
-                        self.assertEqual({k: report['entrypoints'][name][k] for k in source}, source)
-                        self.assertEqual(report['entrypoints'][name]['sha256'], self.before[name]['sha256'])
-                    self.assertEqual(report['observer_source'], self.source)
-                    self.assertEqual(report['observer']['pid'], self.system.pid)
-                    self.assertEqual(report['observer']['pid_identity'], 'fake-120')
-                    self.assertEqual(report['mailbox']['idle'], not busy)
-                    self.assertEqual(report['mailbox']['turn_slots'],
-                                     dict(idle=2 if busy else 1, busy=int(busy), total=3 if busy else 1))
-                    self.assertEqual(report['mailbox']['busy'],
-                                     {'cancelled': 1, 'delivery_unknown': 1} if busy else {})
-                    self.assertEqual(report['policies'], release.policy_hashes(self.state))
-                    self.assertEqual(report['policy_status']['time-policy.json']['settings']['mode'], 'advisory')
-                    self.assertEqual(report['policy_status']['notification-policy.json']['settings'],
-                                     dict(mode='user_input_only', completion='once'))
-                    self.assertTrue(report['policy_status']['control/config.json']['settings']['enabled'])
-                    self.assertIn('--converge-mixed-entrypoints', report['activation_requires'])
-                    self.assertTrue(any('mixed entrypoints' in reason for reason in report['activation_blockers']))
-                    self.assertEqual(self.system.calls, [])
-                    self.assertFalse(self.transaction.exists())
-                    self.assertFalse((self.bin/'.ato-release.lock').exists())
-
-    def test_mixed_cli_activation_requires_both_explicit_flags(self):
-        self.mixed_launchers()
-        args = self.cli_args('activate')
-        for flags in ([], ['--converge-mixed-entrypoints']):
-            with self.subTest(flags=flags), patch('sys.stderr'), self.assertRaises(SystemExit) as error:
-                release.main(args+flags)
-            self.assertEqual(error.exception.code, 2)
-        with patch.object(release, 'System', return_value=self.system), patch('sys.stderr') as err:
-            self.assertEqual(release.main(args+['--allow-runtime-change']), 2)
-        self.assertIn('--converge-mixed-entrypoints', ''.join(call.args[0] for call in err.write.call_args_list))
         self.assertEqual(self.system.calls, [])
-        self.assertEqual(release.entrypoints(self.bin), self.before)
+        self.activate()
+        self.system.calls.clear()
+        self.message(self.legacy_state, 'delivery_unknown')
+        with self.assertRaisesRegex(release.Refused, 'mailbox is busy'):
+            self.rollback()
+        self.assertEqual(self.system.calls, [])
+
+    def test_active_execution_lease_is_not_assumed_quiescent_by_time(self):
+        db = self.unified_state/'mailbox/state.sqlite'
+        with closing(sqlite3.connect(db)) as con, con:
+            con.execute("insert into execution_leases values('active')")
+        with self.assertRaisesRegex(release.Refused, 'mailbox is busy'):
+            self.activate()
         self.assertFalse(self.transaction.exists())
 
-    def test_mixed_explicit_cli_convergence_and_rollback_restore_each_old_entry_and_notify_observer(self):
-        sources = self.mixed_launchers()
-        before = self.safety_bytes()
-        with patch.object(release, 'System', return_value=self.system), patch('sys.stdout'):
-            self.assertEqual(release.main(self.cli_args('activate')+
-                ['--allow-runtime-change', '--converge-mixed-entrypoints']), 0)
-        self.assertEqual(release.entrypoints(self.bin), self.after)
-        self.assertEqual(self.safety_bytes(), before)
-        journal = release.read(self.transaction/'transaction.json')
-        self.assertEqual(journal['before']['entries'], self.before)
-        self.assertEqual(journal['before']['sources'], sources)
-        self.assertEqual(journal['before']['observer_source'], self.source)
-        self.assertTrue(journal['before']['mixed_sources'])
-        self.assertEqual(self.system.calls, [('stop', self.source['root']), ('start', str(self.snapshot))])
-        # New attempts/STOP/ledger state belong to the task, never the release.
-        with sqlite3.connect(self.db) as con:
-            con.execute('update execution_leases set fence=19')
-        release.save(self.tasks/'state.json', dict(attempts=9, elapsed_seconds=975))
-        after = self.safety_bytes()
-        with patch.object(release, 'System', return_value=self.system), patch('sys.stdout'):
-            self.assertEqual(release.main(self.cli_args('rollback')+['--allow-runtime-change']), 0)
-        self.assertEqual(release.entrypoints(self.bin), self.before)
-        self.assertEqual(self.system.source, self.source)
-        self.assertEqual(self.system.calls[-1], ('start', sources['ctask-notify']['root']))
-        self.assertEqual(self.safety_bytes(), after)
-
-    def test_mixed_convergence_validates_each_launcher_and_source_before_stop(self):
-        sources = self.mixed_launchers()
-        for name in release.ENTRIES:
-            path = self.bin/name
-            with self.subTest(name=name, invalid='launcher'):
-                path.write_text('#!/bin/sh\nexec /missing/python /missing/not-runner.py "$@"\n')
-                with self.assertRaisesRegex(release.Refused, 'unrecognized installed source'):
-                    self.activate(converge_mixed=True)
-                release.atomic_entry(path, self.before[name])
-            for kind in ('python', 'script'):
-                with self.subTest(name=name, invalid=kind):
-                    source = Path(sources[name][kind])
-                    source.rename(source.with_suffix('.unavailable'))
-                    with self.assertRaisesRegex(release.Refused, 'previous source is unavailable: '+name):
-                        self.activate(converge_mixed=True)
-                    source.with_suffix('.unavailable').rename(source)
-            self.assertEqual(release.entrypoints(self.bin), self.before)
-            self.assertEqual(self.system.calls, [])
-            self.assertFalse(self.transaction.exists())
-
-    def test_mixed_observer_requires_notify_source_exact_command_identity_and_uniqueness(self):
-        sources = self.mixed_launchers()
-        system = release.System()
-        row = dict(pid=120, pid_identity='verified', state='watching', heartbeat=time.time())
-        release.save(self.state/'control/process.json', row)
-        def process(name):
-            return dict(pid=120, command=sources[name]['python']+' '+str(Path(sources[name]['root'])/'runner.py')+' _controller')
-        correct = process('ctask-notify')
-        with patch.object(system, 'processes', return_value=[correct]), patch.object(system, 'identity', return_value='verified'):
-            self.assertEqual(release.inspect(self.bin, self.state, system, allow_mixed=True)['observer']['pid'], 120)
-            for processes in ([process('ctask')], [process('ato-read-handoff')], [correct, correct],
-                              [dict(correct, command=correct['command']+' --extra')],
-                              [dict(correct, command=correct['command'].replace(' _controller', '  _controller'))]):
-                with self.subTest(processes=processes), patch.object(system, 'processes', return_value=processes), patch('os.kill') as kill:
-                    with self.assertRaisesRegex(release.Refused, 'exactly one controller'):
-                        release.activate(self.snapshot, self.commit, self.bin, self.state,
-                                         self.transaction, self.env, system, converge_mixed=True)
-                    kill.assert_not_called()
-            with patch.object(system, 'identity', return_value='reused'), patch('os.kill') as kill:
-                with self.assertRaisesRegex(release.Refused, 'pid_identity mismatch'):
-                    release.activate(self.snapshot, self.commit, self.bin, self.state,
-                                     self.transaction, self.env, system, converge_mixed=True)
-                kill.assert_not_called()
-        self.assertEqual(release.entrypoints(self.bin), self.before)
-        self.assertFalse(self.transaction.exists())
-
-    def test_mixed_convergence_refuses_busy_mailbox_before_stop(self):
-        self.mixed_launchers()
-        with sqlite3.connect(self.db) as con:
-            con.execute("insert into messages values('terminal-slot','delivered',1)")
-        before = self.safety_bytes()
+    def test_busy_after_old_observer_stops_preserves_entries_and_records_recovery(self):
+        self.old_observer()
+        original = release.entrypoints(self.bin)
+        self.system.after_stop = lambda: self.message(self.legacy_state, 'delivery_unknown')
         with self.assertRaisesRegex(release.Refused, 'not idle'):
-            self.activate(converge_mixed=True)
-        self.assertEqual(self.system.calls, [])
-        self.assertEqual(self.safety_bytes(), before)
-        self.assertEqual(release.entrypoints(self.bin), self.before)
+            self.activate()
+        self.assertEqual(release.entrypoints(self.bin), original)
+        self.assertEqual(release.read(self.transaction/'transaction.json')['state'], 'recovery_required')
+        self.assertEqual(release.mailbox(self.legacy_state)['busy'], {'delivery_unknown': 1})
 
-    def test_mixed_convergence_checks_busy_again_after_stop_with_begin_immediate(self):
-        self.mixed_launchers()
-        original = self.system.stop
-        def stop(observer):
-            original(observer)
-            with sqlite3.connect(self.db) as con:
-                con.execute("insert into messages values('racer','cancelled',1)")
-        with patch.object(self.system, 'stop', side_effect=stop), patch.object(release, 'atomic_entry') as replace:
-            with self.assertRaisesRegex(release.Refused, 'not idle'):
-                self.activate(converge_mixed=True)
-            replace.assert_not_called()
-        self.assertEqual(release.entrypoints(self.bin), self.before)
+    def test_cutover_and_repeat_rollback_restore_exact_source_observer_and_original_namespace(self):
+        first = self.old_observer()
+        prior = release.entrypoints(self.bin)
+        runtime_before = self.contents(self.paths['ato_home'])
+        self.assertEqual(self.activate()['observer']['surface'], release.SURFACE)
+        self.assertEqual([p.name for p in self.bin.iterdir()], ['ato'])
+        self.assertEqual(self.rollback()['observer']['surface'], 'legacy')
+        self.assertEqual(release.entrypoints(self.bin), prior)
+        self.assertEqual(runtime_before, self.contents(self.paths['ato_home']))
+        self.assertIn(('stop', 'legacy', first['pid']), self.system.calls)
+        self.assertEqual(self.system.calls[-1][2]['ATO_HOME'], str(self.paths['legacy_home']))
+        calls_before = list(self.system.calls)
+        self.rollback()
+        self.assertEqual(self.system.calls, calls_before)
+
+    def test_existing_unified_observer_rolls_back_to_its_original_seal(self):
+        prior = snapshot(self.base/'prior unified', commit='d'*40)
+        self.addCleanup(unseal, prior)
+        source = release.snapshot_source(prior)
+        release.atomic_entry(self.bin/'ato', release.entry_set(source)['ato'])
+        source = release.launcher_sources(release.entrypoints(self.bin))['ato']
+        original = self.system.seed(self.unified_state, source)
+        write(self.paths['ato_home'], 'unified-v1/host/observation.json', '{"enabled":true}')
+        activated = self.activate()
+        self.assertNotEqual(activated['observer']['command'], original['command'])
+        restored = self.rollback()
+        self.assertEqual(restored['observer']['command'], original['command'])
+        self.assertEqual(release.launcher_sources(release.entrypoints(self.bin))['ato'], source)
+
+    def test_both_mailbox_writes_are_excluded_during_each_replacement(self):
+        self.old_observer()
+        original = release.atomic_entry
+
+        def locked(path, row):
+            for state in (self.legacy_state, self.unified_state):
+                with closing(sqlite3.connect(state/'mailbox/state.sqlite', timeout=.01)) as con:
+                    with self.assertRaises(sqlite3.OperationalError):
+                        con.execute("insert into messages values('racer','queued',0)")
+            original(path, row)
+
+        with patch.object(release, 'atomic_entry', side_effect=locked):
+            self.activate()
+            self.rollback()
+
+    def test_failed_target_observer_is_recovered_with_recorded_legacy_identity(self):
+        self.old_observer()
+        prior = release.entrypoints(self.bin)
+        self.system.fail_after_spawn = True
+        with self.assertRaisesRegex(release.Refused, 'after observer admission'):
+            self.activate()
+        journal = release.read(self.transaction/'transaction.json')
+        self.assertEqual(journal['state'], 'rolled_back')
+        self.assertEqual(release.entrypoints(self.bin), prior)
+        self.assertIn(('stop', release.SURFACE, journal['new_observer']['pid']), self.system.calls)
+        self.assertEqual(journal['rollback_observer']['surface'], 'legacy')
+
+    def test_changed_old_seal_and_policy_are_recovery_required_without_overwrite(self):
+        self.old_observer()
+        self.activate()
+        current = release.entrypoints(self.bin)
+        self.old.chmod(0o700)
+        with self.assertRaisesRegex(release.Refused, 'read-only'):
+            self.rollback()
+        self.old.chmod(0o500)
+        policy = write(self.legacy_state, 'notification-policy.json', '{"mode":"user_input_only"}')
+        with self.assertRaisesRegex(release.Refused, 'policies changed'):
+            self.rollback()
+        self.assertEqual(policy.read_text(), '{"mode":"user_input_only"}')
+        self.assertEqual(release.entrypoints(self.bin), current)
         self.assertEqual(release.read(self.transaction/'transaction.json')['state'], 'recovery_required')
 
-    def test_mixed_activate_and_rollback_hold_writer_gate_during_every_entry_replace(self):
-        self.mixed_launchers()
-        original = release.atomic_entry
-        calls = []
-        def replace(path, row):
-            with sqlite3.connect(self.db, timeout=.01) as con:
-                with self.assertRaises(sqlite3.OperationalError):
-                    con.execute("insert into messages values('concurrent','queued',0)")
-            calls.append(path.name)
-            original(path, row)
-        with patch.object(release, 'atomic_entry', side_effect=replace):
-            self.activate(converge_mixed=True)
-            release.rollback(self.transaction, self.bin, self.state, self.env, self.system)
-        self.assertEqual(calls, list(release.ENTRIES)*2)
-        self.assertEqual(release.entrypoints(self.bin), self.before)
-
-    def test_mixed_partial_failure_restores_distinct_bytes_modes_and_notify_observer(self):
-        self.mixed_launchers()
-        before = self.safety_bytes()
-        original = release.atomic_entry
-        def replace(path, row):
-            if path.name == 'ctask-notify' and row == self.after[path.name]:
-                raise OSError('injected mixed rename failure')
-            original(path, row)
-        with patch.object(release, 'atomic_entry', side_effect=replace):
-            with self.assertRaisesRegex(OSError, 'mixed rename failure'):
-                self.activate(converge_mixed=True)
-        self.assertEqual(release.entrypoints(self.bin), self.before)
-        self.assertEqual(self.system.source, self.source)
-        self.assertTrue(self.system.running)
-        self.assertEqual(self.safety_bytes(), before)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'], 'rolled_back')
-
-    def test_activate_and_rollback_preserve_policy_tasks_and_ledger_exactly(self):
-        before = self.safety_bytes()
-        result = self.activate()
-        self.assertEqual(result['state'], 'activated')
-        self.assertEqual(release.entrypoints(self.bin), self.after)
-        self.assertEqual(self.system.calls, [('stop',str(self.old)),('start',str(self.snapshot))])
-        self.assertEqual(self.safety_bytes(), before)
-        # New business progress after activation must survive rollback.
-        with sqlite3.connect(self.db) as con:
-            con.execute("update execution_leases set fence=18")
-        release.save(self.tasks/'state.json', dict(attempts=8, elapsed_seconds=950))
-        after = self.safety_bytes()
-        result = release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertEqual(result['state'],'rolled_back')
-        self.assertEqual(release.entrypoints(self.bin), self.before)
-        self.assertEqual(self.safety_bytes(), after)
-        self.assertEqual(self.system.source, self.source)
-        self.assertEqual((self.transaction/'transaction.json').stat().st_mode & 0o777,0o600)
-
-    def test_every_nonidle_mailbox_state_refuses_before_stop_or_entrypoint_write(self):
-        for state in sorted(release.BUSY):
-            with self.subTest(state=state):
-                with sqlite3.connect(self.db) as con:
-                    con.execute('delete from messages');con.execute('insert into messages(id,state) values(?,?)',('one',state))
-                before = self.safety_bytes()
-                with self.assertRaisesRegex(release.Refused,'not idle'):
-                    self.activate()
-                self.assertEqual(release.entrypoints(self.bin),self.before)
-                self.assertEqual(self.system.calls,[])
-                self.assertEqual(self.safety_bytes(),before)
-                self.assertFalse(self.transaction.exists())
-
-    def test_inflight_slots_refuse_even_when_state_is_delivered_or_terminal(self):
-        for state in ('delivered', 'accepted', 'cancelled', 'expired'):
-            with self.subTest(state=state):
-                with sqlite3.connect(self.db) as con:
-                    con.execute('delete from messages')
-                    con.execute('insert into messages values(?,?,1)', ('inflight',state))
-                with self.assertRaisesRegex(release.Refused, 'not idle'):
-                    self.activate()
-                self.assertEqual(self.system.calls, [])
-                self.assertEqual(release.entrypoints(self.bin), self.before)
-
-    def test_message_queued_during_graceful_stop_refuses_cutover(self):
-        original = self.system.stop
-        def stop(observer):
-            original(observer)
-            with sqlite3.connect(self.db) as con:
-                con.execute("insert into messages(id,state) values('new','queued')")
-        with patch.object(self.system,'stop',side_effect=stop):
-            with self.assertRaisesRegex(release.Refused,'not idle'):
+    def test_active_selected_process_and_legacy_workflow_block_before_stop(self):
+        self.old_observer()
+        other = dict(pid=8, command=str(self.old/'runner.py') + ' _worker fixture')
+        with patch.object(self.system, 'processes', return_value=[other]):
+            with self.assertRaisesRegex(release.Refused, 'active commands'):
                 self.activate()
-        self.assertEqual(release.entrypoints(self.bin), self.before)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'],'recovery_required')
-        self.assertEqual(release.mailbox(self.state)['busy'],{'queued':1})
+        flow = self.base/'fixture repo/.codex/tasks/workflows/test'
+        write(flow, 'state.json', '{"status":"running","owner_pid":1234}')
+        with closing(sqlite3.connect(self.legacy_state/'control/state.sqlite')) as con, con:
+            con.execute('create table workflows(path text)')
+            con.execute('insert into workflows values(?)', (str(flow),))
+        with self.assertRaisesRegex(release.Refused, 'workflow has unresolved activity'):
+            self.activate()
+        self.assertEqual(self.system.calls, [])
 
-    def test_partial_entrypoint_failure_restores_all_three_and_old_observer(self):
-        original = release.atomic_entry
-        failed = [False]
-        def replace(path,row):
-            if path.name == 'ctask-notify' and row == self.after[path.name] and not failed[0]:
-                failed[0]=True
-                raise OSError('injected rename failure')
-            original(path,row)
-        before=self.safety_bytes()
-        with patch.object(release,'atomic_entry',side_effect=replace):
-            with self.assertRaisesRegex(OSError,'rename failure'):self.activate()
-        self.assertEqual(release.entrypoints(self.bin),self.before)
-        self.assertEqual(self.system.source,self.source)
-        self.assertTrue(self.system.running)
-        self.assertEqual(self.safety_bytes(),before)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'],'rolled_back')
-
-    def test_failed_new_observer_restores_old_without_ledger_restoration(self):
-        self.system.fail_start = dict(root=str(self.snapshot),python=str(self.snapshot/'.venv/bin/python'))
-        before=self.safety_bytes()
-        with self.assertRaisesRegex(release.Refused,'start failure'):self.activate()
-        self.assertEqual(release.entrypoints(self.bin),self.before)
-        self.assertEqual(self.safety_bytes(),before)
-        self.assertEqual(self.system.source,self.source)
-
-    def test_keyboard_interrupt_records_recovery_and_propagates(self):
-        with patch.object(self.system,'start',side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):self.activate()
-        self.assertEqual(release.entrypoints(self.bin),self.before)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'],'recovery_required')
-
-    def test_rollback_rejects_busy_mailbox_and_external_entrypoint_replacement(self):
-        self.activate()
-        with sqlite3.connect(self.db) as con:con.execute("insert into messages(id,state) values('unknown','delivery_unknown')")
-        with self.assertRaisesRegex(release.Refused,'not idle'):
-            release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertEqual(release.entrypoints(self.bin),self.after)
-        with sqlite3.connect(self.db) as con:con.execute('delete from messages')
-        (self.bin/'ctask').write_text('third-party installation')
-        with self.assertRaisesRegex(release.Refused,'outside this transaction'):
-            release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertEqual((self.bin/'ctask').read_text(),'third-party installation')
-
-    def test_policy_change_is_never_overwritten_on_failed_cutover(self):
-        original = self.system.stop
-        def stop(observer):
-            original(observer)
-            release.save(self.state/'time-policy.json',dict(mode='enforced',source='new actual user choice'))
-        with patch.object(self.system,'stop',side_effect=stop):
-            with self.assertRaisesRegex(release.Refused,'policy changed'):self.activate()
-        self.assertEqual(release.entrypoints(self.bin),self.before)
-        self.assertEqual(release.read(self.state/'time-policy.json')['mode'],'enforced')
-
-    def test_wrong_identity_and_multiple_controllers_refuse_without_changes(self):
-        for reason in ('PID reuse','multiple controllers'):
-            with self.subTest(reason=reason), patch.object(self.system,'observer',side_effect=release.Refused(reason)):
-                with self.assertRaisesRegex(release.Refused,reason):self.activate()
-                self.assertEqual(self.system.calls,[])
-                self.assertFalse(self.transaction.exists())
+    def test_explicit_change_scope_and_cross_version_reference(self):
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(release.main(self.args('activate')), 2)
+        binding = legacy_entry(self.bin, 'ctask', self.old)
+        data = binding.read_text().replace(str(self.old), str(self.snapshot))
+        binding.write_text(data)
+        with self.assertRaises(release.Refused):
+            self.activate()
+        self.assertFalse(self.transaction.exists())
 
     def test_snapshot_rejects_changed_bytes_modes_links_extra_files_and_commit(self):
-        with self.assertRaises(release.Refused):release.verify_snapshot(self.snapshot,'c'*40)
-        p=self.snapshot/'runner.py'
-        p.chmod(0o644)
-        with self.assertRaisesRegex(release.Refused,'changed'):release.verify_snapshot(self.snapshot,self.commit)
-        p.chmod(0o444)
-        self.snapshot.chmod(0o700);(self.snapshot/'unexpected').write_text('extra');self.snapshot.chmod(0o500)
-        with self.assertRaisesRegex(release.Refused,'changed'):release.verify_snapshot(self.snapshot,self.commit)
-        self.snapshot.chmod(0o700);(self.snapshot/'unexpected').unlink();self.snapshot.chmod(0o500)
-        p.chmod(0o644);p.write_text('tampered');p.chmod(0o444)
-        with self.assertRaisesRegex(release.Refused,'changed'):release.verify_snapshot(self.snapshot,self.commit)
+        with self.assertRaises(release.Refused):
+            release.verify_snapshot(self.snapshot, 'c'*40)
+        source = self.snapshot/'ato.py'
+        source.chmod(0o644)
+        with self.assertRaisesRegex(release.Refused, 'changed'):
+            release.verify_snapshot(self.snapshot, CURRENT)
+        source.chmod(0o444)
+        self.snapshot.chmod(0o700)
+        extra = write(self.snapshot, 'unexpected')
+        self.snapshot.chmod(0o500)
+        with self.assertRaisesRegex(release.Refused, 'changed'):
+            release.verify_snapshot(self.snapshot, CURRENT)
+        self.snapshot.chmod(0o700)
+        extra.unlink()
+        source.chmod(0o644)
+        source.write_text('tampered')
+        source.chmod(0o444)
+        self.snapshot.chmod(0o500)
+        with self.assertRaisesRegex(release.Refused, 'changed'):
+            release.verify_snapshot(self.snapshot, CURRENT)
 
     def test_external_links_are_forbidden_and_sealing_does_not_chmod_interpreter(self):
-        external=self.base/'external';external.write_text('host');external.chmod(0o755)
+        outside = write(self.base, 'external', mode=0o755)
         self.snapshot.chmod(0o700)
-        (self.snapshot/'escape').symlink_to(external)
-        with self.assertRaisesRegex(release.Refused,'external symlink'):release.inventory(self.snapshot)
-        (self.snapshot/'escape').unlink()
-        p=self.snapshot/'.venv/bin/python';p.parent.chmod(0o755);p.unlink();p.symlink_to(external)
-        release.seal(self.snapshot)
-        self.assertEqual(external.stat().st_mode & 0o777,0o755)
-        manifest=release.inventory(self.snapshot)
-        self.assertEqual(manifest['.venv/bin/python']['external_sha256'],release.sha(external))
+        escape = self.snapshot/'escape'
+        escape.symlink_to(outside)
+        with self.assertRaisesRegex(release.Refused, 'external symlink'):
+            release.inventory(self.snapshot)
+        escape.unlink()
+        python = self.snapshot/'.venv/bin/python'
+        python.parent.chmod(0o700)
+        python.unlink()
+        python.symlink_to(outside)
+        seal(self.snapshot, CURRENT)
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(release.inventory(self.snapshot)['.venv/bin/python']['external_sha256'], release.sha(outside))
+        outside.write_text('updated executable')
+        with self.assertRaisesRegex(release.Refused, 'changed'):
+            release.verify_snapshot(self.snapshot, CURRENT)
 
     def test_mailbox_inspection_uses_wal_without_changing_original_files(self):
-        con=sqlite3.connect(self.db)
-        try:
+        path = self.unified_state/'mailbox/state.sqlite'
+        with closing(sqlite3.connect(path)) as con:
             con.execute('pragma journal_mode=WAL')
-            con.execute("insert into messages(id,state) values('in-wal','delivery_unknown')");con.commit()
-            before=self.safety_bytes()
-            self.assertEqual(release.mailbox(self.state)['busy'],{'delivery_unknown':1})
-            self.assertEqual(self.safety_bytes(),before)
-        finally:con.close()
+            self.message(self.unified_state, 'delivery_unknown')
+            before = self.contents(self.unified_state)
+            self.assertEqual(release.mailbox(self.unified_state)['busy'], {'delivery_unknown': 1})
+            self.assertEqual(before, self.contents(self.unified_state))
 
-    def test_idle_boundary_excludes_concurrent_writers_but_does_not_change_rows(self):
-        before=self.safety_bytes()
-        with release.idle_boundary(self.state):
-            con=sqlite3.connect(self.db,timeout=.01)
-            try:
-                with self.assertRaises(sqlite3.OperationalError):con.execute("insert into messages(id,state) values('racer','queued')")
-            finally:con.close()
-        self.assertEqual(self.safety_bytes(),before)
-
-    def test_dry_run_reads_only_and_reports_busy_plan(self):
-        with sqlite3.connect(self.db) as con:con.execute("insert into messages(id,state) values('queued','queued')")
-        before=self.safety_bytes();bins=release.entrypoints(self.bin)
-        args=['--dry-run','--repo',str(self.base),'--commit',self.commit,'--snapshot',str(self.snapshot),
-              '--bin-dir',str(self.bin),'--ato-home',str(self.ato),'--codex-home',str(self.native)]
-        with patch.object(release,'System',return_value=self.system),patch.object(release,'git_commit',return_value=(self.commit,'b'*40)),patch('sys.stdout') as out:
-            self.assertEqual(release.main(args),0)
-            text=''.join(call.args[0] for call in out.write.call_args_list)
-        self.assertFalse(json.loads(text)['activation_ready'])
-        self.assertEqual(self.system.calls,[])
-        self.assertEqual(release.entrypoints(self.bin),bins)
-        self.assertEqual(self.safety_bytes(),before)
-        self.assertFalse((self.bin/'.ato-release.lock').exists())
-
-    def test_dry_run_missing_snapshot_reports_staging_required_without_writes(self):
-        args=['--dry-run','--repo',str(self.base),'--commit',self.commit,'--snapshot',str(self.base/'not-staged'),
-              '--bin-dir',str(self.bin),'--ato-home',str(self.ato),'--codex-home',str(self.native)]
-        before=self.safety_bytes()
-        with patch.object(release,'System',return_value=self.system),patch.object(release,'git_commit',return_value=(self.commit,'b'*40)),patch('sys.stdout') as out:
-            self.assertEqual(release.main(args),0)
-            result=json.loads(''.join(call.args[0] for call in out.write.call_args_list))
-        self.assertTrue(result['stage_required'])
-        self.assertFalse(result['activation_ready'])
-        self.assertFalse((self.base/'not-staged').exists())
-        self.assertEqual(self.safety_bytes(),before)
-
-    def test_explicit_change_flag_and_context_paths_are_required(self):
-        args=['--activate','--snapshot',str(self.snapshot),'--commit',self.commit,'--bin-dir',str(self.bin),
-              '--ato-home',str(self.ato),'--codex-home',str(self.native),'--transaction',str(self.transaction)]
-        with patch('sys.stderr'),self.assertRaises(SystemExit) as result:release.main(args)
-        self.assertEqual(result.exception.code,2)
-        with patch('sys.stderr'):
-            self.assertEqual(release.main(args+['--allow-runtime-change','--transaction',str(self.tasks/'bad-backup')]),2)
-        self.assertFalse((self.tasks/'bad-backup').exists())
-
-    def test_minimal_environment_and_legacy_layout_match_runtime_locator(self):
-        with patch.dict(os.environ,dict(NODE_OPTIONS='evil',NODE_PATH='evil',PYTHONPATH='evil',DYLD_INSERT_LIBRARIES='evil',CTASK_SESSION_TOKEN='secret')):
-            env=release.environment(self.ato,self.native,self.bin)
-        for key in ('NODE_OPTIONS','NODE_PATH','PYTHONPATH','DYLD_INSERT_LIBRARIES','CTASK_SESSION_TOKEN'):
-            self.assertNotIn(key,env)
-        self.assertEqual(env['PATH'],release.PATH)
-        self.assertEqual(release.context(self.native,self.native,legacy=True),self.native/'ctask-interaction')
-        with self.assertRaises(release.Refused):release.context(self.ato,self.native,legacy=True)
-
-
-    def hub_entry(self, root, python, mode=0o755):
-        import shlex
-        data=('#!/bin/sh\nif [ -z "${ATO_HOME:-}" ]; then\n'
-              '  export ATO_HOME="$HOME/.local/share/ato-hub-state"\nfi\nexec '+shlex.quote(str(python))+' '+
-              shlex.quote(str(root/'hub_cli.py'))+' "$@"\n').encode()
-        return dict(data=base64.b64encode(data).decode(),mode=mode,sha256=hashlib.sha256(data).hexdigest())
-
-    def prepare_hub_snapshot(self):
-        self.snapshot.chmod(0o700);(self.snapshot/'hub_cli.py').write_text('synthetic hub source')
-        self.freeze()
-        self.after[release.HUB_ENTRY]=self.hub_entry(self.snapshot,self.snapshot/'.venv/bin/python')
-
-    def test_include_hub_first_dry_run_activate_and_rollback_delete_only_new_entry(self):
-        self.prepare_hub_snapshot();before=self.filesystem_state();protected=self.safety_bytes()
-        with patch.object(release,'System',return_value=self.system),patch.object(
-                release,'git_commit',return_value=(self.commit,'b'*40)),patch('sys.stdout') as out:
-            self.assertEqual(release.main(self.cli_args('dry-run')+['--include-hub']),0)
-            report=json.loads(''.join(call.args[0] for call in out.write.call_args_list))
-        self.assertTrue(report['include_hub']);self.assertEqual(report['entrypoints']['ato-hub'],dict(present=False))
-        self.assertFalse(report['mixed_sources']);self.assertEqual(before,self.filesystem_state())
-        release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
-        self.assertEqual(release.entrypoints(self.bin),self.after)
-        journal=release.read(self.transaction/'transaction.json')
-        self.assertIsNone(journal['before']['entries']['ato-hub'])
-        release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertFalse((self.bin/'ato-hub').exists());self.assertEqual(release.entrypoints(self.bin),self.before)
-        self.assertEqual(self.safety_bytes(),protected)
-
-    def test_existing_hub_is_auto_included_and_rollback_restores_exact_old_bytes_and_mode(self):
-        self.prepare_hub_snapshot()
-        old=self.base/'old independent hub';old.mkdir()
-        (old/'python').write_text('offline Python');(old/'hub_cli.py').write_text('old hub source')
-        row=self.hub_entry(old,old/'python',mode=0o750);release.atomic_entry(self.bin/'ato-hub',row)
-        before=release.entrypoints(self.bin);protected=self.safety_bytes()
-        with patch.object(release,'System',return_value=self.system),patch.object(
-                release,'git_commit',return_value=(self.commit,'b'*40)),patch('sys.stdout') as out:
-            self.assertEqual(release.main(self.cli_args('dry-run')),0)
-            report=json.loads(''.join(call.args[0] for call in out.write.call_args_list))
-        self.assertEqual(report['entrypoints']['ato-hub']['script'],str(old/'hub_cli.py'))
-        self.assertFalse(report['mixed_sources'])  # Hub source does not alter three-entry convergence.
-        self.activate();self.assertEqual(release.entrypoints(self.bin),self.after)
-        release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertEqual(release.entrypoints(self.bin),before);self.assertEqual(self.safety_bytes(),protected)
-
-    def test_include_hub_requires_qualified_hub_source_before_any_switch(self):
-        before=release.entrypoints(self.bin)
-        with self.assertRaisesRegex(release.Refused,'hub_cli.py'):
-            release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
-        self.assertFalse(self.transaction.exists());self.assertEqual(release.entrypoints(self.bin),before)
-        self.assertEqual(self.system.calls,[])
-
-    def test_include_hub_CLI_activate_and_rollback_preserve_prior_absence(self):
-        self.prepare_hub_snapshot()
-        with patch.object(release,'System',return_value=self.system),patch('sys.stdout'):
-            self.assertEqual(release.main(self.cli_args('activate')+['--allow-runtime-change','--include-hub']),0)
-            self.assertTrue((self.bin/'ato-hub').is_file())
-            self.assertEqual(release.main(self.cli_args('rollback')+['--allow-runtime-change']),0)
-        self.assertEqual(release.entrypoints(self.bin),self.before);self.assertFalse((self.bin/'ato-hub').exists())
-
-    def test_hub_install_failure_restores_three_entries_and_preserves_prior_absence(self):
-        self.prepare_hub_snapshot();original=release.atomic_entry;failed=[];protected=self.safety_bytes()
-        def replace(path,row):
-            if path.name=='ato-hub' and not failed:
-                failed.append(True);raise OSError('synthetic hub replace failure')
-            original(path,row)
-        with patch.object(release,'atomic_entry',side_effect=replace),self.assertRaises(OSError):
-            release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'],'rolled_back')
-        self.assertEqual(release.entrypoints(self.bin),self.before);self.assertFalse((self.bin/'ato-hub').exists())
-        self.assertEqual(self.safety_bytes(),protected);self.assertTrue(self.system.running)
-
-    def test_rollback_never_deletes_unrelated_replaced_hub(self):
-        self.prepare_hub_snapshot()
-        release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
-        (self.bin/'ato-hub').write_text('third-party replacement');before=self.safety_bytes();calls=list(self.system.calls)
-        with self.assertRaisesRegex(release.Refused,'outside this transaction'):
-            release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertEqual((self.bin/'ato-hub').read_text(),'third-party replacement')
-        self.assertEqual(self.system.calls,calls);self.assertEqual(self.safety_bytes(),before)
-
-    def test_four_entry_cutover_and_new_hub_removal_hold_the_mailbox_writer_gate(self):
-        self.prepare_hub_snapshot();original=release.atomic_entry;unlink=Path.unlink;calls=[]
-        def writer_gate(name):
-            with sqlite3.connect(self.db,timeout=.01) as con:
-                with self.assertRaises(sqlite3.OperationalError):con.execute("insert into messages values('concurrent','queued',0)")
-            calls.append(name)
-        def replace(path,row):
-            writer_gate(path.name);original(path,row)
-        def remove(path,*args,**kwargs):
-            if path==self.bin/'ato-hub':writer_gate('remove ato-hub')
-            return unlink(path,*args,**kwargs)
-        with patch.object(release,'atomic_entry',side_effect=replace),patch.object(Path,'unlink',remove):
-            release.activate(self.snapshot,self.commit,self.bin,self.state,self.transaction,self.env,self.system,include_hub=True)
-            release.rollback(self.transaction,self.bin,self.state,self.env,self.system)
-        self.assertEqual(calls,[*release.ENTRIES,'ato-hub',*release.ENTRIES,'remove ato-hub'])
+    def test_minimal_environment_and_legacy_layout_match_the_operator_selection(self):
+        with patch.dict(os.environ, dict(NODE_OPTIONS='ambient', NODE_PATH='ambient', PYTHONPATH='ambient',
+                DYLD_INSERT_LIBRARIES='ambient', ATO_ACTOR_FILE='ambient', CTASK_SESSION_TOKEN='ambient')):
+            env = release.environment(self.paths['ato_home'], self.paths['codex_home'])
+        self.assertFalse(set(env) & {'NODE_OPTIONS','NODE_PATH','PYTHONPATH','DYLD_INSERT_LIBRARIES',
+                                    'ATO_ACTOR_FILE','CTASK_SESSION_TOKEN'})
+        self.assertEqual(release.context(self.paths['codex_home'], self.paths['codex_home'], legacy=True),
+                         self.paths['codex_home']/'ctask-interaction')
+        with self.assertRaises(release.Refused):
+            release.context(self.paths['ato_home'], self.paths['codex_home'], legacy=True)
 
 
 class ProcessSafetyTests(unittest.TestCase):
-    def test_real_facade_checks_identity_and_exact_command_before_sigterm(self):
-        system=release.System()
-        observer=dict(pid=12345,pid_identity='original',command='/safe/python /safe/runner.py _controller')
-        with patch.object(system,'identity',return_value='reused'),patch('os.kill') as kill:
-            with self.assertRaisesRegex(release.Refused,'identity changed'):system.stop(observer)
+    def test_signal_requires_exact_command_and_birth_and_only_sends_sigterm(self):
+        system = release.System()
+        observer = dict(pid=12345, pid_identity='original', command='/fixture/python /fixture/runner.py _controller')
+        process = dict(pid=12345, command=observer['command'])
+        with patch.object(system, 'identity', return_value='reused'), patch('os.kill') as kill:
+            with self.assertRaisesRegex(release.Refused, 'identity changed'):
+                system.stop(observer)
             kill.assert_not_called()
-        with patch.object(system,'identity',return_value='original'),patch.object(system,'processes',return_value=[dict(pid=12345,command='unrelated')]),patch('os.kill') as kill:
-            with self.assertRaisesRegex(release.Refused,'command changed'):system.stop(observer)
+        with patch.object(system, 'identity', return_value='original'), \
+                patch.object(system, 'processes', return_value=[dict(process, command='unrelated')]), patch('os.kill') as kill:
+            with self.assertRaisesRegex(release.Refused, 'command changed'):
+                system.stop(observer)
             kill.assert_not_called()
-        with patch.object(system,'identity',side_effect=['original',None]),patch.object(system,'processes',side_effect=[[dict(pid=12345,command=observer['command'])],[]]),patch('os.kill') as kill:
+        with patch.object(system, 'identity', side_effect=['original', None]), \
+                patch.object(system, 'processes', side_effect=[[process], []]), patch('os.kill') as kill:
             system.stop(observer)
-            kill.assert_called_once_with(12345,signal.SIGTERM)
+            kill.assert_called_once_with(12345, signal.SIGTERM)
+        with patch.object(system, 'identity', return_value='original'), \
+                patch.object(system, 'processes', return_value=[process]), \
+                patch.object(release.time, 'monotonic', side_effect=[0, 31]), patch('os.kill') as kill:
+            with self.assertRaisesRegex(release.Refused, 'did not exit gracefully'):
+                system.stop(observer)
+            kill.assert_called_once_with(12345, signal.SIGTERM)
 
-    def test_observer_verifies_pid_identity_unique_source_health_and_heartbeat(self):
-        system=release.System();source=dict(root='/safe',python='/safe/python')
-        row=dict(pid=12345,pid_identity='verified',state='watching',consecutive_failures=0,heartbeat=time.time())
-        process=dict(pid=12345,command='/safe/python /safe/runner.py _controller')
-        with patch.object(release,'read',return_value=row),patch.object(system,'identity',return_value='verified'),patch.object(system,'processes',return_value=[process]):
-            self.assertEqual(system.observer(Path('/fake-state'),source)['pid'],12345)
-            for change in (dict(pid_identity='reused'),dict(heartbeat=1),dict(state='launching'),dict(consecutive_failures=1)):
-                with patch.object(release,'read',return_value=dict(row,**change)),self.assertRaises(release.Refused):system.observer(Path('/fake-state'),source)
-            with patch.object(system,'processes',return_value=[process,process]),self.assertRaises(release.Refused):system.observer(Path('/fake-state'),source)
+    def test_observer_verifies_unique_process_identity_and_fresh_heartbeat(self):
+        system = release.System()
+        source = dict(root='/fixture', python='/fixture/python')
+        row = dict(pid=12345, pid_identity='verified', state='watching', consecutive_failures=0, heartbeat=time.time())
+        process = dict(pid=12345, command=' '.join(release.observer_argv(source)))
+        with patch.object(release, 'read_private', return_value=row), \
+                patch.object(system, 'identity', return_value='verified'), \
+                patch.object(system, 'processes', return_value=[process]):
+            self.assertEqual(system.observer(Path('/fixture-state'), source)['pid'], 12345)
+            for change in (dict(pid_identity='reused'), dict(heartbeat=1),
+                           dict(state='launching'), dict(consecutive_failures=1)):
+                with patch.object(release, 'read_private', return_value=dict(row, **change)):
+                    with self.assertRaises(release.Refused):
+                        system.observer(Path('/fixture-state'), source)
+            with patch.object(system, 'processes', return_value=[process, process]), self.assertRaises(release.Refused):
+                system.observer(Path('/fixture-state'), source)
+
+    def test_start_requires_two_advancing_heartbeats_from_same_process(self):
+        system = release.System()
+        source = dict(root='/fixture-source', python='/fixture-source/python')
+        rows = [dict(pid=100, pid_identity='first', heartbeat=1),
+                dict(pid=100, pid_identity='reused', heartbeat=2),
+                dict(pid=100, pid_identity='reused', heartbeat=3)]
+        with patch.object(release, 'observer_environment', side_effect=lambda _, env: env), \
+                patch.object(system, 'processes', return_value=[]), \
+                patch.object(system, 'observer', side_effect=rows) as inspect, \
+                patch.object(release.subprocess, 'run') as run, patch.object(release.time, 'sleep'):
+            result = system.start(source, Path('/fixture-state'), {'ATO_HOME':'/fixture-state'}, lambda _: None)
+        self.assertEqual(inspect.call_count, 3)
+        self.assertEqual(result['heartbeat'], 3)
+        self.assertEqual(run.call_args.args[0][-1], 'import control; control.start()')
 
 
 class StageTests(unittest.TestCase):
@@ -682,8 +361,8 @@ class StageTests(unittest.TestCase):
         self.base=Path(self.tmp.name).resolve();self.addCleanup(self.tmp.cleanup)
         self.repo=self.base/'repo';self.repo.mkdir()
         self.dest=self.base/'release'
-        self.addCleanup(writable_remove,self.dest)
-        for name in ('runner.py','coordination.py','scripts/install.py','requirements-acp.lock'):
+        self.addCleanup(unseal,self.dest)
+        for name in ('ato.py','ato_runtime.py','scripts/install.py','skills/ato/SKILL.md','requirements-acp.lock'):
             p=self.repo/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('# trusted synthetic source\n')
         subprocess.run(['git','init','-q',str(self.repo)],check=True)
         subprocess.run(['git','-C',str(self.repo),'add','--all'],check=True)
@@ -706,7 +385,7 @@ class StageTests(unittest.TestCase):
         self.assertEqual(qualify.call_args.args[0],self.dest)
         self.assertFalse((self.dest/'.git').exists())
         manifest=release.verify_snapshot(self.dest,self.commit)
-        self.assertEqual(manifest['source_files']['runner.py'],release.sha(self.repo/'runner.py'))
+        self.assertEqual(manifest['source_files']['ato.py'],release.sha(self.repo/'ato.py'))
         for name,row in manifest['files'].items():
             self.assertFalse(row.get('mode',0) & 0o222,name)
         with self.assertRaisesRegex(release.Refused,'already exists'):release.stage(self.repo,self.commit,self.dest)
@@ -714,12 +393,12 @@ class StageTests(unittest.TestCase):
     def test_stage_dependency_failure_leaves_evidence_unqualified_and_never_activates(self):
         with patch.object(release,'install_dependencies',side_effect=release.Refused('offline dependency failure')),patch.object(release,'activate') as activate:
             with self.assertRaisesRegex(release.Refused,'dependency failure'):release.stage(self.repo,self.commit,self.dest)
-        self.assertTrue((self.dest/'runner.py').exists())
+        self.assertTrue((self.dest/'ato.py').exists())
         self.assertFalse((self.dest/release.MANIFEST).exists())
         activate.assert_not_called()
 
     def test_stage_rejects_source_mutation_by_checks(self):
-        def mutate(root,env):(root/'runner.py').write_text('changed by checks')
+        def mutate(root,env):(root/'ato.py').write_text('changed by checks')
         with patch.object(release,'install_dependencies',side_effect=self.install),patch.object(release,'qualify',side_effect=mutate):
             with self.assertRaisesRegex(release.Refused,'modified source'):release.stage(self.repo,self.commit,self.dest)
         self.assertFalse((self.dest/release.MANIFEST).exists())
@@ -740,83 +419,12 @@ class StageTests(unittest.TestCase):
         with patch.object(release,'run_logged',side_effect=logged) as run:
             release.qualify(self.repo,{})
         self.assertEqual([call.args[3] for call in run.call_args_list],['tests','architecture','compile'])
-        self.assertIn('runner.py',run.call_args_list[-1].args[0])
+        self.assertIn('ato.py',run.call_args_list[-1].args[0])
         def skipped(argv,root,env,name):
             logged(argv,root,env,name)
             if name=='tests':(root/'.release-logs/tests.log').write_text('Ran 11 tests in 0.1s\n\nOK (skipped=1)\n')
         with patch.object(release,'run_logged',side_effect=skipped),self.assertRaisesRegex(release.Refused,'clean full-test receipt'):
             release.qualify(self.repo,{})
-
-
-class LauncherGenerationTests(unittest.TestCase):
-    def test_generated_four_launchers_use_real_installer_and_auto_detect_existing_hub(self):
-        root=Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(prefix='ato-four-entry-') as folder:
-            base=Path(folder).resolve();bin_dir=base/'bin';bin_dir.mkdir()
-            before=release.generated_entries(root,bin_dir)
-            self.assertEqual(set(before),set(release.ENTRIES));self.assertEqual(release.ENTRIES,('ctask','ctask-notify','ato-read-handoff'))
-            result=release.generated_entries(root,bin_dir,include_hub=True)
-            self.assertEqual(set(result),set((*release.ENTRIES,'ato-hub')))
-            for name,row in result.items():release.atomic_entry(bin_dir/name,row)
-            self.assertEqual(release.launcher_sources(result)['ato-hub']['script'],str(root/'hub_cli.py'))
-            self.assertEqual(release.generated_entries(root,bin_dir),result)
-            env=dict(os.environ,HOME=str(base/'home'));env.pop('ATO_HOME',None)
-            completed=subprocess.run([str(bin_dir/'ato-hub'),'--help'],env=env,capture_output=True,text=True,timeout=10)
-            self.assertEqual(completed.returncode,0,completed.stderr);self.assertIn('hub-list',completed.stdout)
-            self.assertFalse((base/'home').exists())
-
-    def test_generated_launchers_use_selected_source_and_quote_final_reader_path(self):
-        root=Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(prefix='ato-release-bin with spaces ') as folder:
-            base=Path(folder).resolve();bin_dir=base/'bin with spaces';bin_dir.mkdir()
-            result=release.generated_entries(root,bin_dir)
-            for name,row in result.items():release.atomic_entry(bin_dir/name,row)
-            source=release.launcher_source(result)
-            self.assertEqual(source['root'],str(root))
-            env=release.environment(base/'ato',base/'native',bin_dir)
-            env.pop('CTASK_HANDOFF_READER')
-            for name in ('ctask','ato-read-handoff'):
-                completed=subprocess.run([str(bin_dir/name),'--help'],env=env,capture_output=True,text=True,timeout=10)
-                self.assertEqual(completed.returncode,0,completed.stderr)
-            rejected=subprocess.run([str(bin_dir/'ctask-notify'),'start','untrusted'],env=env,capture_output=True,text=True,timeout=10)
-            self.assertEqual(rejected.returncode,2)
-            self.assertFalse((base/'ato').exists())
-            self.assertFalse((base/'native').exists())
-
-
-class ObserverStartupTests(unittest.TestCase):
-    def test_start_uses_preserving_facade_and_requires_two_advancing_same_identity_heartbeats(self):
-        system=release.System();source=dict(root='/offline-source',python='/offline-source/python')
-        rows=[dict(pid=100,pid_identity='first',heartbeat=1),
-              dict(pid=100,pid_identity='reused',heartbeat=2),
-              dict(pid=100,pid_identity='reused',heartbeat=3)]
-        with patch.object(release,'observer_environment',side_effect=lambda source,env: env),patch.object(system,'processes',return_value=[]),patch.object(system,'observer',side_effect=rows) as observe,patch.object(release.subprocess,'run') as run,patch.object(release.time,'sleep'):
-            result=system.start(source,Path('/isolated-state'),{'ATO_HOME':'/isolated'})
-        self.assertEqual(observe.call_count,3)
-        self.assertEqual(result['heartbeat'],3)
-        self.assertEqual(run.call_args.args[0],['/offline-source/python','-c','import control; control.start()'])
-        self.assertNotIn('enable',run.call_args.args[0][-1])
-        self.assertEqual(run.call_args.kwargs['env'],{'ATO_HOME':'/isolated'})
-
-    def test_uncooperative_observer_gets_only_sigterm_and_never_sigkill(self):
-        system=release.System()
-        observer=dict(pid=12345,pid_identity='same',command='/safe/python /safe/runner.py _controller')
-        with patch.object(system,'identity',return_value='same'),patch.object(system,'processes',return_value=[dict(pid=12345,command=observer['command'])]),patch.object(release.time,'monotonic',side_effect=[0,46]),patch('os.kill') as kill:
-            with self.assertRaisesRegex(release.Refused,'refusing SIGKILL'):system.stop(observer)
-        kill.assert_called_once_with(12345,signal.SIGTERM)
-
-    def test_release_script_is_standard_library_only_and_shipped_as_inert_data(self):
-        import ast
-        import tomllib
-        root=Path(__file__).resolve().parents[1]
-        tree=ast.parse((root/'scripts/release_snapshot.py').read_text())
-        imports=[]
-        for node in ast.walk(tree):
-            if isinstance(node,ast.Import):imports.extend(alias.name.split('.')[0] for alias in node.names)
-            elif isinstance(node,ast.ImportFrom):imports.append(node.module.split('.')[0])
-        self.assertTrue(set(imports)<=sys.stdlib_module_names)
-        data=tomllib.loads((root/'pyproject.toml').read_text())
-        self.assertIn('scripts/release_snapshot.py',data['tool']['setuptools']['data-files']['share/agent-task-orchestrator/scripts'])
 
 
 class DependencyToolTests(unittest.TestCase):
@@ -826,7 +434,7 @@ class DependencyToolTests(unittest.TestCase):
             for name in ('node','npm'):
                 p=tool_dir/name;p.write_text('#!/bin/sh\nexit 0\n');p.chmod(0o755)
             root=base/'snapshot';root.mkdir()
-            env=release.environment(base/'ato',base/'native',base/'bin')
+            env=release.environment(base/'ato',base/'native')
             env.update(ATO_RELEASE_SOURCE=str(base/'source'),ATO_RELEASE_NODE=str(tool_dir/'node'),ATO_RELEASE_NPM=str(tool_dir/'npm'))
             with patch.object(release,'run_logged') as run:
                 tools=release.install_dependencies(root,env)

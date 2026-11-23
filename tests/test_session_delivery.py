@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from scripts import prepare_session_candidate as candidate
 from scripts import verify_pi_session_local as smoke
+from legacy_support import LEGACY_CLI
 
 
 class LocalModelReceiptTests(unittest.TestCase):
@@ -195,7 +196,7 @@ else: raise AssertionError('fail probe missing')
                 cwd=root, capture_output=True, text=True, timeout=5)
             self.assertEqual(probe.returncode, 0, probe.stderr)
             self.assertEqual(probe.stdout.strip(), 'fail_probe_loaded')
-            result = subprocess.run([sys.executable, '-B', str(smoke.ROOT/'runner.py'),
+            result = subprocess.run([sys.executable, '-B', str(LEGACY_CLI),
                 'local-session-create', '--project', str(root), '--role', 'hub',
                 '--credential-file', str(root/'hub.json'), '--user-credential-file', str(root/'user.json'),
                 '--source', 'synthetic local-only fixture'], env=env, cwd=root,

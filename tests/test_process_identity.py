@@ -51,7 +51,7 @@ class ProcessIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='ato-identity-') as folder:
             root = Path(folder).resolve()
             state = root/'state';(state/'control').mkdir(parents=True)
-            source = dict(python=str(root/'python'), root=str(root/'source'))
+            source = dict(python=str(root/'python'), root=str(root/'source'), surface='legacy')
             process = dict(pid=pid, command=source['python']+' '+source['root']+'/runner.py _controller')
             path = state/'control/process.json'
             row = dict(pid=pid, pid_identity=legacy, heartbeat=time.time(), state='watching', consecutive_failures=0)

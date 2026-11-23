@@ -1,4 +1,4 @@
-"""Compact failure integration with the public, configurable handoff reader."""
+"""Compact failure regression through the private historical reader fixture."""
 import json
 import os
 from pathlib import Path
@@ -35,12 +35,12 @@ class CompactFailureReaderTests(unittest.TestCase):
         self.assertEqual(result['state'], 'queued')
         self.assertIn('/trusted/bin/ato-read-handoff '+self.action['id'], sent.call_args.args[0][-1])
 
-    def test_custom_install_with_spaces_produces_executable_reader_command(self):
+    def test_fixture_with_spaces_produces_executable_reader_command(self):
         self.prepare()
         reader = (self.repo/'bin with spaces/ato-read-handoff').resolve()
-        installed = subprocess.run([sys.executable, str(ROOT/'scripts/install.py'), '--helpers',
-            '--bin-dir', str(reader.parent)], capture_output=True, text=True, timeout=10)
-        self.assertEqual(installed.returncode, 0, installed.stderr)
+        reader.parent.mkdir()
+        reader.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, str(ROOT/'coordination.py')]) + ' "$@"\n')
+        reader.chmod(0o700)
         with patch.dict(os.environ, CTASK_HANDOFF_READER=str(reader)):
             result, sent = self.send()
         notice = sent.call_args.args[0][-1]

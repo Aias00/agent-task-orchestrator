@@ -29,6 +29,7 @@ import transport
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT/'tests/fixtures/neutral_hub_cli.py'
 FIXTURE_KIND = 'fixture_neutral_e2e'
+from legacy_support import LEGACY_CLI
 
 
 class NeutralHubTests(unittest.TestCase):
@@ -134,14 +135,14 @@ class NeutralHubTests(unittest.TestCase):
         return "from pathlib import Path; assert Path('result').read_text() == 'fixture output'"
 
     def test_cli_runs_without_fixture_bootstrap_for_production_endpoint_commands(self):
-        result = subprocess.run([sys.executable, '-B', str(ROOT/'runner.py'), 'inbox',
+        result = subprocess.run([sys.executable, '-B', str(LEGACY_CLI), 'inbox',
             '--actor-file', str(self.hub_grant)], env=self.env, capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [])
 
     def test_unwrapped_candidate_cli_full_roundtrip_and_independent_continuation(self):
         def cli(*args):
-            return self.cli(*args, entrypoint=ROOT/'runner.py')
+            return self.cli(*args, entrypoint=LEGACY_CLI)
         def data(*args):
             return json.loads(cli(*args).stdout)
         plan = runner.read(self.plan)
@@ -220,7 +221,8 @@ class NeutralHubTests(unittest.TestCase):
                 def entry(*args):
                     output = io.StringIO()
                     with patch.object(sys, 'argv', ['runner.py', *map(str, args)]), redirect_stdout(output):
-                        status = runner.main()
+                        from fixtures.legacy_cli import main
+                        status = main(runner)
                     self.assertEqual(status, 0, output.getvalue())
                     return json.loads(output.getvalue())
                 q = await asyncio.to_thread(entry, 'ask', directory, '--question', 'Synthetic Pi: produce tool artifact?',

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import recovery
 import runner
 import test_recovery
+from legacy_support import LEGACY_CLI
 
 
 class TakeoverDiagnostics(unittest.TestCase):
@@ -27,7 +28,7 @@ class TakeoverDiagnostics(unittest.TestCase):
 
     def test_public_cli_is_read_only(self):
         before = (self.f.d/'recovery.json').read_bytes()
-        result = subprocess.run([sys.executable, 'runner.py', 'takeover-status', str(self.f.d),
+        result = subprocess.run([sys.executable, str(LEGACY_CLI), 'takeover-status', str(self.f.d),
                                  '--request', self.q['id']], env=self.f.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['eligible'])
@@ -36,7 +37,7 @@ class TakeoverDiagnostics(unittest.TestCase):
     def test_cli_distinguishes_generation_and_stop_without_ledger_mutation(self):
         self.f.resumed_then_blocked()
         before = (self.f.d/'recovery.json').read_bytes()
-        argv = [sys.executable, 'runner.py', 'takeover-status', str(self.f.d), '--request', self.q['id']]
+        argv = [sys.executable, str(LEGACY_CLI), 'takeover-status', str(self.f.d), '--request', self.q['id']]
         result = subprocess.run(argv, env=self.f.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('generation_changed', json.loads(result.stdout)['reasons'])

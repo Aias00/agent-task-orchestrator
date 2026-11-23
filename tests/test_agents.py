@@ -50,6 +50,7 @@ else:
  print(json.dumps(dict(type='agent_end')))
  print(json.dumps(dict(type='agent_settled',aborted=False)))
 '''
+from legacy_support import LEGACY_CLI
 
 
 class AdapterTests(unittest.TestCase):
@@ -66,7 +67,7 @@ class AdapterTests(unittest.TestCase):
   p=self.repo/'input.json';p.write_text(json.dumps(dict(objective='Adapter fixture',memory=False,agent=dict(kind=kind),sandbox=sandbox,tasks=[dict(id='first',prompt=prompt,checks=[[sys.executable,'-c',"from pathlib import Path; assert Path('first').read_text()=='yes'"]])],limits=dict(runtime_seconds=30,attempt_seconds=10,check_seconds=2,max_attempts=1)|limits)))
   return runner.create(self.repo,p)
  def run_task(self,d):
-  p=subprocess.run([sys.executable,str(ROOT/'runner.py'),'run',str(d)],env=self.env,capture_output=True,text=True,timeout=40)
+  p=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,capture_output=True,text=True,timeout=40)
   self.assertEqual(p.returncode,0,p.stderr)
   return runner.read(d/'state.json')
  def test_codex_argv_unchanged(self):
@@ -114,7 +115,7 @@ class AdapterTests(unittest.TestCase):
   self.assertEqual(runner.read(runtime/'result-metadata.json')['kind'],'pi')
  def test_stop_reaps_bridge_and_cli(self):
   d=self.create('claude','sleep-fixture',attempt_seconds=25)
-  self.proc=subprocess.Popen([sys.executable,str(ROOT/'runner.py'),'run',str(d)],env=self.env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+  self.proc=subprocess.Popen([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
   deadline=time.monotonic()+8
   while not (self.repo/'entered').exists() and time.monotonic()<deadline:time.sleep(.05)
   self.assertTrue((self.repo/'entered').exists());(d/'STOP').touch();self.proc.wait(timeout=8)
@@ -123,7 +124,7 @@ class AdapterTests(unittest.TestCase):
   d=self.create('pi','sleep-fixture',attempt_seconds=1)
   self.assertEqual(self.run_task(d)['status'],'blocked')
   self.fake.write_text(FAKE.replace("Path('entered').write_text('yes');time.sleep(30)","Path('entered').write_text('yes')"))
-  result=subprocess.run([sys.executable,str(ROOT/'runner.py'),'run',str(d),'--retry-failed'],env=self.env,capture_output=True,text=True,timeout=15)
+  result=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d),'--retry-failed'],env=self.env,capture_output=True,text=True,timeout=15)
   self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(runner.read(d/'state.json')['status'],'completed')
   self.assertEqual(len(list((d/'checkpoints').glob('*.agent-runtime'))),2)
  def decode(self,kind,records):

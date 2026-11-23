@@ -14,6 +14,7 @@ import interaction
 import recovery
 import runner
 import workflow
+from legacy_support import LEGACY_CLI
 
 
 class ControlTests(unittest.TestCase):
@@ -231,7 +232,7 @@ print('Queued message '+target+' for thread '+target+'.')
 '''); queue.chmod(0o755)
         with patch.dict(os.environ, CTASK_QUEUE_BIN=str(queue)):
             for i in range(2):
-                p = subprocess.Popen([sys.executable, str(Path(runner.__file__).resolve()), '_controller'],
+                p = subprocess.Popen([sys.executable, str(LEGACY_CLI), '_controller'],
                     env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 try:
                     deadline = time.monotonic()+5

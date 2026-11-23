@@ -4,7 +4,7 @@
 
 ## 现行指南
 
-当前接口、操作与安全边界；具体能力限制仍以对应状态文档为准。
+日常使用见 [ATO 快速开始](../README.md#quick-start)，宿主配置见 [受信任宿主](ato-host-setup.md)。本节同时保留执行与交互机制的参考资料。
 
 - [Task-based execution budgets](adaptive-budgets.md)
 - [Adding a trusted adapter](agent-adapter-guide.md)
@@ -15,7 +15,7 @@
 - [Final completion notification policy, 2026-11-19](completion-notifications.md)
 - [Independent mailbox and transport primitives](message-protocol.md)
 - [Hub notifications only when user intervention is required](notification-policy.md)
-- [Source publication and runtime upgrades](runtime-upgrade.md) — `scripts/release_snapshot.py` 的只读检查、隔离 stage、显式 activate 与仅入口/controller 回退
+- [Source publication and runtime upgrades](runtime-upgrade.md) — `scripts/release_snapshot.py` 的只读检查、隔离 stage、显式 activate 与入口与观察者回退
 - [Neutral CLI human interaction (candidate only)](session-decoupling/neutral-cli.md)
 - [User closure and failed-task observation](task-disposition.md)
 - [Worker permissions and normal host handoffs](worker-permissions-and-handoffs.md)

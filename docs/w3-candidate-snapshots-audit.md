@@ -33,7 +33,7 @@
 
 ## 3. 共同架构差距：为何不能直接 cherry-pick/覆盖
 
-当前基线以 [ato_core.py](../ato_core.py)、[ato_cli](../ato_cli/parser.py)、[源码图](source-map.md) 分离公共原语、CLI 分发和运行机制。按当前 [check_architecture.py](../scripts/check_architecture.py) 同一 AST 算法（包含函数内 import，仅分析，不 import 快照模块）得到：
+当前基线以 [ato_core.py](../ato_core.py)、[ato_cli](../tests/fixtures/legacy_cli/parser.py)、[源码图](source-map.md) 分离公共原语、CLI 分发和运行机制。按当前 [check_architecture.py](../scripts/check_architecture.py) 同一 AST 算法（包含函数内 import，仅分析，不 import 快照模块）得到：
 
 | 树 | 全部文件 | manifest 发布源码项 | 根 Python 模块 | `test_*.py` 文件 | 根/全运行图双向依赖对 | 对照 main 的八核心 AST |
 |---|---:|---:|---:|---:|---:|---|

@@ -24,7 +24,7 @@ class RepositoryMetadataTests(unittest.TestCase):
         expected = [line for line in (ROOT/'requirements-acp.lock').read_text().splitlines() if line and not line.startswith('#')]
         self.assertEqual(data['project']['optional-dependencies']['acp'], expected)
         self.assertFalse(data['project'].get('scripts'))
-        self.assertEqual(set(data['tool']['setuptools']['py-modules']), {p.stem for p in ROOT.glob('*.py')})
+        self.assertEqual(set(data['tool']['setuptools']['py-modules']), {p.stem for p in ROOT.glob('*.py')} - {'hub_cli'})
         self.assertIn('ato_cli', data['tool']['setuptools']['packages'])
 
     def test_document_index_covers_existing_markdown_without_moving_it(self):
@@ -63,11 +63,11 @@ class RepositoryMetadataTests(unittest.TestCase):
     def test_source_inventory_includes_cli_package_and_project_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            for name in ('runner.py', 'ato_core.py', 'ato_cli/__init__.py', 'ato_cli/run_cmd.py',
+            for name in ('runner.py', 'ato_core.py', 'ato_cli/__init__.py', 'ato_application.py',
                          'pyproject.toml', 'requirements-acp.lock'):
                 target = root/name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('synthetic portable input')
             self.assertEqual(set(prepare_session_candidate.files(root)),
-                {'runner.py', 'ato_core.py', 'ato_cli/__init__.py', 'ato_cli/run_cmd.py',
+                {'runner.py', 'ato_core.py', 'ato_cli/__init__.py', 'ato_application.py',
                  'pyproject.toml', 'requirements-acp.lock'})

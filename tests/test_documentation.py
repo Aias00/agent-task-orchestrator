@@ -14,14 +14,13 @@ class DocumentationTests(unittest.TestCase):
         for obsolete in ('message_adapters.py', 'mailbox-register', 'mailbox-pump',
                          '--origin-endpoint', 'upgrade_runtime.py'):
             self.assertNotIn(obsolete, readme)
-        for module in ('transport.py', 'session_router.py', 'agent_registry.py',
-                       'local_session_adapter.py', 'pi_session_coordinator.py', 'scripts/install.py'):
-            self.assertIn(module, readme)
-            self.assertTrue((ROOT/module).is_file())
-        for command in ('session-register', 'local-session-create', '--origin-ref'):
+        for command in ('ato --help', 'ato project validate', 'ato run', 'ato list',
+                        'ato status', 'ato inbox', 'ato answer', 'ato accept', 'ato stop', 'ato resume'):
             self.assertIn(command, readme)
-        for guide in ('source-map', 'message-protocol', 'runtime-upgrade', 'development-status'):
+        for guide in ('runtime-upgrade', 'ato-unified-contract', 'ato-host-setup'):
             self.assertIn('(docs/'+guide+'.md)', readme)
+        self.assertIn('scripts/install.py', readme)
+        self.assertNotIn('ctask ', readme)
 
     def test_all_repository_markdown_relative_links_resolve(self):
         names = subprocess.check_output(['git', '-C', str(ROOT), 'ls-files', '-z',
@@ -30,7 +29,7 @@ class DocumentationTests(unittest.TestCase):
                            r'|^\[[^\]\n]+\]:\s*(<[^>]*>|\S+)', re.M)
         checked = 0
         for name in names:
-            if not name.endswith('.md'):
+            if not name.endswith('.md') or not (ROOT/name).is_file():
                 continue
             source = ROOT/name
             for match in links.finditer(source.read_text()):

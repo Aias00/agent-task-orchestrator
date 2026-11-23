@@ -13,6 +13,7 @@ import workflow
 import test_workflow as fixtures
 import test_budget_watchdog as watch_fixtures
 from test_interaction import HUB
+from legacy_support import LEGACY_CLI
 
 
 class AdvisoryTimeTests(unittest.TestCase):
@@ -85,7 +86,7 @@ class AdvisoryTimeTests(unittest.TestCase):
         c['acceptance'][0]['checks'][0][-1]+='; import time; time.sleep(1.1)'
         c['acceptance'].append(dict(id='human',description='Actual final user acceptance',kind='manual'))
         d=self.create(c);self.advisory()
-        r=subprocess.run([sys.executable,str(Path(runner.__file__)),'run',str(d)],env=self.env,
+        r=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,
                          capture_output=True,text=True,timeout=20)
         self.assertEqual(r.returncode,0,r.stderr)
         s=runner.read(d/'state.json');self.assertEqual(s['status'],'needs_input',s)
@@ -100,7 +101,7 @@ class AdvisoryTimeTests(unittest.TestCase):
             tasks=[dict(id='first',prompt='first',checks=[[sys.executable,'-c','import time;time.sleep(1.1)']])])
         p=self.repo/'standalone.json';runner.save(p,plan);d=runner.create(self.repo,p)
         self.advisory()
-        r=subprocess.run([sys.executable,str(Path(runner.__file__)),'run',str(d)],env=self.env,
+        r=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,
                          capture_output=True,text=True,timeout=10)
         self.assertEqual(r.returncode,0,r.stderr)
         self.assertEqual(runner.read(d/'state.json')['status'],'completed')

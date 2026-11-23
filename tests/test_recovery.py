@@ -18,6 +18,7 @@ import recovery
 from test_workflow import PLANNER
 
 THREAD = '11111111-1111-4111-8111-000000000001'
+from legacy_support import LEGACY_CLI
 
 
 class RecoveryTests(unittest.TestCase):
@@ -237,11 +238,11 @@ message=sys.argv[sys.argv.index('--message')+1]
 request=re.search(r'request=(recover-[a-f0-9]+)',message)[1]
 thread=sys.argv[sys.argv.index('--thread')+1]
 with open('coordinator.log','ab') as log:
- subprocess.Popen([sys.executable,{str(coordinator)!r},{str(ROOT/'runner.py')!r},{str(self.d)!r},request],stdout=log,stderr=log,start_new_session=True)
+ subprocess.Popen([sys.executable,{str(coordinator)!r},{str(LEGACY_CLI)!r},{str(self.d)!r},request],stdout=log,stderr=log,start_new_session=True)
 print('Queued message '+thread+' for thread '+thread+'.')
 ''');queue.chmod(0o755)
         env=dict(self.env,CTASK_QUEUE_BIN=str(queue))
-        result=subprocess.run([sys.executable,str(ROOT/'runner.py'),'start',str(self.d)],env=env,capture_output=True,text=True)
+        result=subprocess.run([sys.executable,str(LEGACY_CLI),'start',str(self.d)],env=env,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         deadline=time.monotonic()+30
         while time.monotonic()<deadline:

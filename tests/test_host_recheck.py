@@ -12,6 +12,7 @@ import runner
 import workflow
 from host_recheck import recheck
 import test_workflow as fixtures
+from legacy_support import LEGACY_CLI
 
 
 class HostRecheckTests(unittest.TestCase):
@@ -82,7 +83,7 @@ class HostRecheckTests(unittest.TestCase):
     def test_success_allows_normal_resume_without_retry_or_counter_reset(self):
         d, stage = self.blocked()
         recheck(d, 'first', 'Actual fixture repair')
-        r = subprocess.run([sys.executable, runner.__file__, 'run', str(d)],
+        r = subprocess.run([sys.executable, str(LEGACY_CLI), 'run', str(d)],
                            env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         s = runner.read(stage/'state.json')
@@ -161,7 +162,7 @@ class HostRecheckTests(unittest.TestCase):
 
     def test_cli_uses_frozen_checks_and_reports_result(self):
         d, stage = self.blocked()
-        r = subprocess.run([sys.executable, runner.__file__, 'host-recheck', str(d),
+        r = subprocess.run([sys.executable, str(LEGACY_CLI), 'host-recheck', str(d),
                             '--task', 'first', '--source', 'Actual fixture repair'],
                            env=self.env, capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -26,6 +26,7 @@ import workflow
 from test_workflow import PLANNER
 
 HUB = '11111111-1111-4111-8111-000000000002'
+from legacy_support import LEGACY_CLI, legacy_runtime
 
 
 class DaemonFixture:
@@ -92,6 +93,7 @@ class DaemonFixture:
 class DelegationTests(unittest.TestCase):
     def setUp(self):
         self.children=[]
+        self.enterContext(legacy_runtime())
         self.tmp=tempfile.TemporaryDirectory(prefix='ctask-',dir='/tmp');self.root=Path(self.tmp.name)
         self.repo=self.root/'project';self.repo.mkdir();subprocess.run(['git','init','-q',str(self.repo)],check=True)
         self.home=self.root/'home';self.home.mkdir();path=self.home/'hub.jsonl';path.write_text(json.dumps({'payload':{'id':HUB}})+'\n')
@@ -109,7 +111,7 @@ if os.environ.get('TEST_ACCEPT')=='1' and '[ctask-delegation' in message:
  d=re.search(r'ctask delegation-accept (.+?)，',message)[1]
  import ast
  with open({str(self.root/'accept.log')!r},'ab') as log:
-  subprocess.Popen([sys.executable,{str(ROOT/'runner.py')!r},'delegation-accept',ast.literal_eval(d)],env=dict(os.environ,CODEX_THREAD_ID=thread),stdout=log,stderr=log,start_new_session=True)
+  subprocess.Popen([sys.executable,{str(LEGACY_CLI)!r},'delegation-accept',ast.literal_eval(d)],env=dict(os.environ,CODEX_THREAD_ID=thread),stdout=log,stderr=log,start_new_session=True)
 if os.environ.get('TEST_QUEUE_UNKNOWN')=='1':sys.exit(1)
 print('Queued message '+thread+' for thread '+thread+'.')
 ''');self.queue.chmod(0o755)

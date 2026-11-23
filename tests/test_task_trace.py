@@ -1,4 +1,5 @@
 import json
+from legacy_support import LEGACY_CLI
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(len(trace.query(self.path)['events']), 1)
     def test_trace_cli_reads_saved_run(self):
         self.add('attempt_started', 'one')
-        out = subprocess.check_output([sys.executable, str(ROOT/'runner.py'), 'trace', str(self.path), '--json'], text=True)
+        out = subprocess.check_output([sys.executable, str(LEGACY_CLI), 'trace', str(self.path), '--json'], text=True)
         self.assertEqual(json.loads(out)['events'][0]['kind'], 'attempt_started')
     def test_credentials_thoughts_and_bodies_are_redacted(self):
         self.add('tool', 'secret', tool='token-secret', state='token-secret', target='../token-secret', workspace=self.path)

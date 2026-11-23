@@ -1,79 +1,106 @@
-"""Domain CLI dispatch. Importing or asking for help starts no runtime."""
-import subprocess
+"""Strict parsing and JSON results for the public ATO interface."""
+import argparse
+import json
 import sys
 
-from .parser import build_parser
-from . import workflow_cmd
-from . import budget_cmd
-from . import control_cmd
-from . import session_cmd
-from . import interaction_cmd
-from . import recovery_cmd
-from . import run_cmd
-
-_HANDLERS = {
-    '_controller': control_cmd.handle,
-    '_dispatcher': session_cmd.handle,
-    '_supervisor': recovery_cmd.handle,
-    '_worker': run_cmd.handle,
-    'accept-answer': interaction_cmd.handle,
-    'acknowledge': workflow_cmd.handle,
-    'agent-doctor': session_cmd.handle,
-    'answer': interaction_cmd.handle,
-    'ask': interaction_cmd.handle,
-    'budget-charge': budget_cmd.handle,
-    'budget-configure': budget_cmd.handle,
-    'budget-estimate': budget_cmd.handle,
-    'budget-policy': budget_cmd.handle,
-    'budget-reforecast': budget_cmd.handle,
-    'budget-run': budget_cmd.handle,
-    'continue-task': interaction_cmd.handle,
-    'control': control_cmd.handle,
-    'create': run_cmd.handle,
-    'delegate': session_cmd.handle,
-    'delegation-accept': session_cmd.handle,
-    'delegation-status': session_cmd.handle,
-    'failure-alerts': control_cmd.handle,
-    'followup-link': control_cmd.handle,
-    'followups': control_cmd.handle,
-    'host-checks': workflow_cmd.handle,
-    'host-recheck': workflow_cmd.handle,
-    'hub': interaction_cmd.handle,
-    'inbox': interaction_cmd.handle,
-    'list': run_cmd.handle,
-    'local-session-create': session_cmd.handle,
-    'local-session-grant': session_cmd.handle,
-    'notification-policy': control_cmd.handle,
-    'operational-disposition': control_cmd.handle,
-    'permission-check': run_cmd.handle,
-    'presented': control_cmd.handle,
-    'read': interaction_cmd.handle,
-    'read-question': interaction_cmd.handle,
-    'respond': interaction_cmd.handle,
-    'resume': run_cmd.handle,
-    'run': run_cmd.handle,
-    'session-register': session_cmd.handle,
-    'start': run_cmd.handle,
-    'status': run_cmd.handle,
-    'stop': run_cmd.handle,
-    'supervise': recovery_cmd.handle,
-    'takeover': recovery_cmd.handle,
-    'takeover-status': recovery_cmd.handle,
-    'trace': run_cmd.handle,
-    'unsupervise': recovery_cmd.handle,
-    'validate': run_cmd.handle,
-    'watch': control_cmd.handle,
-    'workflow-close': workflow_cmd.handle,
-    'workflow-create': workflow_cmd.handle,
-    'workflow-link': workflow_cmd.handle,
-    'workflow-validate': workflow_cmd.handle,
-}
+from ato_task_store import TaskError, _identifier, result_envelope
 
 
-def main(core):
-    args = build_parser(core.__doc__).parse_args()
+class Parser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, allow_abbrev=False, **kwargs)
+
+    def error(self, message):
+        raise TaskError("USAGE")
+
+
+class Once(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if hasattr(namespace, self.dest):
+            parser.error("repeated option")
+        setattr(namespace, self.dest, True if self.nargs == 0 else values)
+
+
+def option(parser, name, *, required=False, flag=False):
+    parser.add_argument("--" + name, action=Once, default=argparse.SUPPRESS,
+                        required=required, **({"nargs": 0} if flag else {}))
+
+
+def build_parser():
+    parser = Parser(prog="ato", description="Submit and manage durable agent tasks.")
+    daily = parser.add_subparsers(dest="operation", required=True)
+
+    def command(commands, name, description, identity=None):
+        selected = commands.add_parser(name, help=description, description=description)
+        if identity:
+            selected.add_argument(identity)
+        return selected
+
+    def spec(selected):
+        option(selected, "repo", required=True)
+        option(selected, "spec", required=True)
+
+    run = command(daily, "run", "Submit a frozen task specification.")
+    spec(run)
+    option(run, "foreground", flag=True)
+    option(command(daily, "list", "List visible tasks."), "repo")
+    command(daily, "status", "Read task and execution status.", "task_id")
+    command(daily, "stop", "Request durable STOP.", "task_id")
+    command(daily, "resume", "Resume an eligible task.", "task_id")
+    command(daily, "inbox", "Read pending human decisions.")
+    option(command(daily, "answer", "Record a user's answer.", "request_id"), "answer", required=True)
+    option(command(daily, "accept", "Accept an exact product version.", "task_id"), "evidence", required=True)
+
+    project = command(daily, "project", "Repository and worktree operations.")
+    project = project.add_subparsers(dest="subcommand", required=True)
+    spec(command(project, "validate", "Preview a normalized specification."))
+    command(project, "trace", "Read a bounded task timeline.", "task_id")
+    option(command(project, "recheck", "Recheck the existing product.", "task_id"), "checks-only", flag=True)
+    option(command(project, "cleanup", "Remove an eligible clean worktree.", "task_id"),
+           "confirm", required=True, flag=True)
+
+    agent = command(daily, "agent", "Capabilities, ownership and technical review.")
+    agent = agent.add_subparsers(dest="subcommand", required=True)
+    command(agent, "doctor", "Inspect configured local adapter capabilities.")
+    command(agent, "binding", "Read the verified task binding.", "task_id")
+    handoff = command(agent, "handoff", "Record an authorized controller handoff.", "task_id")
+    option(handoff, "to", required=True)
+    option(handoff, "interaction")
+    option(handoff, "evidence", required=True)
+    reviewer = command(agent, "reviewer", "Select an authorized technical reviewer.", "task_id")
+    option(reviewer, "kind", required=True)
+    option(reviewer, "model")
+    option(reviewer, "effort")
+    option(reviewer, "evidence", required=True)
+
+    system = command(daily, "system", "Read-only runtime diagnostics.")
+    system = system.add_subparsers(dest="subcommand", required=True)
+    command(system, "status", "Read release, observer and mailbox status.")
+    option(command(system, "notification-policy", "Read effective notification policy."), "repo")
+    return parser
+
+
+def main(argv=None, *, application=None):
     try:
-        return _HANDLERS[args.command](args, core)
-    except (core.Halt, ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        args = build_parser().parse_args(argv)
+        for field in ("task", "request"):
+            if hasattr(args, field + "_id"):
+                _identifier(getattr(args, field + "_id"), field)
+        if application is None:
+            from ato_application import Application
+            application = Application()
+        data = application.dispatch(args)
+        result, code = result_envelope(data=data), 0
+        output = json.dumps(result, ensure_ascii=False, allow_nan=False)
+        output.encode("utf-8")
+    except TaskError as exc:
+        result, code = result_envelope(error=exc), exc.exit_code
+        output = json.dumps(result)
+    except KeyboardInterrupt:
+        error = TaskError("STOPPED")
+        output, code = json.dumps(result_envelope(error=error)), error.exit_code
+    except Exception:
+        error = TaskError("INTERNAL_ERROR")
+        output, code = json.dumps(result_envelope(error=error)), error.exit_code
+    print(output)
+    return code

@@ -11,7 +11,7 @@ def hub_config():
 
 
 def status():
-    path = ato_config.ensure_interaction_directory()/'notification-policy.json'
+    path = ato_config.interaction_directory()/'notification-policy.json'
     hub = hub_config()
     if path.exists():
         policy = core.read(path)
@@ -23,7 +23,7 @@ def status():
 
 
 def project_mutes():
-    path = ato_config.ensure_interaction_directory()/'notification-project-mutes.json'
+    path = ato_config.interaction_directory()/'notification-project-mutes.json'
     hub = hub_config()
     if not path.exists():
         return []

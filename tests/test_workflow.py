@@ -1,4 +1,5 @@
 import json
+from legacy_support import LEGACY_CLI
 import os
 from pathlib import Path
 import subprocess
@@ -78,7 +79,7 @@ class WorkflowTests(unittest.TestCase):
         return workflow.create(self.repo,p)
 
     def run_workflow(self, d, mode='normal', retry=False):
-        argv=[sys.executable,str(ROOT/'runner.py'),'run',str(d)]
+        argv=[sys.executable,str(LEGACY_CLI),'run',str(d)]
         if retry:argv.append('--retry-failed')
         r=subprocess.run(argv,env=dict(self.env,TEST_PLAN_MODE=mode),capture_output=True,text=True,timeout=55)
         self.assertEqual(r.returncode,0,r.stderr)
@@ -155,24 +156,24 @@ class WorkflowTests(unittest.TestCase):
 
     def test_frozen_total_contract_cannot_be_narrowed(self):
         d=self.create(self.contract());c=runner.read(d/'contract.json');c['acceptance']=c['acceptance'][:1];runner.save(d/'contract.json',c)
-        result=subprocess.run([sys.executable,str(ROOT/'runner.py'),'run',str(d)],env=self.env,capture_output=True)
+        result=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,capture_output=True)
         self.assertNotEqual(result.returncode,0)
         self.assertFalse((self.repo/'first').exists())
 
     def test_stop_propagates_to_child_and_resume_continues(self):
         c=self.contract(keys=('sleep','second'));d=self.create(c)
-        p=subprocess.Popen([sys.executable,str(ROOT/'runner.py'),'_worker',str(d)],env=self.env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        p=subprocess.Popen([sys.executable,str(LEGACY_CLI),'_worker',str(d)],env=self.env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         self.processes.append(p)
         deadline=time.monotonic()+8
         while not (self.repo/'entered').exists() and time.monotonic()<deadline:time.sleep(.05)
         self.assertTrue((self.repo/'entered').exists())
-        competing=subprocess.run([sys.executable,str(ROOT/'runner.py'),'start',str(d)],env=self.env,capture_output=True)
+        competing=subprocess.run([sys.executable,str(LEGACY_CLI),'start',str(d)],env=self.env,capture_output=True)
         self.assertNotEqual(competing.returncode,0)
         (d/'STOP').touch();p.wait(timeout=6)
         s=runner.read(d/'state.json');self.assertEqual(s['status'],'stopped')
         self.assertFalse((self.repo/'second').exists())
         self.fake.write_text(PLANNER.replace("Path('entered').write_text('yes');time.sleep(30)","Path('sleep').write_text('yes')"))
-        subprocess.run([sys.executable,str(ROOT/'runner.py'),'resume',str(d)],env=self.env,check=True,capture_output=True)
+        subprocess.run([sys.executable,str(LEGACY_CLI),'resume',str(d)],env=self.env,check=True,capture_output=True)
         deadline=time.monotonic()+12
         while runner.read(d/'state.json')['status']!='completed' and time.monotonic()<deadline:time.sleep(.05)
         self.assertEqual(runner.read(d/'state.json')['status'],'completed')

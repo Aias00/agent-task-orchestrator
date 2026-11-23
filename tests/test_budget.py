@@ -11,6 +11,7 @@ import budget
 import runner
 import workflow
 import test_workflow as fixtures
+from legacy_support import LEGACY_CLI
 
 
 class BudgetTests(unittest.TestCase):
@@ -168,7 +169,7 @@ class BudgetTests(unittest.TestCase):
         (self.repo/'first').write_text('already implemented')
         d=self.create(c)
         env=dict(self.env,TEST_PLAN_MODE='normal')
-        result=subprocess.run([sys.executable,str(Path(runner.__file__)),'run',str(d)],env=env,
+        result=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=env,
                               capture_output=True,text=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr)
         state=runner.read(d/'state.json')
@@ -185,7 +186,7 @@ class BudgetTests(unittest.TestCase):
                tasks=[dict(id='wait-done',prompt='wait',checks=[[sys.executable,'-c',
                        'from pathlib import Path; assert Path("wait-done").exists()']])])
         p=self.repo/'standalone.json';runner.save(p,c);d=runner.create(self.repo,p)
-        result=subprocess.run([sys.executable,str(Path(runner.__file__)),'run',str(d)],env=self.env,
+        result=subprocess.run([sys.executable,str(LEGACY_CLI),'run',str(d)],env=self.env,
                               capture_output=True,text=True,timeout=12)
         self.assertEqual(result.returncode,0,result.stderr)
         s=runner.read(d/'state.json')

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-task-orchestrator"
-version = "0.0.0"
-description = "Source metadata for durable agent task orchestration with independent host checks"
+version = "1.0.0"
+description = "ATO unified task orchestration source with independent host checks"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
@@ -20,8 +20,8 @@ acp = [
   "typing_extensions==4.16.0"
 ]
 
-# Operational installation remains scripts/install.py against a selected checkout.
-# No entrypoints, services, credentials or runtime migration are installed here.
+# The sealed source installer publishes the single ato launcher.
+# Python package metadata does not activate a runtime.
 [tool.setuptools]
 packages = ["ato_cli"]
 py-modules = [
@@ -31,13 +31,21 @@ py-modules = [
   "agent_registry",
   "agents",
   "appserver",
+  "ato",
+  "ato_acceptance",
+  "ato_application",
+  "ato_binding",
   "ato_config",
   "ato_core",
   "ato_execution",
   "ato_execution_host",
+  "ato_host",
+  "ato_observer",
+  "ato_private",
   "ato_process",
   "ato_product",
   "ato_runtime",
+  "ato_seal",
   "ato_task_store",
   "budget",
   "codex_legacy",
@@ -63,7 +71,6 @@ py-modules = [
   "hub_adapter_codex",
   "hub_registry",
   "hub_loop",
-  "hub_cli",
   "interaction",
   "local_session_adapter",
   "message_bus",
@@ -96,6 +103,6 @@ py-modules = [
 [tool.setuptools.data-files]
 "share/agent-task-orchestrator/integrations/pi-acp" = ["integrations/pi-acp/compatibility.json"]
 
-"share/agent-task-orchestrator/scripts" = ["scripts/release_snapshot.py"]
+"share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py"]
 
-"share/agent-task-orchestrator/skills/ato-hub-orchestrator" = ["skills/ato-hub-orchestrator/SKILL.md"]
+"share/agent-task-orchestrator/skills/ato" = ["skills/ato/SKILL.md"]

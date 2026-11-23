@@ -17,6 +17,7 @@ import interaction
 
 ORIGIN = '11111111-1111-4111-8111-000000000001'
 HUB = '11111111-1111-4111-8111-000000000002'
+from legacy_support import LEGACY_CLI
 
 
 class InteractionTests(unittest.TestCase):
@@ -161,7 +162,7 @@ print('Queued message '+target+' for thread '+target+'.')
 ''');queue.chmod(0o755)
         env=dict(self.env,CTASK_QUEUE_BIN=str(queue))
         def cli(*args,thread=ORIGIN):
-            p=subprocess.run([sys.executable,str(ROOT/'runner.py'),*args],env=dict(env,CODEX_THREAD_ID=thread),capture_output=True,text=True)
+            p=subprocess.run([sys.executable,str(LEGACY_CLI),*args],env=dict(env,CODEX_THREAD_ID=thread),capture_output=True,text=True)
             self.assertEqual(p.returncode,0,p.stderr);return json.loads(p.stdout)
         q=cli('ask',str(self.d),'--question','Choose A or B?','--recommendation','A')
         self.assertEqual(cli('inbox',thread=HUB)[0]['id'],q['id'])

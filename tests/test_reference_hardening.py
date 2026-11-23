@@ -17,6 +17,7 @@ from acp_outcome import Outcome
 from message_bus import MessageBus, ConflictError, IdentityError
 
 ROOT = Path(__file__).resolve().parents[1]
+from legacy_support import LEGACY_CLI
 
 
 class WorkflowContinuationTests(unittest.TestCase):
@@ -212,7 +213,7 @@ class TraceAndCapabilityTests(unittest.TestCase):
     def test_tool_transitions_keep_identity_in_cli_trace(self):
         for i, state in enumerate(('pending', 'in_progress', 'completed')):
             self.add('tool', str(i), attempt=1, session='s', turn='t', tool='tool-1', state=state, source='acp')
-        data = json.loads(subprocess.check_output([sys.executable, str(ROOT/'runner.py'), 'trace', str(self.root), '--json'], text=True))
+        data = json.loads(subprocess.check_output([sys.executable, str(LEGACY_CLI), 'trace', str(self.root), '--json'], text=True))
         self.assertEqual(data['summary']['tool_call_count'], 1)
         self.assertEqual(len({event['tool_id'] for event in data['events']}), 1)
 

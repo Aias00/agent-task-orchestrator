@@ -788,7 +788,7 @@ independent queue or writer lease.
 
 The following inventory uses the exact frozen
 [55 parser names and aliases](../tests/fixtures/cli-surface.json)
-and their [handlers](../ato_cli/__init__.py), plus
+and their [historical handler fixtures](../tests/fixtures/legacy_cli/__init__.py), plus
 [the H1 parser](../hub_cli.py). A public replacement uses the new Task ID.
 An internal disposition describes the remaining trusted caller and seam.
 A retired operation remains usable only by its original sealed version
@@ -887,7 +887,7 @@ on authorized submission in the new namespace.
 
 - [`runner.runtime_command`](../runner.py) and the
   [registry bootstrap](../agent_registry.py) are the cross-process seam.
-  [`run_cmd`](../ato_cli/run_cmd.py) used `_worker`.
+  [`run_cmd` fixture](../tests/fixtures/legacy_cli/run_cmd.py) used `_worker`.
   [`control`](../control.py) uses `_controller`. [`recovery`](../recovery.py)
   uses `_supervisor` and `resume --retry-failed`. Translate remaining
   unified calls to sealed private operations. A recovery attempt cannot
@@ -906,8 +906,8 @@ on authorized submission in the new namespace.
   New wakes use sealed `read-handoff`. Legacy markers in retained receipts
   remain audit data. Protect current v1 canonical question, failure and
   final-completion claims at both dispatch barriers before any adapter call.
-- [`bin/ctask`](../bin/ctask), [`bin/ctask-notify`](../bin/ctask-notify),
-  [`bin/ato-read-handoff`](../bin/ato-read-handoff) and the installed H1
+- `bin/ctask`, `bin/ctask-notify`,
+  `bin/ato-read-handoff` at `86f19d9` and the installed H1
   `ato-hub` are removed from the new install/distribution surface. The
   [installer](../scripts/install.py) and
   [snapshot tool](../scripts/release_snapshot.py) own their prior-path
@@ -915,15 +915,10 @@ on authorized submission in the new namespace.
   `--hub` and `--hub-skills-dir`, along with the snapshot's `--include-hub`,
   are retired from new distribution selection. The new install always selects
   one entrypoint and can install the one Skill inertly.
-- Replace the [legacy Skill](../skills/codex-long-task/SKILL.md), its
-  [controller](../skills/codex-long-task/references/controller.md) and
-  [cross-session](../skills/codex-long-task/references/cross-session.md)
-  command instructions, and the [H1 Skill](../skills/ato-hub-orchestrator/SKILL.md)
-  with one unified Skill at T6. Update quick start, install help, distribution
-  metadata and fixture entrypoints. Where removal of a historical source file
-  breaks an inventory link, cite its baseline Git revision and path. The
-  unified Skill points at Task IDs and verified state/actor operations. It
-  consumes actual user decisions and separate independent evidence.
+- The legacy Skills at `86f19d9:skills/codex-long-task/` and
+  `86f19d9:skills/ato-hub-orchestrator/` converge into [the ATO Skill](../skills/ato/SKILL.md).
+  The unified Skill points at Task IDs and verified state and actor operations.
+  It consumes actual user decisions and separate independent evidence.
 
 ## Release, cutover and validation
 

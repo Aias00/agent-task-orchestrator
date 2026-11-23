@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import sys
 import time
 import uuid
 
@@ -606,14 +605,3 @@ def ensure_resumable(directory):
                 pass
             else:
                 raise ValueError(f'orphan process group {pid} still exists; inspect before resume')
-
-
-def main():
-    from ato_cli import main as cli_main
-    return cli_main(sys.modules[__name__])
-
-
-if __name__ == '__main__':
-    # Workflow imports must share this module's exception types and runtime helpers.
-    sys.modules.setdefault('runner', sys.modules[__name__])
-    sys.exit(main())

@@ -1,5 +1,6 @@
 """Metadata-only lineage acceptance against separate isolated workflows."""
 import json
+from legacy_support import LEGACY_CLI
 import subprocess
 import sys
 import unittest
@@ -42,7 +43,7 @@ class LineageTests(unittest.TestCase):
         self.assertTrue((self.f.d/'STOP').exists())
 
     def test_cli_link_and_idempotency(self):
-        argv = [sys.executable, 'runner.py', 'workflow-link', str(self.f.d), '--successor', str(self.successor),
+        argv = [sys.executable, str(LEGACY_CLI), 'workflow-link', str(self.f.d), '--successor', str(self.successor),
                 '--evidence', str(self.proof), '--source', 'fixture verification']
         for _ in range(2):
             result = subprocess.run(argv, env=self.f.env, capture_output=True, text=True)

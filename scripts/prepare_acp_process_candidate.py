@@ -20,7 +20,7 @@ FILES = (
     'tests/pi_toolchain_support.py',
     'hub_contract.py', 'hub_sandbox.py', 'hub_worktree.py', 'hub_ledger.py',
     'hub_adapter_agy.py', 'hub_adapter_claude.py', 'hub_adapter_codex.py', 'hub_registry.py',
-    'hub_loop.py', 'hub_cli.py', 'skills/ato-hub-orchestrator/SKILL.md',
+    'hub_loop.py', 'ato.py', 'skills/ato/SKILL.md',
     'tests/hub_support.py', 'tests/test_hub_foundations.py', 'tests/test_hub_adapters.py',
     'tests/test_hub_loop.py', 'tests/fixtures/hub_cli_fixture.py', 'tests/fixtures/hub_worker_fixture.py',
     'scripts/derive_pi_acp.py', 'scripts/create_acp_process_demo.py',
@@ -42,7 +42,7 @@ def build():
                   (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'docs').glob('*.md'),
                   (ROOT/'skills').rglob('*.md'), (ROOT/'ato_cli').glob('*.py')):
         inputs.update(p.relative_to(ROOT).as_posix() for p in group if p.is_file())
-    inputs.update(('pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py'))
+    inputs.update(('pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ato', 'scripts/install.py', 'scripts/prepare_agent_candidate.py'))
     for name in sorted(inputs):
         path = ROOT/name
         if not path.is_file() or not path.resolve().is_relative_to(ROOT):

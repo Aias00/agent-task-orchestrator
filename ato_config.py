@@ -93,6 +93,8 @@ def ensure_interaction_directory():
 
 def reader_command():
     """Resolve the trusted installed handoff helper without project/PATH discovery."""
+    if in_unified_kernel():
+        return shlex.join(private_runtime_command('read-handoff'))
     configured = os.environ.get('CTASK_HANDOFF_READER')
     path = Path(configured).expanduser() if configured else None
     if not (path and path.is_absolute() and path.is_file() and os.access(path, os.X_OK)):
@@ -102,3 +104,10 @@ def reader_command():
     if path.name != 'ato-read-handoff':
         command = '/bin/sh -c '+shlex.quote('exec '+command+' "$@"')+' ato-read-handoff'
     return command
+
+
+def private_runtime_command(*arguments):
+    """Select the same source and interpreter without launcher/PATH discovery."""
+    import sys
+    script = Path(__file__).resolve().with_name('ato_runtime.py')
+    return [str(Path(sys.executable).absolute()), '-IB', str(script), *map(str, arguments)]

@@ -14,6 +14,7 @@ import interaction
 import notifications
 import recovery
 import runner
+from legacy_support import LEGACY_CLI
 
 
 class NotificationPolicyTests(unittest.TestCase):
@@ -166,7 +167,7 @@ class NotificationPolicyTests(unittest.TestCase):
 
     def test_real_cli_policy_persists_and_does_not_follow_new_hub(self):
         env = dict(os.environ, CODEX_THREAD_ID=HUB)
-        cli = [sys.executable, str(Path(runner.__file__).resolve()), 'notification-policy']
+        cli = [sys.executable, str(LEGACY_CLI), 'notification-policy']
         r = subprocess.run(cli+['set', '--mode', 'user_input_only', '--source', 'Actual fixture user'],
                            env=env, capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(r.stdout)['mode'], 'user_input_only')

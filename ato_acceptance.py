@@ -124,7 +124,7 @@ class InteractionService:
     """
 
     def __init__(self, store, execution, *, authorize=None, verify_event=None,
-                 verify_continuation=None, route=None, mailbox=None, clock=time.time):
+                 verify_continuation=None, route=None, mailbox=None, render_notice=None, clock=time.time):
         self.store = store
         self.execution = execution
         self.authorize = authorize
@@ -132,6 +132,8 @@ class InteractionService:
         self.verify_continuation = verify_continuation
         self.route = route
         self.mailbox = mailbox
+        self.render_notice = render_notice
+        self.dispatch_envelope = None
         self.clock = clock
 
     def execution_hooks(self):
@@ -882,7 +884,10 @@ class InteractionService:
             return None
         with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
             expected = ato_config.interaction_directory() / "mailbox" / "state.sqlite"
-        _require(self.mailbox.path == expected)
+        mailbox = self.mailbox() if callable(self.mailbox) else self.mailbox
+        if mailbox is None:
+            return None
+        _require(mailbox.path == expected)
         try:
             with self.store._private(expected.parent) as fd:
                 info = _existing(fd, expected.name)
@@ -891,7 +896,7 @@ class InteractionService:
                 _regular(info, True, "STATE_CORRUPT")
         except FileNotFoundError:
             return None
-        return self.mailbox
+        return mailbox
 
     @staticmethod
     def _notice_name(correlation, phase):
@@ -910,11 +915,19 @@ class InteractionService:
                 return row, row["outbox"].get(phase)
         return None, self._notice(task, correlation, phase)
 
+    @staticmethod
+    def _notice_key(notice):
+        key = "ato:" + notice["phase"] + ":" + notice["correlation_id"]
+        if "supersedes" in notice:
+            key += ":" + str(notice["binding_revision"])
+        return key
+
     def _message(self, task, notice):
         _fields(notice, ("correlation_id", "phase", "binding_revision", "generation", "stop_epoch",
                          "run_id", "sender", "target", "source_ref", "mailbox_id", "expires_at",
-                         "body", "from_ref", "to_ref", "route_generation", "superseded"))
-        _require(type(notice["superseded"]) is bool)
+                         "body", "from_ref", "to_ref", "route_generation", "superseded"), ("supersedes",))
+        _require(type(notice["superseded"]) is bool
+                 and ("supersedes" not in notice or _matches(_SHA, notice["supersedes"])))
         bus = self._bus()
         if bus is None:
             return None
@@ -922,7 +935,7 @@ class InteractionService:
         if identifier is None:
             # Recover an enqueue interrupted before the leaf published its
             # pointer. Read the mailbox's own durable idempotency index.
-            key = "ato:" + notice["phase"] + ":" + notice["correlation_id"]
+            key = self._notice_key(notice)
             with bus._transaction() as con:
                 entry = con.execute("select id from messages where sender=? and idempotency_key=?",
                                     (notice["sender"], key)).fetchone()
@@ -984,11 +997,13 @@ class InteractionService:
         route = self._delivery_route(task, binding, phase, source, target)
         if route is None:
             return None
-        correlation = receipt if phase == "completion" else item["request_id"]
+        correlation = receipt if phase in {"completion", "failure"} else item["request_id"]
         # All native messages refer to the canonical record. The guarded
         # reader, rather than a native message, supplies any decision text.
         body = canonical_json(dict(task_id=task["task_id"], request_id=item["request_id"],
                                    phase=phase, receipt_id=receipt)).decode()
+        if self.render_notice is not None:
+            body = self.render_notice(task, binding, phase, correlation, item, target)
         return dict(correlation_id=correlation, phase=phase, binding_revision=binding["revision"],
                     generation=item["generation"], stop_epoch=task["stop_epoch"], run_id=task["run_id"],
                     sender=route.sender.endpoint_id, target=route.target.endpoint_id,
@@ -1002,6 +1017,13 @@ class InteractionService:
                     or any(Path(rule["repo"]).resolve() == Path(task["repo"]["root"])
                            for rule in notification_state.project_mutes())):
                 return False
+        if phase == "failure":
+            import failure_attention
+            with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
+                failure = failure_attention.policy()
+            since = failure.get("configured_at")
+            return (failure.get("enabled") is True and failure.get("hub_thread") == binding["interaction_ref"]
+                    and _time(since) and task["created_at"] >= since)
         if phase == "completion":
             since = policy.get("completion_since")
             return policy.get("completion") == "once" and _time(since) and item["created_at"] >= since
@@ -1020,6 +1042,10 @@ class InteractionService:
                          or (phase == "question" and not row["answer"]), "STALE_REQUEST")
                 return row, item, row["outbox"].get(phase)
         status, product_generation, manual = self._view(task, spec)
+        if phase == "failure":
+            failed = self.failure_item(task, status, generation)
+            _require(open_ and failed is not None and failed[0] == correlation, "STALE_REQUEST")
+            return None, failed[1], self._notice(task, correlation, phase)
         _require(manual is not None, "STALE_REQUEST")
         if phase == "question":
             _require(manual["request_id"] == correlation and status["status"] == "needs_acceptance",
@@ -1031,6 +1057,19 @@ class InteractionService:
             manual["created_at"] = record["recorded_at"]
         item = dict(manual, generation=product_generation or self._removed_generation(task))
         return None, item, self._notice(task, correlation, phase)
+
+    @staticmethod
+    def failure_item(task, status, generation):
+        history = status["run_history"]
+        execution = status["execution"]
+        if (generation is None or not history or status["status"] != "blocked"
+                or status["pending"] or execution["state"] != "idle" or not execution["verified"]
+                or execution["stop_requested"] or history[-1]["phase"] != "settled"
+                or history[-1]["outcome"] not in {"blocked", "failed"}):
+            return None
+        receipt = task["run_heads"][task["run_id"]][-1]
+        return receipt, dict(task_id=task["task_id"], request_id=None, generation=generation,
+                             kind="failure", created_at=history[-1]["settled_at"])
 
     def _save_delivery(self, task, binding, row, correlation, notice, *, superseding=False):
         task_id, phase = task["task_id"], notice["phase"]
@@ -1048,7 +1087,7 @@ class InteractionService:
     @staticmethod
     def _delivery_id(task_id, correlation, phase):
         _identifier(task_id, "task")
-        _require((phase == "completion" and _matches(_SHA, correlation))
+        _require((phase in ("completion", "failure") and _matches(_SHA, correlation))
                  or (phase in ("question", "answer") and _valid_id(correlation, "request")), "INVALID_ID")
 
     @_state_errors
@@ -1096,16 +1135,22 @@ class InteractionService:
         self._delivery_id(task_id, correlation, phase)
         task, spec, binding = self._task(task_id)
         row, item, notice = self._delivery_item(task, spec, correlation, phase)
-        if notice is None:
+        prior = notice if (notice and notice["superseded"] and self.render_notice is not None
+                           and phase == "question") else None
+        if notice is None or prior is not None:
             if phase == "answer" or (row and row["presentation"]) or (row is None and phase == "question"
                     and self._notice(task, correlation, "present")):
                 return "recorded_only"
             if not self._notification_eligible(task, binding, phase, item):
                 return "recorded_only"
             notice = self._reserve_delivery(task, binding, item, phase,
-                                            correlation if phase == "completion" else None)
+                                            correlation if phase in {"completion", "failure"} else None)
             if notice is None:
                 return "recorded_only"
+            if prior:
+                _require(prior["binding_revision"] < binding["revision"]
+                         and self._delivery(task, prior)[0] == "cancelled", "STALE_REQUEST")
+                notice["supersedes"] = self.store.put_evidence(task_id, canonical_json(prior))
             self._save_delivery(task, binding, row, correlation, notice)
             task, spec, binding = self._task(task_id)
             row, item, notice = self._delivery_item(task, spec, correlation, phase)
@@ -1142,7 +1187,7 @@ class InteractionService:
                 generation=notice["generation"], advance=True,
                 cross_project=route.sender.project != route.target.project)
             message = bus.enqueue(route.sender, binding_id=bound["id"], target=notice["target"],
-                kind="ato_" + phase, body=notice["body"], idempotency_key="ato:" + phase + ":" + correlation,
+                kind="ato_" + phase, body=notice["body"], idempotency_key=self._notice_key(notice),
                 task_id=task_id, contract_hash=task["spec_sha256"], correlation_id=correlation,
                 protocol=2, generation=notice["generation"], canonical_id=correlation,
                 authority_source=notice["source_ref"], expires_at=notice["expires_at"])
@@ -1156,7 +1201,9 @@ class InteractionService:
                     bus.cancel(route.sender, message["id"], source="unified reservation became stale")
                 raise
             notice = updated
-        if route.owner_token and route.transports:
+        if self.dispatch_envelope is not None:
+            self.dispatch_envelope(bus, route, notice["mailbox_id"], guard)
+        elif route.owner_token and route.transports:
             transport.dispatch_one(bus, route.target, route.owner_token, route.transports,
                                    message_id=notice["mailbox_id"], guard=guard)
         return self._delivery(task, notice)[0]

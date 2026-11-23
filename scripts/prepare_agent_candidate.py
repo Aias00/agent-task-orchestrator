@@ -21,7 +21,7 @@ def inputs():
               (ROOT/'skills').rglob('*.md'), (ROOT/'tests/fixtures').glob('*.py'), (ROOT/'ato_cli').glob('*.py')]
     files = {p for group in groups for p in group if p.is_file()}
     files.update(ROOT/name for name in (
-        'pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ctask', 'scripts/install.py', 'scripts/prepare_agent_candidate.py',
+        'pyproject.toml', 'requirements-acp.lock', 'README.md', 'bin/ato', 'scripts/install.py', 'scripts/prepare_agent_candidate.py',
         'integrations/pi-acp/compatibility.json',
         'build/agent-abstraction/validation-report.md',
         'tests/test_agent_registry_contract.py', 'tests/test_agent_neutral_e2e.py',

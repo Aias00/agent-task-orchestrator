@@ -13,6 +13,7 @@ import runner
 import test_compact_handoff as fixtures
 
 ROOT = Path(__file__).resolve().parents[1]
+from legacy_support import LEGACY_CLI
 
 
 class HandoffReaderTests(unittest.TestCase):
@@ -71,11 +72,12 @@ class HandoffReaderTests(unittest.TestCase):
                 self.material()
         self.assertFalse((coordination.payload_directory()/(self.identifier+'.json')).exists())
 
-    def test_installed_ctask_and_notify_queue_custom_reader_and_reader_validates(self):
+    def test_legacy_fixture_queues_custom_reader_and_reader_validates(self):
         folder = (self.repo/'bin with spaces').resolve()
-        installed = subprocess.run([sys.executable, str(ROOT/'scripts/install.py'),
-            '--helpers', '--bin-dir', str(folder)], capture_output=True, text=True, timeout=10)
-        self.assertEqual(installed.returncode, 0, installed.stderr)
+        folder.mkdir()
+        reader = folder/'ato-read-handoff'
+        reader.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, str(ROOT/'coordination.py')]) + ' "$@"\n')
+        reader.chmod(0o700)
         queued = self.repo/'queued.jsonl'
         queue = self.repo/'synthetic-queue'
         queue.write_text('#!'+sys.executable+'\nimport json,sys\n'
@@ -89,12 +91,11 @@ class HandoffReaderTests(unittest.TestCase):
         override = self.repo/'override bin/ato-read-handoff'
         override.parent.mkdir()
         override.symlink_to(folder/'ato-read-handoff')
-        for launcher, configured in (('ctask', ''), ('ctask-notify', ''),
-                                     ('ctask', str(override)), ('ctask-notify', str(override))):
-            with self.subTest(launcher=launcher, configured=configured):
+        for configured in (str(reader), str(override)):
+            with self.subTest(configured=configured):
                 self.prepare()
                 before = (self.d/'state.json').read_bytes()
-                result = subprocess.run([str(folder/launcher), 'control', 'tick'],
+                result = subprocess.run([sys.executable, str(LEGACY_CLI), 'control', 'tick'],
                     env=dict(env, CTASK_HANDOFF_READER=configured), capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 messages = [json.loads(line)[-1] for line in queued.read_text().splitlines()]
@@ -103,7 +104,7 @@ class HandoffReaderTests(unittest.TestCase):
                 notice = notices[0]
                 self.assertLess(len(notice.encode('utf-8')), 260)
                 self.assertEqual(shlex.split(notice.splitlines()[1]),
-                                 [configured or str(folder/'ato-read-handoff'), self.identifier])
+                                 [configured, self.identifier])
                 read = subprocess.run(['/bin/sh', '-c', notice.splitlines()[1]], env=env,
                     capture_output=True, text=True, timeout=10)
                 self.assertEqual(read.returncode, 0, read.stderr)

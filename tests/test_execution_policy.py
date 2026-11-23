@@ -12,6 +12,7 @@ from unittest.mock import patch
 import permissions
 import runner
 import workflow
+from legacy_support import LEGACY_CLI
 
 
 FAKE = '''#!/usr/bin/env python3
@@ -69,7 +70,7 @@ class ExecutionPolicyTests(unittest.TestCase):
         return runner.create(self.repo, source)
 
     def execute(self, directory, **env):
-        result = subprocess.run([sys.executable, str(Path(runner.__file__)), 'run', str(directory)],
+        result = subprocess.run([sys.executable, str(LEGACY_CLI), 'run', str(directory)],
                                 env=dict(self.env, **env), capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         return runner.read(directory/'state.json')
@@ -151,7 +152,7 @@ class ExecutionPolicyTests(unittest.TestCase):
     def test_explicit_policy_cannot_bypass_stop(self):
         d = self.create(self.plan())
         (d/'STOP').touch()
-        result = subprocess.run([sys.executable, str(Path(runner.__file__)), 'run', str(d)],
+        result = subprocess.run([sys.executable, str(LEGACY_CLI), 'run', str(d)],
                                 env=self.env, capture_output=True, text=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('STOP', result.stderr)

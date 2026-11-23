@@ -323,8 +323,9 @@ class BindingService:
             _require(status["run_history"][-1]["phase"] != "launching", "RUN_UNSETTLED")
         observed = _observation(task, status, generation, epoch)
         with self.execution.transaction(task_id, task["revision"], epoch, before["revision"],
-                                        reviewer_change=operation == "reviewer") as (_, latest, current):
+                                        reviewer_change=operation == "reviewer") as (task_fd, latest, current):
             _require(current == before and _scope_record(latest) == asdict(scope), "BINDING_CHANGED")
+            _require(latest["worktree_removed"] or _existing(task_fd, "cleanup.json") is None, "CLEANUP_BLOCKED")
             _require(self.store.can_observe(principal, scope) is True, "NOT_FOUND")
             self._authorize_actor(principal, scope, current, operation, successor=successor)
             self._authorize_endpoints(scope, current)

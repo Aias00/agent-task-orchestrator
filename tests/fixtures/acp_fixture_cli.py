@@ -35,4 +35,5 @@ if __name__ == '__main__':
             raise SystemExit(1)
     else:
         import runner
-        raise SystemExit(runner.main())
+        from legacy_cli import main
+        raise SystemExit(main(runner))

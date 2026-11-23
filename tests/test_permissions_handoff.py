@@ -18,6 +18,7 @@ import test_workflow as workflow_fixtures
 import test_delegation as delegation_fixtures
 import appserver
 import delegation
+from legacy_support import LEGACY_CLI
 
 
 FAKE = '''#!/usr/bin/env python3
@@ -47,7 +48,7 @@ class PermissionAndHandoffTests(unittest.TestCase):
         self.fake.write_text(FAKE)
 
     def execute(self, directory, outcome='ready_for_checks', **env):
-        result = subprocess.run([sys.executable, str(Path(runner.__file__)), 'run', str(directory)],
+        result = subprocess.run([sys.executable, str(LEGACY_CLI), 'run', str(directory)],
             env=dict(self.env, OUTCOME=outcome, **env), capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         return runner.read(directory/'state.json')

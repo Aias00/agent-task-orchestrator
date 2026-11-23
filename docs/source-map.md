@@ -1,5 +1,8 @@
 # Source and capability map
 
+The unified public entry is [ato](../README.md#quick-start). This map records
+the earlier implementation and its internal compatibility mechanisms.
+
 The stable source baseline is exported from the deployed compact-handoff
 controller, including the compatible CLI runtime. Publication does not switch
 installed launchers, migrate task records or grant execution permissions.

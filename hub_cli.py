@@ -1,4 +1,4 @@
-"""Independent source-only H1 control plane; does not extend the ctask parser."""
+"""Historical H1 parser for private regression callers."""
 import argparse
 import json
 import os
@@ -81,6 +81,3 @@ def main(argv=None):
     except Exception:
         print(json.dumps(dict(status='refused',code='HUB_COMMAND_REFUSED')));return 2
     print(json.dumps(result,ensure_ascii=False,allow_nan=False));return 0
-
-
-if __name__=='__main__':sys.exit(main())

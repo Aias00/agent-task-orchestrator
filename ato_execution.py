@@ -312,14 +312,14 @@ class ExecutionService:
     def start(self, actor, task_id, foreground=False):
         return self._launch(actor, task_id, "initial", foreground=foreground)
 
-    def resume(self, actor, task_id, *, foreground=False):
-        return self._launch(actor, task_id, "resume", foreground=foreground)
+    def resume(self, actor, task_id, *, foreground=False, expected_run=None):
+        return self._launch(actor, task_id, "resume", foreground=foreground, expected_run=expected_run)
 
     def recheck(self, actor, task_id, checks_only=False, *, foreground=False):
         return self._launch(actor, task_id, "recheck", foreground=foreground, checks_only=checks_only)
 
     @_state_errors
-    def reconcile(self, actor, task_id):
+    def reconcile(self, actor, task_id, *, expected_run=None):
         """Publish only a prepared terminal receipt for the exact current Run."""
         task, _, _ = self._actor(actor, task_id, "reconcile")
         _require(task["creation"]["phase"] == "ready" and not task["worktree_removed"], "NOT_RESUMABLE")
@@ -327,7 +327,7 @@ class ExecutionService:
             task, _, _ = self._actor(actor, task_id, "reconcile")
             _require(task["creation"]["runtime_seal"] == self.store.runtime_seal, "RUNTIME_MISMATCH")
             run, receipts = _current(self.store, task)
-            _require(bool(receipts), "RUN_UNSETTLED")
+            _require((expected_run is None or run["run_id"] == expected_run) and receipts, "RUN_UNSETTLED")
             last = receipts[-1][1]
             if last["phase"] not in _TERMINAL:
                 owner = _active_proof(self.store, run, receipts)
@@ -603,7 +603,7 @@ class ExecutionService:
         return stop, handoff
 
     @_state_errors
-    def _launch(self, actor, task_id, kind, *, foreground, checks_only=False):
+    def _launch(self, actor, task_id, kind, *, foreground, checks_only=False, expected_run=None):
         task, _, _ = self._actor(actor, task_id, kind)
         _require(type(foreground) is bool and type(checks_only) is bool, "USAGE")
         _require(task["creation"]["phase"] == "ready" and not task["worktree_removed"], "NOT_RESUMABLE")
@@ -611,6 +611,9 @@ class ExecutionService:
         with _repo_gate(self.store, task) as gate:
             task, spec, binding = self._actor(actor, task_id, kind)
             _require(self.store.runtime_seal == task["creation"]["runtime_seal"], "RUNTIME_MISMATCH")
+            _require(expected_run is None or task["run_id"] == expected_run, "RUN_UNSETTLED")
+            with self.store._private(self.store._task_dir(task_id)) as fd:
+                _require(_existing(fd, "cleanup.json") is None, "CLEANUP_BLOCKED")
             _check_repo_peers(self.store, task)
             with _worker_lock(task), ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
                 state, _, generation, kernel_stop = self.store._kernel_facts(task)
@@ -1294,6 +1297,9 @@ def run_child(store, task_id, run_id, capability, hooks):
         # flock before doing anything that could affect the workspace.
         fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
     os.set_inheritable(gate, False)
+    from ato_seal import runtime_seal
+    if not launch["profile"]["fixture"] or _ENTRY.with_name(".release-manifest.json").exists():
+        runtime_seal(required=True, expected=run["runtime_seal"])
     folder = _activity_path(store, run)
     folder.mkdir(mode=0o700)
     with ato_config.use_unified_kernel(store.kernel_root, store.native_home):

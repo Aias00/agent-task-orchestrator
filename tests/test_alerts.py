@@ -13,6 +13,7 @@ import recovery
 import runner
 
 ROOT = Path(__file__).resolve().parents[1]
+from legacy_support import LEGACY_CLI
 
 
 class AlertTests(unittest.TestCase):
@@ -206,7 +207,7 @@ print('Queued message '+target+' for thread '+target+'.')
 ''')
         queue.chmod(0o755)
         env = dict(self.env, CTASK_QUEUE_BIN=str(queue))
-        command = [sys.executable, str(ROOT/'runner.py'), '_supervisor', str(self.d)]
+        command = [sys.executable, str(LEGACY_CLI), '_supervisor', str(self.d)]
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         watch = runner.read(self.d/'supervisor.json')

@@ -553,5 +553,9 @@ def set_runtime_entrypoint(script):
 
 
 def runtime_command(*arguments):
-    script = _runtime_entrypoint or str(Path(__file__).with_name('runner.py').resolve())
-    return [sys.executable, script, *map(str, arguments)]
+    if _runtime_entrypoint is not None:
+        return [sys.executable, _runtime_entrypoint, *map(str, arguments)]
+    if not arguments or arguments[0] not in {'run-child', 'observe', 'supervise', 'resume-run', 'read-handoff'}:
+        raise ValueError('operation has no private unified runtime entry')
+    script = str(Path(__file__).resolve().with_name('ato_runtime.py'))
+    return [str(Path(sys.executable).absolute()), '-IB', script, *map(str, arguments)]

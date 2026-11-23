@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 
 import ato_core as core
 from hub_contract import SHARED_ENV_LINKS
@@ -141,7 +142,7 @@ def diff_bundle(binding, *, verified_shared=None):
                 status=snapshot['status_porcelain'],snapshot=snapshot)
 
 
-def cleanup(binding):
+def cleanup(binding, *, worker_locked=False, before_remove=None):
     root=repository(binding['path']);repo=repository(binding['repo'])
     if root==repo or root.is_relative_to(repo) or git(root,'branch','--show-current').strip()!=binding['branch']:
         raise ValueError('WORKTREE_BINDING_CHANGED')
@@ -161,17 +162,33 @@ def cleanup(binding):
     if status:raise ValueError('DIRTY_WORKTREE')
     handles=[]
     try:
-        for directory in (root,repo):
+        for directory in ((repo,) if worker_locked else (root,repo)):
             lock=directory/'.codex/tasks/.worker.lock'
             if lock.is_symlink():raise ValueError('UNSAFE_WORKER_LOCK')
             if lock.exists():
                 stream=lock.open('r');handles.append(stream)
                 try:fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 except BlockingIOError:raise ValueError('WORKTREE_BUSY') from None
+        if before_remove is not None:
+            before_remove()
         # Remove only the already-verified, provisioned links. Git treats a
         # directory-only ignore pattern differently for symlinks; never use
         # --force to hide another dirty file or delete the dependency target.
-        for name in binding.get('shared_env_links',[]):(root/name).unlink()
-        git(repo,'worktree','remove',str(root))  # Explicit human command only; retain branch.
+        links = list(binding.get('shared_env_links', []))
+        if not links:
+            git(repo, 'worktree', 'remove', str(root))
+            return
+        with tempfile.TemporaryDirectory(prefix='.ato-cleanup-', dir=root.parent) as folder:
+            staged = Path(folder)
+            try:
+                for name in links:
+                    (root/name).rename(staged/name)
+                git(repo, 'worktree', 'remove', str(root))  # Retain the branch.
+            except (OSError, ValueError, subprocess.SubprocessError):
+                if root.is_dir() and root == root.resolve():
+                    for name in links:
+                        if (staged/name).is_symlink() and not os.path.lexists(root/name):
+                            (staged/name).rename(root/name)
+                raise
     finally:
         for stream in handles:stream.close()

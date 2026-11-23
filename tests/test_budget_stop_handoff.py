@@ -15,6 +15,7 @@ import runner
 import workflow
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
+from legacy_support import LEGACY_CLI
 
 
 class BudgetStopHandoffTests(unittest.TestCase):
@@ -142,7 +143,7 @@ class BudgetStopHandoffTests(unittest.TestCase):
         control.register(self.d)
         with patch('control.subprocess.run',side_effect=self.transport):control.tick()
         self.assertEqual(next(a for a in control.rows(True) if a['id']==self.q['id'])['state'],'stopped')
-        result=subprocess.run([sys.executable,str(Path(runner.__file__)),'resume',str(self.d),
+        result=subprocess.run([sys.executable,str(LEGACY_CLI),'resume',str(self.d),
                               '--accepted-answer',self.q['id'],'--retry-failed'],
                               capture_output=True,text=True,env=self.env,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
