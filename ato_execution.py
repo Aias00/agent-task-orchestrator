@@ -53,7 +53,7 @@ class ExecutionHooks:
     pending: object = lambda task, binding: ()
     decision_status: object = lambda task, binding: None
     host_handoff: object = lambda task, binding, run, generation: None
-    claim_continuation: object = lambda task, binding, run, generation: None
+    claim_continuation: object = lambda task, binding, run, generation, **kwargs: None
 
 
 @dataclass(frozen=True)
@@ -221,7 +221,53 @@ def _check_repo_peers(store, task):
             continue
         _, receipts = _current(store, peer)
         if receipts and (code := _uncertain(receipts[-1][1]["phase"], receipts[-1][1])):
+            if _quarantined(store, peer):
+                continue
             raise TaskError(code, task["task_id"])
+
+
+def _quarantined(store, task):
+    with store._private(store._task_dir(task["task_id"])) as fd:
+        if _existing(fd, "quarantine.json") is None:
+            return False
+        row = _read_json(fd, "quarantine.json")
+    _require(row["run_id"] == task["run_id"]
+             and row["receipt"] == task["run_heads"][task["run_id"]][-1], "STATE_CORRUPT")
+    return True
+
+
+def quarantine_task(store, task_id, source):
+    task = _load_task(store, task_id)
+    with _repo_gate(store, task):
+        task = _load_task(store, task_id)
+        run, receipts = _current(store, task)
+        _require(task["creation"]["runtime_seal"] == store.runtime_seal, "RUNTIME_MISMATCH")
+        _require(receipts and _uncertain(receipts[-1][1]["phase"], receipts[-1][1]), "NOT_RESUMABLE")
+        owner = _active_proof(store, run, receipts)
+        _require(owner is not None, "CLEANUP_BLOCKED")
+        _verify_exit(owner)
+        with _worker_lock(task):
+            state, contract, generation, _ = store._kernel_facts(task)
+            _, child_active, _ = store._stage_facts(task, contract, state)
+            _require(not child_active and not state.get("owner_pid") and not state.get("active_process"),
+                     "CLEANUP_BLOCKED")
+            with store._private(_activity_path(store, run)) as fd:
+                _require(_existing(fd, "settlement.json") is None, "NOT_RESUMABLE")
+                for name in os.listdir(fd):
+                    if name.startswith("turn-") and name.endswith(".launching.json"):
+                        prefix = name.removesuffix(".launching.json")
+                        if _existing(fd, prefix + ".settled.json") is not None:
+                            continue
+                        _require(_existing(fd, prefix + ".active.json") is not None, "CLEANUP_BLOCKED")
+                        process = _read_json(fd, prefix + ".active.json")
+                        _require(process["run_id"] == run["run_id"], "STATE_CORRUPT")
+                        _verify_exit(process)
+            with store._mutation(task_id, task["revision"]) as (fd, latest, _):
+                if _existing(fd, "quarantine.json") is None:
+                    _save(fd, "quarantine.json", dict(run_id=run["run_id"], receipt=receipts[-1][0],
+                        generation=generation, source=source, recorded_at=time.time()), exclusive=True)
+                    store._advance(fd, latest)
+        return dict(task_id=task_id, run_id=run["run_id"], state="quarantined")
 
 
 def _runtime_identity():
@@ -349,6 +395,7 @@ class ExecutionService:
         _require(task["creation"]["phase"] == "ready" and not task["worktree_removed"], "NOT_RESUMABLE")
         with _repo_gate(self.store, task), _worker_lock(task):
             task, _, _ = self._actor(actor, task_id, "reconcile")
+            _require(not _quarantined(self.store, task), "NOT_RESUMABLE")
             _require(task["creation"]["runtime_seal"] == self.store.runtime_seal, "RUNTIME_MISMATCH")
             run, receipts = _current(self.store, task)
             _require((expected_run is None or run["run_id"] == expected_run) and receipts, "RUN_UNSETTLED")
@@ -462,6 +509,10 @@ class ExecutionService:
             return
         journal = _stop(self.store, task)
         execution = status["execution"]
+        if _quarantined(self.store, task):
+            status.update(status="blocked", reason="RUN_QUARANTINED", next_step="REVIEW_QUARANTINED_TASK")
+            execution.update(state="idle", verified=True)
+            return
         execution["stop_requested"] |= journal is not None
         run, receipts = history[-1]
         last = receipts[-1][1] if receipts else None
@@ -644,6 +695,7 @@ class ExecutionService:
         _require(self.profile is not None, "UNSUPPORTED_CAPABILITY")
         with _repo_gate(self.store, task) as gate:
             task, spec, binding = self._actor(actor, task_id, kind)
+            _require(not _quarantined(self.store, task), "NOT_RESUMABLE")
             _require(self.store.runtime_seal == task["creation"]["runtime_seal"], "RUNTIME_MISMATCH")
             _require(expected_run is None or task["run_id"] == expected_run, "RUN_UNSETTLED")
             with self.store._private(self.store._task_dir(task_id)) as fd:
@@ -729,6 +781,8 @@ class ExecutionService:
                           host_handoff=handoff, roots=_roots(self.store),
                           stop_epoch=stop["epoch"] if stop else task["stop_epoch"],
                           stop_run_id=stop["run_id"] if stop else None)
+            if reuse_initial:
+                launch["operation"] = "resume"
             def still_current(latest):
                 _require(latest["revision"] == task["revision"], "BUSY")
             _publish_receipt(self.store, run, "launching", generation, launch, validate=still_current)
@@ -907,7 +961,7 @@ class _RunDriver:
         _require(current["run_id"] == self.run["run_id"], "RUN_UNSETTLED")
         binding = _binding(self.hooks, current, self.spec)
         _require(binding["revision"] == self.launch["binding_revision"], "BINDING_CHANGED")
-        _barrier(self.hooks, current, binding, self.run["kind"])
+        _barrier(self.hooks, current, binding, self.launch.get("operation", self.run["kind"]))
         if self.launch["host_handoff"] is not None:
             _require(_host_handoff(self.hooks, current, binding, self.previous_run,
                                    self.previous_receipt["generation"]) == self.launch["host_handoff"],
@@ -970,11 +1024,15 @@ class _RunDriver:
                          nonce_sha256=self.launch["nonce_sha256"], runtime=self.launch["runtime"])
             _publish_receipt(self.store, self.run, "active", generation, proof)
             self.admitted = True
-            if self.run["kind"] == "resume" or self.launch["host_handoff"] is not None:
+            operation = self.launch.get("operation", self.run["kind"])
+            if operation == "resume" or self.launch["host_handoff"] is not None:
                 self.guard()
                 task = self.store.load_task(self.task_id)
                 binding = _binding(self.hooks, task, self.spec)
-                ref = self.hooks.claim_continuation(task, binding, self.run, generation)
+                if self.launch.get("operation") == "resume":
+                    ref = self.hooks.claim_continuation(task, binding, self.run, generation, operation=operation)
+                else:
+                    ref = self.hooks.claim_continuation(task, binding, self.run, generation)
                 if ref is not None:
                     self.store.read_evidence(self.task_id, ref)
                     with self.store._private(self.folder) as fd:

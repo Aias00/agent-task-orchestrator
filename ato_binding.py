@@ -5,7 +5,7 @@ import time
 
 from ato_execution import _initial_binding, _raw_stop
 from ato_task_store import (TaskError, TaskScope, _REF, _SHA, _existing, _fields, _identifier,
-                            _matches, _positive, _read_json, _require, _save,
+                            _matches, _positive, _read_json, _require, _retry_busy, _save,
                             _sha, _state_errors, _strict_json, _valid_id, canonical_json,
                             read_input_file)
 from hub_contract import HubAgentSpec, HubError
@@ -210,13 +210,16 @@ class BindingService:
     capability and execution admission checks when running a review.
     """
 
-    def __init__(self, execution, *, actor_grant, endpoint_grant, verify_decision, reviewer_supported=None):
+    def __init__(self, execution, *, actor_grant, endpoint_grant, verify_decision, reviewer_supported=None,
+                 handoff_observe=None, historical_endpoint=None):
         self.execution = execution
         self.store = execution.store
         self.actor_grant = actor_grant
         self.endpoint_grant = endpoint_grant
         self.verify_decision = verify_decision
         self.reviewer_supported = reviewer_supported
+        self.handoff_observe = handoff_observe
+        self.historical_endpoint = historical_endpoint or endpoint_grant
 
     def _authorize_actor(self, principal, scope, binding, operation, *, successor=None):
         grant = self.actor_grant(principal, scope, binding, operation)
@@ -236,17 +239,18 @@ class BindingService:
         _require(operation == "binding" and _granted(grant, scope, revision, "interaction",
                  binding["interaction_ref"], operation), "FORBIDDEN")
 
-    def _authorize_endpoints(self, scope, binding):
+    def _authorize_endpoints(self, scope, binding, *, historical=False):
         revision = binding["revision"]
         for role in ("controller", "interaction"):
             ref = binding[role + "_ref"]
-            grant = self.endpoint_grant(ref, scope, role, revision)
+            lookup = self.historical_endpoint if historical else self.endpoint_grant
+            grant = lookup(ref, scope, role, revision)
             _require(_granted(grant, scope, revision, role, ref), "FORBIDDEN")
 
-    def _current(self, actor, task_id):
+    def _current(self, actor, task_id, *, observe=None):
         _identifier(task_id, "task")
         principal = self.store._principal(actor)
-        scope = self.store._visible_scope(task_id, principal)
+        scope = self.store._visible_scope(task_id, principal, observe=observe)
         _require(scope is not None, "NOT_FOUND")
         with self.store._private(self.store._task_dir(task_id)) as fd:
             task, spec = self.store._task(fd, task_id)
@@ -267,6 +271,7 @@ class BindingService:
         return status, generation, journal["epoch"] if journal else task["stop_epoch"]
 
     @_state_errors
+    @_retry_busy
     def binding(self, actor, task_id):
         """Scoped current binding and the actual Run owner from T3's projection."""
         principal, scope, task, spec, binding, receipt = self._current(actor, task_id)
@@ -285,7 +290,8 @@ class BindingService:
         return self._change(actor, task_id, "reviewer", decision, reviewer=reviewer)
 
     def _change(self, actor, task_id, operation, path, *, target=None, interaction=None, reviewer=None):
-        principal, scope, task, spec, before, previous = self._current(actor, task_id)
+        observe = self.handoff_observe if operation == "handoff" else None
+        principal, scope, task, spec, before, previous = self._current(actor, task_id, observe=observe)
         after = dict(before, revision=before["revision"] + 1)
         successor = None
         if operation == "handoff":
@@ -309,7 +315,8 @@ class BindingService:
         else:
             selected = _agent(reviewer, "INVALID_EVIDENCE")
             _require(selected == _agent(evidence["reviewer"], "INVALID_EVIDENCE")
-                     and selected != before["reviewer"], "INVALID_EVIDENCE")
+                     and (before["reviewer"] is None or selected != _agent(before["reviewer"], "BINDING_CHANGED")),
+                     "INVALID_EVIDENCE")
             policy = spec["reviewer"]
             _require(policy is not None and selected["kind"] in policy["allowed_kinds"], "FORBIDDEN")
             _require(self.reviewer_supported is not None
@@ -326,9 +333,9 @@ class BindingService:
                                         reviewer_change=operation == "reviewer") as (task_fd, latest, current):
             _require(current == before and _scope_record(latest) == asdict(scope), "BINDING_CHANGED")
             _require(latest["worktree_removed"] or _existing(task_fd, "cleanup.json") is None, "CLEANUP_BLOCKED")
-            _require(self.store.can_observe(principal, scope) is True, "NOT_FOUND")
+            _require((observe or self.store.can_observe)(principal, scope) is True, "NOT_FOUND")
             self._authorize_actor(principal, scope, current, operation, successor=successor)
-            self._authorize_endpoints(scope, current)
+            self._authorize_endpoints(scope, current, historical=operation == "handoff")
             self._authorize_endpoints(scope, after)
             proof = self.verify_decision(scope, operation, evidence.copy(), digest)
             _require(type(proof) is BindingDecision and proof.evidence_sha256 == digest

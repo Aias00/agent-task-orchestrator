@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from threading import Event
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -347,9 +348,10 @@ class UnifiedAcceptanceTests(unittest.TestCase):
 
     def test_batch0_observer_recovers_from_transient_sqlite_failure_and_persists_exit(self):
         stop = Event()
-        host = Mock()
+        host = Mock(store=self.store)
         config = {"enabled": True}
         host.record.return_value = config
+        host.acceptance_notifications.return_value = None
         rows = []
 
         def save(fd, name, row):
@@ -488,7 +490,8 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         (self.store.tasks / damaged / "task.json").write_text("{")
 
         config = {"enabled": True}
-        host = SimpleNamespace(store=self.store, interaction=self.interaction, record=lambda _: config)
+        host = SimpleNamespace(store=self.store, interaction=self.interaction, record=lambda _: config,
+                               acceptance_notifications=lambda: None)
         stop = Event()
         report = []
 
@@ -509,7 +512,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         import agents
         from codex_session_adapter import CodexSessionAdapter
         task = self.create()
-        request = self.ask(task)
+        request = self.ask(task, continuation="resume")
         user = self.proof(task, "user")
         bus = self.mailbox()
         sender = bus.register_endpoint("observer-hub", kind="codex", session_id="hub",
@@ -521,7 +524,8 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         host = SimpleNamespace(store=self.store, folder=self.store.root / "host",
                                queue_executable=lambda _: sys.executable,
                                record=lambda *_: {"transport_kinds": ["codex"]})
-        self.interaction.dispatch_envelope = self.interaction.observe_envelope = partial(ato_observer._dispatch, host)
+        self.interaction.dispatch_envelope = partial(ato_observer._dispatch, host)
+        self.interaction.observe_envelope = partial(ato_observer._dispatch, host, observe_only=True)
         calls = []
         rollout = self.root / "fixture-rollout.jsonl"
         rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": "origin",
@@ -563,7 +567,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
             self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "delivered")
             record = self.store.load_task(task)
             binding = self.binding(record, self.store.load_spec(task))
-            self.assertEqual(self.interaction.decision_barrier(record, binding, "resume"), "RUN_UNSETTLED")
+            self.assertIsNone(self.interaction.decision_barrier(record, binding, "resume"))
             self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "turn_completed")
             self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "turn_completed")
         self.assertEqual(calls, ["cursor", "send", "observe"])
@@ -580,11 +584,10 @@ class UnifiedAcceptanceTests(unittest.TestCase):
                                        project=str(self.repo), source="fixture")
         self.interaction.route = lambda *args: MailboxRoute(sender, target, "fixture-route")
         self.interaction.record_answer(user, request, "choice", self.event(user, "answer", request, "choice"))
-        # Simulate losing the CAS after the canonical enqueue, before the
-        # leaf links the mailbox ID. The same envelope remains recoverable.
+        # A lost CAS after enqueue must free the endpoint FIFO without sending.
         with patch.object(self.interaction, "_save_delivery", side_effect=TaskError("BUSY")):
             self.assert_code("BUSY", self.interaction.dispatch_delivery, task, request, "answer")
-        self.assertEqual(self.interaction.delivery_reference(task, request, "answer")["state"], "queued")
+        self.assertEqual(self.interaction.delivery_reference(task, request, "answer")["state"], "cancelled")
         self.switch(task)
         self.assertEqual(self.interaction.supersede_unsubmitted(task, request, "answer", sender), "cancelled")
         reference = self.interaction.delivery_reference(task, request, "answer")
@@ -593,6 +596,37 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         record = self.store.load_task(task)
         self.assertIsNone(self.interaction.decision_barrier(
             record, self.binding(record, self.store.load_spec(task)), "initial"))
+
+    def test_batch3_stale_guard_releases_claim_and_pre_send_dispatch(self):
+        for transition in ("claim", "begin_dispatch"):
+            with self.subTest(transition=transition):
+                task = self.create()
+                self.clock = 1000
+                expires = time.time() + 60
+                request = self.ask(task, expires_at=expires)
+                user = self.proof(task, "user")
+                bus = self.mailbox()
+                sender = bus.register_endpoint(transition + "-sender", kind="fake", session_id=transition + "-hub",
+                                               project=str(self.repo), source="fixture")
+                target = bus.register_endpoint(transition + "-target", kind="fake", session_id=transition + "-origin",
+                                               project=str(self.repo), source="fixture")
+                owner = bus.acquire_endpoint(target, owner="synthetic-controller")
+                send = SimpleNamespace(send=lambda *_: self.fail("stale request must not be sent"))
+                self.interaction.route = lambda *args: MailboxRoute(sender, target, "fixture-route", owner, {"fake": send})
+                self.interaction.record_answer(user, request, "choice", self.event(user, "answer", request, "choice"))
+                original = getattr(bus, transition)
+
+                def expire_after(*args, **kwargs):
+                    message = original(*args, **kwargs)
+                    self.clock = expires + 1
+                    return message
+
+                with patch.object(bus, transition, side_effect=expire_after):
+                    self.assert_code("STALE_REQUEST", self.interaction.dispatch_delivery, task, request, "answer")
+                reference = self.interaction.delivery_reference(task, request, "answer")
+                message = bus.message(reference["mailbox_id"])
+                self.assertEqual(message["state"], "cancelled" if transition == "claim" else "failed")
+                self.assertEqual((message["external_possible"], message["busy"]), (0, 0))
 
     def test_notification_policy_and_completion_once_keep_human_receipt_separate(self):
         task = self.create()

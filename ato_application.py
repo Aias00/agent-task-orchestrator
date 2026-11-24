@@ -35,7 +35,10 @@ class Application:
         seal = runtime_seal(required=not read_only)
         host = Host(seal=seal, read_only=read_only).compose(render_notice=render_notice)
         if read_only:
-            return Application(host)._dispatch(args)
+            try:
+                return Application(host)._dispatch(args)
+            finally:
+                host.close_mailbox_snapshot()
         with installed_boundary(seal):
             return Application(host)._dispatch(args)
 
@@ -61,7 +64,8 @@ class Application:
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
         elif operation == "resume" or subcommand in {"handoff", "reviewer", "recheck", "ask"}:
             principal = host.store._principal(proof)
-            _require(host.store._visible_scope(args.task_id, principal) is not None, "NOT_FOUND")
+            observe = host.binding.handoff_observe if subcommand == "handoff" else None
+            _require(host.store._visible_scope(args.task_id, principal, observe=observe) is not None, "NOT_FOUND")
             task = host.store.load_task(args.task_id)
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
         if operation == "run":
@@ -90,8 +94,7 @@ class Application:
             return api.accept_product(proof, args.task_id, getattr(args, "evidence", None))
         if operation == "project":
             if subcommand == "trace":
-                host.execution._actor(proof, args.task_id, "trace")
-                result = api.task_status(proof, args.task_id)
+                result = api.task_status(proof, args.task_id, trace=True)
                 return {key: result[key] for key in ("task_id", "status", "execution", "stage",
                                                       "run_history", "checks", "delivery")}
             if subcommand == "cleanup":
@@ -176,7 +179,16 @@ def notification_policy(host, repo):
 
 def system_status(host):
     home = host.store.kernel_root / "ctask-interaction"
-    mailbox_summary = mailbox(home)
+    for delay in (.01, .03, .08, None):
+        try:
+            mailbox_summary = mailbox(home)
+            break
+        except (OSError, Refused) as exc:
+            if isinstance(exc, Refused) and "changed during" not in str(exc):
+                raise TaskError("STATE_CORRUPT") from None
+            if delay is None:
+                raise TaskError("BUSY") from None
+            time.sleep(delay)
     state = "absent"
     pid = None
     try:
@@ -189,10 +201,15 @@ def system_status(host):
         if state == "live":
             source = dict(root=str(Path(__file__).resolve().parent), python=os.path.abspath(sys.executable),
                           surface="ato-v1", seal=host.store.runtime_seal)
-            try:
-                state = "watching" if ObserverProbe().observer(home, source) else "unverified"
-            except (OSError, Refused):
-                state = "unverified"
+            for delay in (.01, .03, .08, None):
+                try:
+                    state = "watching" if ObserverProbe().observer(home, source) else "unverified"
+                    break
+                except (OSError, Refused, ValueError):
+                    if delay is None:
+                        state = "unverified"
+                    else:
+                        time.sleep(delay)
     return dict(schema_version=1, release=host.store.runtime_seal, namespace="unified-v1",
                 observer=dict(pid=pid, state=state, **host.observer_transport()), mailbox=mailbox_summary)
 

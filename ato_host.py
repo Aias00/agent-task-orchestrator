@@ -16,7 +16,7 @@ import ato_config
 from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
 from ato_binding import BindingDecision, BindingGrant, BindingService, read_binding
 from ato_execution import ExecutionHooks, ExecutionService, HostProfile
-from ato_release_lib import mailbox_copy
+from ato_release_lib import Refused, mailbox_copy
 from ato_task_store import (
     InitialBinding, SubmissionGrant, SubmissionOrigin, TaskError, TaskScope, TaskStore, _REF, _SHA, _absolute,
     _directory, _existing, _regular, _fields, _matches, _overlaps, _read_file, _require, _save, _sha, _strict_json,
@@ -31,7 +31,7 @@ _SESSION = re.compile(r"agentref-[0-9a-f]{32}")
 _ROLE = {"controller": "origin", "interaction": "hub", "user": "user"}
 _LOCAL_OPERATIONS = frozenset({"initial", "observe", "stop", "resume", "recheck",
                                "trace", "cleanup", "binding"})
-_CONTROLLER_OPERATIONS = _LOCAL_OPERATIONS | {"reconcile", "ask", "read_answer"}
+_SUBMISSION_OPERATIONS = frozenset({"initial", "observe", "stop", "trace", "cleanup", "binding"})
 ACCEPTANCE_NOTIFICATIONS = "acceptance-notifications"
 
 
@@ -48,6 +48,7 @@ class Host:
         self.profile = profile
         self.read_only = read_only
         self._local_owner = object()
+        self._mailbox_snapshot = None
         self.store.authenticate = self.authenticate
         self.store.can_observe = self.can_observe
         self.store.authorize_submit = self.authorize_submit
@@ -118,18 +119,19 @@ class Host:
 
     def observer_transport(self):
         observation = self.record("observation", {})
-        configured = observation.get("enabled") is True and "codex" in observation.get("transport_kinds", ())
+        configured = observation.get("enabled") is True and "codex" in observation.get(
+            "transport_kinds", ("codex", "pi_acp"))
         return dict(codex_queue=("ready" if self.queue_executable(observation) else "executable_unavailable")
                     if configured else "not_configured")
 
     def actor_file(self):
         raw = os.environ.get("ATO_ACTOR_FILE")
         _require(raw, "AUTH_REQUIRED")
-        path = Path(raw).expanduser()
-        _require(path.is_absolute() and path == path.resolve() and
-                 not any(_overlaps(path, p) for p in (self.store.home, *self.store.native_homes)),
-                 "AUTH_REQUIRED")
         try:
+            path = Path(raw).expanduser()
+            _require(path.is_absolute() and path == path.resolve() and
+                     not any(_overlaps(path, p) for p in (self.store.home, *self.store.native_homes)),
+                     "AUTH_REQUIRED")
             row = host_record(path, path.parent, code="AUTH_REQUIRED")
             _fields(row, ("version", "reference", "proof"), ("workflow_id",), code="AUTH_REQUIRED")
             proof = agent_registry.ActorProof(**row["proof"])
@@ -137,7 +139,7 @@ class Host:
                      and _matches(_CREDENTIAL, proof.credential_ref) and _matches(_SESSION, row["reference"]),
                      "AUTH_REQUIRED")
             return proof, row["reference"], path
-        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
             raise TaskError("AUTH_REQUIRED") from None
 
     def credential(self, identifier):
@@ -166,10 +168,17 @@ class Host:
         _require(not _overlaps(path, Path(identity.project)), "AUTH_REQUIRED")
         workflow_id, contract_hash, generation = "enrollment", "enrollment", 0
         if scope := row.get("scope"):
-            task = self.store.load_task(scope["task_id"])
-            _require(not _overlaps(path, Path(task["worktree"]["path"])), "AUTH_REQUIRED")
-            workflow_id = task["workflow"]["directory"]
-            contract_hash = task["workflow"]["contract_hash"]
+            try:
+                task = self.store.load_task(scope["task_id"])
+            except TaskError as exc:
+                if exc.code not in {"STATE_CORRUPT", "SPEC_CHANGED"}:
+                    raise
+                task = {}
+            if task.get("worktree"):
+                _require(not _overlaps(path, Path(task["worktree"]["path"])), "AUTH_REQUIRED")
+            if task.get("workflow"):
+                workflow_id = task["workflow"]["directory"]
+                contract_hash = task["workflow"]["contract_hash"]
             generation = row["generation"][1]
         return agent_registry.ActorContext._from_verified_adapter(
             proof.credential_ref, _ROLE[row["role"]], agent_registry.SessionReference(ref, identity),
@@ -193,8 +202,10 @@ class Host:
             if (grant["repo_key"], grant["spec_sha256"]) == (spec.repository.key, spec.spec_sha256):
                 binding = InitialBinding(**grant["binding"])
                 endpoint = self._endpoint(binding.interaction_ref, grant["repo_key"], "interaction")
+                controller = self._endpoint(binding.controller_ref, grant["repo_key"], "controller")
                 _require(binding.revision == 1 and binding.controller_ref == actor.session.reference
-                         and endpoint and endpoint.get("scope") is None and 1 in endpoint["revisions"],
+                         and all(row and row.get("scope") is None and 1 in row["revisions"]
+                                 for row in (controller, endpoint)),
                          "FORBIDDEN")
                 return SubmissionGrant(grant["reference"], spec.repository.key, spec.spec_sha256, binding)
         raise TaskError("FORBIDDEN")
@@ -216,7 +227,7 @@ class Host:
                 grant = replace(grant, origin=origin)
         return grant
 
-    def can_observe(self, actor, scope):
+    def can_observe(self, actor, scope, *, handoff=False):
         local = None
         if actor is self._local_owner:
             local = self._local_scope_binding(scope)
@@ -230,6 +241,10 @@ class Host:
             if scoped and (row["scope"] != asdict(scope) or "observe" not in row["operations"]):
                 return False
             if not scoped and self._submitted(row, scope) is None:
+                return False
+            role = "controller" if row["role"] == "controller" else "interaction"
+            if not self.endpoint_grant(row["reference"], scope, role, row.get("binding_revision", 1),
+                                       historical=handoff):
                 return False
         try:
             task = self.store.load_task(scope.task_id)
@@ -264,10 +279,23 @@ class Host:
         if row is None:
             return None
         if row.get("scope") == asdict(scope) and row["binding_revision"] == binding["revision"]:
-            return BindingGrant(scope, row["reference"], row["role"], binding["revision"],
+            ref = row["reference"]
+            if row["role"] == "user":
+                if ref != binding["interaction_ref"]:
+                    return None
+                ref = actor.actor_id
+            return BindingGrant(scope, ref, row["role"], binding["revision"],
                                 frozenset(row["operations"]))
-        if row.get("scope") is None and binding["revision"] == 1 and self._submitted(row, scope):
-            return BindingGrant(scope, row["reference"], "controller", 1, _CONTROLLER_OPERATIONS)
+        if (row["role"] == "controller" and row.get("scope") is None and binding["revision"] == 1
+                and self._submitted(row, scope)):
+            operations = _SUBMISSION_OPERATIONS
+            if operation == "resume":
+                task = self.store.load_task(scope.task_id)
+                if task["run_id"] and not task["worktree_removed"]:
+                    run, receipts = self.store._run(task, task["run_id"])
+                    if run["kind"] == "initial" and not receipts:
+                        operations = operations | {"resume"}
+            return BindingGrant(scope, row["reference"], "controller", 1, operations)
         return None
 
     def authorize(self, actor, scope, binding, operation):
@@ -283,28 +311,30 @@ class Host:
         if actor is self._local_owner:
             return True
         row = self._actor_row(actor)
-        if row is None:
+        role = "controller" if grant.role == "controller" else "interaction"
+        if row is None or not self.endpoint_grant(row["reference"], scope, role, binding["revision"]):
             return False
         if row.get("scope") is None or operation in {"stop", "trace", "cleanup"}:
             return True
         task = self.store.load_task(scope.task_id)
-        generation, _ = self.interaction._kernel(task)
+        generation = (self.interaction._removed_generation(task) if task["worktree_removed"]
+                      else self.interaction._kernel(task)[0])
         return (row.get("run_id"), row.get("generation")) == (task["run_id"], generation)
 
-    def _endpoint(self, ref, repo_key, role):
+    def _endpoint(self, ref, repo_key, role, *, historical=False):
         if not _matches(_SESSION, ref):
             return None
         row = self.record(ref)
-        if row and row.get("enabled") is True and (row["reference"], row["repo_key"], row["role"]) == (
+        if row and (historical or row.get("enabled") is True) and (row["reference"], row["repo_key"], row["role"]) == (
                 ref, repo_key, role):
             return row
         return None
 
-    def endpoint_grant(self, ref, scope, role, revision):
+    def endpoint_grant(self, ref, scope, role, revision, *, historical=False):
         local = self._local_scope_binding(scope)
         if local and role in {"controller", "interaction"} and ref == getattr(local, role + "_ref"):
             return BindingGrant(scope, ref, role, revision, frozenset())
-        row = self._endpoint(ref, scope.repo_key, role)
+        row = self._endpoint(ref, scope.repo_key, role, historical=historical)
         if row and (row.get("scope") is None or row["scope"] == asdict(scope)) and revision in row["revisions"]:
             return BindingGrant(scope, ref, role, revision, frozenset())
 
@@ -312,6 +342,9 @@ class Host:
         row = self._actor_row(actor)
         grant = self.actor_grant(actor, scope, binding, action)
         if not row or not grant or action not in grant.operations or row.get("scope") != asdict(scope):
+            return False
+        role = "controller" if row["role"] == "controller" else "interaction"
+        if not self.endpoint_grant(row["reference"], scope, role, binding["revision"]):
             return False
         generation = item.get("generation")
         if generation is None:
@@ -350,6 +383,8 @@ class Host:
                 (actor.get("run_id"), actor["generation"]) != (request["run_id"], request["generation"]) or
                 "answer" not in actor["operations"]):
             return False
+        if not self.endpoint_grant(actor["reference"], scope, "interaction", binding["revision"]):
+            return False
         if request["kind"] not in {"permission", "host_handoff"}:
             return True
         event = answer["event_ref"]
@@ -380,6 +415,10 @@ class Host:
             credentials.append(EndpointCredential(**endpoint["mailbox"]))
         source = self.record("observation")
         if source and source.get("enabled") is True:
+            if bus := self.mailbox():
+                target = bus.authenticate(credentials[1])
+                if target["kind"] not in source.get("transport_kinds", ("codex", "pi_acp")):
+                    return None
             return MailboxRoute(*credentials, source["source_ref"])
         return None
 
@@ -556,10 +595,18 @@ class Host:
                 _regular(info, True, "STATE_CORRUPT")
         except FileNotFoundError:
             return None
-        bus_type = _ExistingMailbox if self.read_only else MessageBus
-        bus = bus_type.__new__(bus_type)
+        if self.read_only:
+            if self._mailbox_snapshot is None:
+                self._mailbox_snapshot = _ExistingMailbox(path)
+            return self._mailbox_snapshot
+        bus = MessageBus.__new__(MessageBus)
         bus.path, bus.clock = path, time.time
         return bus
+
+    def close_mailbox_snapshot(self):
+        if self._mailbox_snapshot is not None:
+            self._mailbox_snapshot.close()
+            self._mailbox_snapshot = None
 
     def compose(self, *, render_notice=None):
         self.execution = ExecutionService(self.store, self.configured_profile(), authorize=self.authorize,
@@ -571,7 +618,8 @@ class Host:
         self.execution.hooks = self.interaction.execution_hooks()
         self.binding = BindingService(self.execution, actor_grant=self.actor_grant,
             endpoint_grant=self.endpoint_grant, verify_decision=self.verify_binding,
-            reviewer_supported=self.reviewer_supported)
+            reviewer_supported=self.reviewer_supported, handoff_observe=partial(self.can_observe, handoff=True),
+            historical_endpoint=partial(self.endpoint_grant, historical=True))
         return self
 
     def reviewer_supported(self, scope, agent, mode):
@@ -587,11 +635,31 @@ class Host:
 
 class _ExistingMailbox(MessageBus):
     """Projection-only connection, without schema setup or a writer lease."""
+    def __init__(self, path):
+        self.path, self.clock = path, time.time
+        self.snapshot = None
+
     @contextmanager
     def _transaction(self):
-        with mailbox_copy(self.path) as copy, closing(sqlite3.connect(copy)) as con:
-            con.row_factory = sqlite3.Row
-            yield con
+        if self.snapshot is None:
+            memory = sqlite3.connect(":memory:")
+            try:
+                with mailbox_copy(self.path) as copy, closing(sqlite3.connect(copy)) as con:
+                    con.backup(memory)
+                memory.row_factory = sqlite3.Row
+                memory.execute("PRAGMA query_only=ON")
+                self.snapshot = memory
+            except (OSError, Refused, sqlite3.Error) as exc:
+                memory.close()
+                if isinstance(exc, FileNotFoundError) or "changed during" in str(exc):
+                    raise TaskError("BUSY") from None
+                raise TaskError("STATE_CORRUPT") from None
+        yield self.snapshot
+
+    def close(self):
+        if self.snapshot is not None:
+            self.snapshot.close()
+            self.snapshot = None
 
 
 class _EndpointRegistration(MessageBus):

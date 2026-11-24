@@ -357,6 +357,19 @@ def _state_errors(method):
     return call
 
 
+def _retry_busy(method):
+    @wraps(method)
+    def call(*args, **kwargs):
+        for delay in (.005, .02, .05, .12, None):
+            try:
+                return method(*args, **kwargs)
+            except TaskError as exc:
+                if exc.code != "BUSY" or delay is None:
+                    raise
+                time.sleep(delay)
+    return call
+
+
 def _git(repo, *args, allowed=(0,), env=None, pass_fds=(), input_data=None):
     git = shutil.which("git", path=os.defpath)
     _require(git is not None, "UNSUPPORTED_CAPABILITY")
@@ -1693,7 +1706,7 @@ class TaskStore:
         _require(principal is not None, "AUTH_REQUIRED")
         return principal
 
-    def _visible_scope(self, task_id, principal):
+    def _visible_scope(self, task_id, principal, *, observe=None):
         # Missing, damaged and out-of-scope anchor records all look unavailable
         # until the host has established a matching observation grant.
         try:
@@ -1701,7 +1714,7 @@ class TaskStore:
                 scope = self._scope(fd, task_id)
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
             return None
-        return scope if self.can_observe(principal, scope) is True else None
+        return scope if (observe or self.can_observe)(principal, scope) is True else None
 
     def _project(self, task, spec):
         creation, worktree = task["creation"], task["worktree"]

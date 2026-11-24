@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 import time
 from types import SimpleNamespace
 import unittest
+import uuid
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ from message_bus import IdentityError, MessageBus
 import notification_state
 from scripts import ato_host_setup
 from scripts import release_snapshot as release
+from message_bus import EndpointCredential
 from transport import DeliveryResult
 
 from release_support import CURRENT, fake_env, legacy_entry, snapshot, unseal, write
@@ -557,9 +559,10 @@ class InstalledATO(unittest.TestCase):
             rechecked = self.cli("project", "recheck", result["task_id"], "--checks-only")
             self.assertNotEqual(rechecked["execution"]["run_id"], result["execution"]["run_id"])
             events_available = True
+            cache = {}
             with patch.object(ato_product, "measure", side_effect=AssertionError("observation must not remeasure")):
-                self.assertEqual(ato_observer.tick(self.host), {})
-                self.assertEqual(ato_observer.tick(self.host), {})
+                self.assertEqual(ato_observer.tick(self.host, cache), {})
+                self.assertEqual(ato_observer.tick(self.host, cache), {})
         self.assertEqual(bus.message(message["id"])["state"], "turn_completed")
         self.assertEqual(len(attempts), 1)
 
@@ -751,6 +754,13 @@ class InstalledATO(unittest.TestCase):
                            actor=controller)["request_id"]
         self.assertEqual([r["request_id"] for r in self.cli("inbox", actor=user)["items"]], [request])
         self.cli(*recheck, actor=controller, error=(4, "NOT_RESUMABLE"))
+        self.cli("answer", request, "--answer", "The fixture action has not finished", actor=user)
+        self.cli(*recheck, actor=controller, error=(4, "STALE_REQUEST"))
+        request_again = self.cli("agent", "ask", task_id, "--kind", "host_handoff", "--question",
+                           "Has the approved host action finished?", "--reason", "Frozen check is blocked",
+                           actor=controller)["request_id"]
+        self.assertNotEqual(request_again, request)
+        request = request_again
         path = Path(self.store.load_task(task_id)["worktree"]["path"])
         write(path, "host-finished.txt", "The fixture operator completed the local action.")
         answer = "The fixture action finished"
@@ -763,6 +773,101 @@ class InstalledATO(unittest.TestCase):
         user = self.host_setup("scope", task_id, "--role", "user")["proof"]
         evidence = self.acceptance(delivered, "host action acceptance")
         self.assertEqual(self.cli("accept", task_id, "--evidence", evidence, actor=user)["status"], "completed")
+
+    def test_batch3_user_approves_reviewer_then_migrates_from_revoked_controller(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, bootstrap = self.submission("binding fixture", "1", "2", reviewer=True, via_setup=True)
+        status = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
+        task = status["task_id"]
+        user = self.host_setup("scope", task, "--role", "user")["proof"]
+        before = self.cli("agent", "binding", task, actor=user)
+        for role in ("controller", "interaction"):
+            self.host_setup("enroll-endpoint", "--repo", repo, "--role", role, "--revision", 2,
+                            "--reference", before[role + "_ref"])
+        review = self.host_setup("approve-binding", task, "reviewer", "--kind", "codex",
+                                 "--model", "fixture-model", actor=user)
+        changed = self.cli("agent", "reviewer", task, "--kind", "codex", "--model", "fixture-model",
+                           "--evidence", review["decision"], actor=user)
+        self.assertEqual(changed["review_revision"], 2)
+        user = self.host_setup("scope", task, "--role", "user")["proof"]
+        controller = self.host_setup("scope", task, "--role", "controller")["proof"]
+        new = self.host_setup("enroll-endpoint", "--repo", repo, "--role", "controller", "--revision", 3)["reference"]
+        self.host_setup("enroll-endpoint", "--repo", repo, "--role", "interaction", "--revision", 3,
+                        "--reference", before["interaction_ref"])
+        self.host_setup("revoke", before["controller_ref"])
+        self.cli("status", task, actor=controller, error=(3, "NOT_FOUND"))
+        self.cli("resume", task, actor=controller, error=(3, "NOT_FOUND"))
+        transfer = self.host_setup("approve-binding", task, "handoff", "--to", new, actor=user)
+        changed = self.cli("agent", "handoff", task, "--to", new, "--evidence", transfer["decision"], actor=user)
+        self.assertEqual((changed["controller_ref"], changed["revision"]), (new, 3))
+        new_user = self.host_setup("scope", task, "--role", "user")["proof"]
+        self.assertEqual(self.cli("agent", "binding", task, actor=new_user)["revision"], 3)
+        corrupted = self.store._task_dir(task) / "task.json"
+        corrupted.write_text("{")
+        self.cli("status", task, actor=new_user, error=(5, "STATE_CORRUPT"))
+
+    def test_batch3_host_reconciles_exact_mailbox_after_verifying_local_idle(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, bootstrap = self.submission("mailbox fixture", "1", "2", via_setup=True)
+        status = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
+        task_id = status["task_id"]
+        controller = self.host_setup("scope", task_id, "--role", "controller")["proof"]
+        user = self.host_setup("scope", task_id, "--role", "user")["proof"]
+        binding = self.cli("agent", "binding", task_id, actor=controller)
+        self.store.native_home.mkdir(mode=0o700, exist_ok=True)
+        with sqlite3.connect(self.store.native_home / "state_1.sqlite") as db:
+            db.execute("create table threads (id text, rollout_path text)")
+            for role in ("controller", "interaction"):
+                session = str(uuid.uuid4())
+                rollout = self.store.native_home / (role + ".jsonl")
+                rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": session, "cwd": str(repo)}}) + "\n"
+                    + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+                db.execute("insert into threads values (?, ?)", (session, str(rollout)))
+                db.commit()
+                self.host_setup("enroll-endpoint", "--repo", repo, "--role", role, "--revision", 1,
+                    "--reference", binding[role + "_ref"], "--native-kind", "codex", "--native-session", session)
+        self.registry("observation", dict(enabled=True, source_ref="fixture-mailbox"))
+        request = self.cli("agent", "ask", task_id, "--kind", "decision", "--question", "Continue?",
+                           "--reason", "Offline fixture", actor=controller)["request_id"]
+        self.cli("answer", request, "--answer", "Yes", actor=user)
+        self.assertEqual(self.host.interaction.dispatch_delivery(task_id, request, "answer"), "queued")
+        service = self.host.interaction
+        reference = service.delivery_reference(task_id, request, "answer")["mailbox_id"]
+        receiver = EndpointCredential(**self.host.record(binding["controller_ref"])["mailbox"])
+        bus = self.host.mailbox()
+        owner = bus.acquire_endpoint(receiver, owner="test-owner")
+        claimed = bus.claim(receiver, owner, message_id=reference)
+        started = bus.begin_dispatch(receiver, owner, reference, claimed["claim_token"])
+        bus.finish_dispatch(reference, started["attempt_id"], state="delivery_unknown")
+        bus.release_endpoint(receiver, owner)
+        self.assertEqual(bus.message(reference)["busy"], 1)
+        result = self.host_setup("reconcile-delivery", task_id, reference)
+        self.assertEqual(result, dict(message_id=reference, state="failed", busy=False))
+        self.assertEqual(bus.message(reference)["attempt_id"], started["attempt_id"])
+        self.assertEqual(sum(row["kind"] == "native_reconciled" for row in bus.events(message_id=reference)), 1)
+        trace = self.cli("project", "trace", task_id, actor=bootstrap)
+        self.assertEqual(trace["delivery"], [dict(correlation_id=request, phase="answer", state="failed")])
+
+    def test_batch3_scope_proofs_validate_the_selected_root_at_both_depths(self):
+        self.env["ATO_HOME"] = str(self.root / "private-state" / "nested" / "ato")
+        self.install()
+        self.profile(via_setup=True)
+        deeper = self.root / "outside" / "nested" / "tree" / "of" / "proofs"
+        deeper.mkdir(parents=True, mode=0o700)
+        deeper.parent.chmod(0o755)
+        profile = self.host.record("profile")
+        profile["proof_roots"].append(str(deeper))
+        self.host_setup("configure", "--profile", write(self.root, "updated-profile.json", json.dumps(profile)), "--update")
+        repo, spec, bootstrap = self.submission("proof fixture", "1", "2", via_setup=True)
+        status = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
+        for directory in (self.proofs, deeper):
+            proof = Path(self.host_setup("scope", status["task_id"], "--role", "user",
+                                         "--proof-root", directory)["proof"])
+            self.assertEqual(proof.parent, directory)
+            self.assertEqual(proof.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.cli("status", status["task_id"], actor=proof)["status"], "completed")
 
     def test_two_repositories_with_explicit_answer_review_and_versioned_acceptance(self):
         self.install()
@@ -836,7 +941,9 @@ class InstalledATO(unittest.TestCase):
         changed = self.cli("status", task_id, actor=origin)
         self.assertEqual((changed["status"], changed["reason"]), ("blocked", "PRODUCT_CHANGED"))
         self.cli("accept", task_id, "--evidence", evidence, actor=user, error=(4, "CHECKS_REQUIRED"))
-        rechecked = self.cli("project", "recheck", task_id, actor=origin)
+        self.cli("project", "recheck", task_id, actor=origin, error=(3, "FORBIDDEN"))
+        recheck_actor = self.scoped(task_id, "8", "controller", agent_ref("1"), 1, "observe", "recheck")
+        rechecked = self.cli("project", "recheck", task_id, actor=recheck_actor)
         self.assertEqual((rechecked["task_id"], rechecked["status"]), (task_id, "completed"))
         self.assertNotEqual(rechecked["product"]["product_id"], status["product"]["product_id"])
         self.assertEqual(rechecked["stage"]["attempts"], 1)
@@ -950,6 +1057,11 @@ class InstalledATO(unittest.TestCase):
         self.assertTrue(stopped["execution"]["verified"])
         self.running.pop(first)
         write(self.native, "mode", "normal")
+        requester = self.scoped(second, "9", "controller", agent_ref("1"), 1, "observe", "ask")
+        user = self.scoped(second, "a", "user", agent_ref("2"), 1, "observe", "answer")
+        request = self.cli("agent", "ask", second, "--kind", "decision", "--question", "Continue?",
+                           "--reason", "Fixture decision", "--continuation", "resume", actor=requester)["request_id"]
+        self.cli("answer", request, "--answer", "Proceed", actor=user)
         resumed = self.cli("resume", second, actor=origin)
         self.assertEqual(resumed["task_id"], second)
         self.running[second] = origin
@@ -960,7 +1072,12 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual((resumed["task_id"], resumed["status"]), (second, "completed"))
         self.assertEqual(resumed["execution"]["run_id"], run_id)
         self.assertEqual([row["kind"] for row in resumed["run_history"]], ["initial"])
-        self.cli("resume", second, actor=origin, error=(4, "NOT_RESUMABLE"))
+        record = self.store.load_task(second)
+        self.assertTrue(any(row["request"]["request_id"] == request and row["consumption"]
+                            for row in self.host.interaction._rows(record)))
+        self.cli("resume", second, actor=origin, error=(3, "FORBIDDEN"))
+        scoped = self.scoped(second, "8", "controller", agent_ref("1"), 1, "observe", "resume")
+        self.cli("resume", second, actor=scoped, error=(4, "NOT_RESUMABLE"))
         attempts = (self.native / "attempts").read_text().splitlines()
         self.assertEqual(attempts, [self.store.load_task(task_id)["worktree"]["path"]
                                     for task_id in (first, second)])
@@ -975,7 +1092,9 @@ class InstalledATO(unittest.TestCase):
         before = self.cli("status", task_id, actor=origin)
         self.assertEqual((before["status"], before["stage"]["attempts"]), ("delivery_unknown", 1))
         self.assertEqual([row["phase"] for row in before["run_history"]], ["unknown"])
-        self.cli("resume", task_id, actor=origin, error=(4, "RUN_UNSETTLED"))
+        self.cli("resume", task_id, actor=origin, error=(3, "FORBIDDEN"))
+        scoped = self.scoped(task_id, "8", "controller", agent_ref("1"), 1, "observe", "resume")
+        self.cli("resume", task_id, actor=scoped, error=(4, "RUN_UNSETTLED"))
         after = self.cli("status", task_id, actor=origin)
         self.assertEqual(after["run_history"], before["run_history"])
         attempts = self.native / "attempts"

@@ -59,6 +59,15 @@ class HostProfile:
     def verify(self, store, task, spec, *, work):
         protected = (store.home, Path(task["repo"]["root"]), Path(task["worktree"]["path"]),
                      Path(task["worktree"]["common_dir"]), Path(__file__).resolve().parent)
+        self.verify_configuration(store, protected=protected)
+        if work:
+            contract = spec["worker_contract"]
+            _require(contract["agent"]["kind"] == "codex"
+                     and contract["sandbox"] in {"workspace-write", "read-only"}
+                     and not contract.get("permissions"), "UNSUPPORTED_CAPABILITY")
+
+    def verify_configuration(self, store, *, protected=None):
+        protected = protected or (store.home, Path(__file__).resolve().parent)
         _require(type(self.fixture) is bool, "UNSUPPORTED_CAPABILITY")
         if not self.fixture:
             _require(Path("/usr/bin/sandbox-exec").is_file(), "UNSUPPORTED_CAPABILITY")
@@ -80,13 +89,6 @@ class HostProfile:
         kinds = [kind for kind, _, _ in self.review_tools]
         _require(len(set(kinds)) == len(kinds) and set(kinds) <= set(FACTORIES),
                  "UNSUPPORTED_CAPABILITY")
-        if work:
-            contract = spec["worker_contract"]
-            # This profile has a bounded Codex filesystem boundary. Profiles for
-            # other Worker protocols or wider grants need their own qualified fence.
-            _require(contract["agent"]["kind"] == "codex"
-                     and contract["sandbox"] in {"workspace-write", "read-only"}
-                     and not contract.get("permissions"), "UNSUPPORTED_CAPABILITY")
 
     def reviewer(self, kind):
         for vendor, path, home in self.review_tools:

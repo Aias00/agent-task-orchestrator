@@ -11,17 +11,20 @@ import time
 import ato_config
 from agent_registry import SessionEvent, SessionIdentity
 import ato_process
-from codex_session_adapter import CodexSessionAdapter, queue_executable
+import failure_attention
+import notification_state
 from ato_host import Host
 from ato_private import delivery_candidates, render_notice
 from ato_task_store import TaskError, _directory, _locked_file, _publish, _read_json, _require, _save, _sha, _state_errors
-from message_bus import MailboxError
+from message_bus import MailboxError, TERMINAL
+from codex_session_adapter import CodexSessionAdapter, queue_executable
 import transport
 
 
 _LIFECYCLE = {"message_received": "accepted", "response_completed": "responded",
               "turn_completed": "turn_completed"}
 _NOTICE = re.compile(r"\[ato handoff (handoff-[0-9a-f]{32})\]\n")
+_LEASE_SECONDS = 60
 
 
 def _ledger(host, key, row=None):
@@ -42,13 +45,13 @@ def _owner(host, bus, credential, message, *, queued):
         token = receipt["token"]
         if queued or token == message["claim_owner"]:
             try:
-                bus.renew_endpoint(credential, token, lease_seconds=30)
+                bus.renew_endpoint(credential, token, lease_seconds=_LEASE_SECONDS)
                 return token
             except MailboxError:
                 pass
     if not queued:
         return None  # Never adopt a previous attempt under a new endpoint fence.
-    token = bus.acquire_endpoint(credential, owner="ato-observer", lease_seconds=30)
+    token = bus.acquire_endpoint(credential, owner="ato-observer", lease_seconds=_LEASE_SECONDS)
     _ledger(host, key, {"token": token})
     return token
 
@@ -74,7 +77,7 @@ def _observe(host, bus, route, endpoint, adapter, message, guard):
             cursor = cursor_reader(identity.native_id, identity.project)
             _ledger(host, key, dict(scope=scope, cursor=cursor))
         transport.dispatch_one(bus, route.target, owner, {endpoint["kind"]: adapter},
-                               message_id=message["id"], guard=guard)
+                               message_id=message["id"], guard=guard, lease_seconds=_LEASE_SECONDS)
         return True
     if saved is None or not message["attempt_id"] or not _owner(host, bus, route.target, message, queued=False):
         return True
@@ -110,13 +113,13 @@ def _dispatch(host, bus, route, message_id, guard, *, observe_only=False):
         adapter = CodexSessionAdapter(queue_binary=binary)
     else:
         configured = host.record("observation", {})
-        if kind not in configured.get("transport_kinds", ()):
+        if kind not in configured.get("transport_kinds", ("codex", "pi_acp")):
             return
         import agents  # Register fixed local adapters before resolving a configured transport.
         adapter = agents.registry.get(kind, "transport")
     with ato_config.use_unified_kernel(host.store.kernel_root, host.store.native_home):
         message = bus.message(message_id)
-        if observe_only and message["state"] == "queued":
+        if (message["state"] == "queued") == observe_only:
             return
         if not route.local_completion and kind == "codex" and message["state"] == "queued":
             override = host.queue_executable(configured)
@@ -131,22 +134,33 @@ def _dispatch(host, bus, route, message_id, guard, *, observe_only=False):
 def _dispatch_selected(host, bus, route, endpoint, adapter, message, guard):
     if _observe(host, bus, route, endpoint, adapter, message, guard) or message["state"] != "queued":
         return
-    owner = bus.acquire_endpoint(route.target, owner="ato-observer:" + str(os.getpid()), lease_seconds=30)
+    owner = bus.acquire_endpoint(route.target, owner="ato-observer:" + str(os.getpid()), lease_seconds=_LEASE_SECONDS)
     try:
         transport.dispatch_one(bus, route.target, owner, {endpoint["kind"]: adapter},
-                               message_id=message["id"], guard=guard)
+                               message_id=message["id"], guard=guard, lease_seconds=_LEASE_SECONDS)
     finally:
         bus.release_endpoint(route.target, owner)
 
 
 @_state_errors
-def _tick_task(host, service, task_id):
+def _tick_task(host, service, task_id, cache=None):
     task, _, binding = service._task(task_id)
     if task["creation"]["runtime_seal"] != host.store.runtime_seal:
         return
+    if cache is not None and cache.get(task_id) == task["revision"]:
+        return
+    failure, settled = None, True
     for phase, correlation in delivery_candidates(service, task):
         try:
             _, notice = service._reservation(task, correlation, phase)
+            if notice and (message := service._message(task, notice)) and message["state"] in TERMINAL:
+                if not message["busy"]:
+                    key = "message-" + _sha(message["id"].encode()) + ".json"
+                    try:
+                        with host.store._private(host.folder / "observer-ledger") as fd:
+                            os.unlink(key, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
             if notice and notice["binding_revision"] != binding["revision"]:
                 # A displaced reservation can be cancelled only by its
                 # original enrolled sender and before a possible native effect.
@@ -154,19 +168,37 @@ def _tick_task(host, service, task_id):
                     service.supersede_unsubmitted(task_id, correlation, phase, sender)
                 if phase != "question":
                     continue
-            service.dispatch_delivery(task_id, correlation, phase)
+            result = service.dispatch_delivery(task_id, correlation, phase)
+            settled &= result in TERMINAL or result == "recorded_only"
         except TaskError as exc:
+            settled = False
+            if exc.code in {"STALE_REQUEST", "BINDING_CHANGED"}:
+                try:
+                    _, stale = service._reservation(task, correlation, phase)
+                    if stale:
+                        sender = host.delivery_sender(service._scope_record(task), stale)
+                        if sender:
+                            service.cancel_unsent(task, stale, sender)
+                except (TaskError, MailboxError) as cleanup_error:
+                    failure = failure or TaskError(getattr(cleanup_error, "code", "DELIVERY_UNKNOWN"))
             if exc.code not in {"BUSY", "STALE_REQUEST", "BINDING_CHANGED",
                                 "PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
-                raise
+                failure = failure or exc
+    if failure:
+        raise failure
+    if settled and cache is not None:
+        cache[task_id] = task["revision"]
 
 
-def tick(host):
+def tick(host, cache=None):
     service = host.interaction
     failures = {}
     for task_id in service._task_ids():
         try:
-            _tick_task(host, service, task_id)
+            if cache is None:
+                _tick_task(host, service, task_id)
+            else:
+                _tick_task(host, service, task_id, cache)
         except TaskError as exc:
             failures[task_id] = exc.code
     return failures
@@ -197,12 +229,20 @@ def observe(seal):
 def _watch(host, config, fd, seal, birth, stop):
     row = dict(pid=os.getpid(), pid_identity=birth, release=seal, consecutive_failures=0,
                failed_task_count=0, first_task_failure=None)
+    cache = {}
+    policy = None
     try:
         while not stop.is_set():
             try:
                 if host.record("observation") != config:
                     break
-                task_failures = tick(host)
+                with ato_config.use_unified_kernel(host.store.kernel_root, host.store.native_home):
+                    configured_policy = (notification_state.status(), notification_state.project_mutes(),
+                                         failure_attention.policy(), host.acceptance_notifications())
+                if configured_policy != policy:
+                    cache.clear()
+                    policy = configured_policy
+                task_failures = tick(host, cache)
             except (OSError, ValueError, sqlite3.Error):
                 task_failures = None
             failed = task_failures is None or bool(task_failures)

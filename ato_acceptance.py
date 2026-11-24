@@ -3,7 +3,6 @@
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from functools import wraps
 import os
 from pathlib import Path
 import re
@@ -18,7 +17,7 @@ import ato_process
 from ato_private import render_local_completion
 from ato_task_store import (
     DELIVERY_OUTCOMES, TaskError, _ID, _REF, _SHA, _directory, _existing, _fields, _generation_valid,
-    _identifier, _matches, _positive, _read_json, _regular, _require, _save, _sha,
+    _identifier, _matches, _positive, _read_json, _regular, _require, _retry_busy, _save, _sha,
     _state_errors, _strict_json, _time, _valid_id, canonical_json, new_id, read_input_file,
 )
 import execution_state
@@ -97,19 +96,6 @@ class MailboxRoute:
     owner_token: str | None = None
     transports: Mapping[str, transport.ManagedTransport] | None = None
     local_completion: bool = False
-
-
-def _retry_busy(method):
-    @wraps(method)
-    def call(*args, **kwargs):
-        for delay in (.005, .02, .05, .12, None):
-            try:
-                return method(*args, **kwargs)
-            except TaskError as exc:
-                if exc.code != "BUSY" or delay is None:
-                    raise
-                time.sleep(delay)
-    return call
 
 
 class InteractionService:
@@ -353,12 +339,16 @@ class InteractionService:
         routing = {"created_by", "binding_revision", "controller_ref", "interaction_ref"}
         for row in self._rows(task):
             prior = row["request"]
+            answer = self._answer_current(task, row, binding) if row["answer"] else None
+            if (kind in _GRANT_KINDS and prior["kind"] == kind and row["answer"]
+                    and not self._usable_answer(task, binding, row, answer)):
+                continue
             keys = request.keys() - routing if not row["answer"] else request.keys()
             if all(prior[k] == request[k] for k in keys):
                 return self._public(task, row)
             if (continuation and prior["continuation"] == continuation
                     and self._current(prior, task, generation, open_)
-                    and (not row["answer"] or self._answer_current(task, row, binding))):
+                    and (not row["answer"] or self._usable_answer(task, binding, row, answer))):
                 raise TaskError("DECISION_CONFLICT", task_id)
         request.update(request_id=new_id("request"), created_at=self.clock())
         row = dict(request=request, answer=None, consumption=None, presentation=None, outbox={})
@@ -423,6 +413,8 @@ class InteractionService:
             items.extend(current)
         return dict(items=sorted(items, key=lambda item: (item["created_at"], item["request_id"])))
 
+    @_state_errors
+    @_retry_busy
     def _locate(self, principal, request_id):
         _identifier(request_id, "request")
         for task_id in self._task_ids():
@@ -445,11 +437,10 @@ class InteractionService:
         generation, open_ = self._kernel(task)
         item = row["request"]
         # Check role and scope before exposing whether an old item is stale.
-        if item["generation"] != generation:
-            _require(self._allowed(principal, scope, task, binding, action, item, item["generation"])
-                     or self._allowed(principal, scope, task, binding, action, item, generation), "FORBIDDEN")
-        else:
-            _require(self._allowed(principal, scope, task, binding, action, item, generation), "FORBIDDEN")
+        active_item = item
+        if (item["generation"], item["run_id"]) != (generation, task["run_id"]):
+            active_item = dict(item, generation=generation, run_id=task["run_id"])
+        _require(self._allowed(principal, scope, task, binding, action, active_item, generation), "FORBIDDEN")
         _require(self._current(item, task, generation, open_), "STALE_REQUEST")
         latest, _, current_binding = self._task(task["task_id"])
         _require(latest["revision"] == task["revision"] and current_binding == binding, "BUSY")
@@ -716,9 +707,9 @@ class InteractionService:
         return self.task_status(actor, task_id)
 
     def _removed_generation(self, task):
-        _, receipts = self.store._run(task, task["run_id"])
-        _require(task["worktree_removed"] and receipts and receipts[-1][1]["phase"] == "settled")
-        return receipts[-1][1]["generation"]
+        run, receipts = self.store._run(task, task["run_id"])
+        _require(task["worktree_removed"])
+        return receipts[-1][1]["generation"] if receipts and receipts[-1][1]["phase"] == "settled" else run["generation"]
 
     def pending(self, task, binding):
         """Internal T3/T5 summaries. Public queries apply the route grant."""
@@ -732,12 +723,14 @@ class InteractionService:
 
     @_state_errors
     @_retry_busy
-    def task_status(self, actor, task_id):
+    def task_status(self, actor, task_id, *, trace=False):
         """Actor-scoped status for the CLI, including private leaf projections."""
         _identifier(task_id, "task")
         principal = self.store._principal(actor)
         scope = self._scope(task_id, principal)
         task, spec, binding = self._task(task_id)
+        if trace:
+            self.execution._actor(actor, task_id, "trace")
         status, generation, manual = self._view(task, spec)
         status["pending"] = []
         status["delivery"] = []
@@ -782,6 +775,11 @@ class InteractionService:
                     addressed and self._allowed(principal, scope, task, binding, "read", item, generation))):
                 status["delivery"].append(dict(request_id=None, phase="completion",
                                               state=self._delivery(task, notice)[0]))
+        if trace:
+            status["delivery"] = [
+                dict(correlation_id=correlation, phase=phase, state=self._delivery(task, notice)[0])
+                for phase, correlation, notice in self.outbox(task)
+            ]
         _require(self.store.load_task(task_id)["revision"] == task["revision"]
                  and _binding(self.execution.hooks, task, spec)["revision"] == binding["revision"], "BUSY")
         _require(self._scope(task_id, principal) == scope, "NOT_FOUND")
@@ -804,25 +802,36 @@ class InteractionService:
         expires = row["request"]["expires_at"]
         return expires is None or expires > self.clock()
 
-    def _material_delivery(self, task, rows):
-        states = [self._delivery(task, row["outbox"]["answer"])[1] for row in rows
-                  if "answer" in row["outbox"]]
-        if "delivery_unknown" in states:
-            return "delivery_unknown"
-        return "waiting" if "waiting" in states else None
+    def _material_delivery(self, task, rows, current=()):
+        waiting = False
+        for row in rows:
+            notice = row["outbox"].get("answer")
+            if notice is None:
+                continue
+            message = self._message(task, notice)
+            if (message and message["external_possible"]
+                    and self._delivery(task, notice)[1] == "delivery_unknown"):
+                return "delivery_unknown"
+            if row in current and (message is None or message["state"] in {
+                    "queued", "claimed", "delivered", "accepted", "responded"}):
+                waiting = True
+        return "waiting" if waiting else None
 
     def decision_status(self, task, binding):
         rows = list(self._rows(task))
         if not rows:
             return None
-        delivery = self._material_delivery(task, rows)
-        if delivery:
-            return delivery
         generation, open_ = self._kernel(task)
         current = [row for row in self._decision_rows(task, rows, generation, open_) if self._unexpired(row)]
+        usable = [row for row in current if row["answer"] and row["request"]["continuation"]
+                  and self._usable_answer(task, binding, row, self._answer_current(task, row, binding))]
+        delivery = self._material_delivery(task, rows, [
+            row for row in current if not row["request"]["continuation"] or row in usable])
+        if delivery:
+            return delivery
         if any(not row["answer"] for row in current):
             return "needs_input"
-        return "waiting" if any(row["request"]["continuation"] for row in current) else None
+        return "waiting" if usable else None
 
     def _usable_answer(self, task, binding, row, answer):
         request = row["request"]
@@ -844,9 +853,8 @@ class InteractionService:
         rows = list(self._rows(task))
         if not rows:
             return None
-        delivery = self._material_delivery(task, rows)
-        if delivery:
-            return "DELIVERY_UNKNOWN" if delivery == "delivery_unknown" else "RUN_UNSETTLED"
+        if self._material_delivery(task, rows) == "delivery_unknown":
+            return "DELIVERY_UNKNOWN"
         generation, open_ = self._kernel(task)
         rows = self._decision_rows(task, rows, generation, open_, operation)
         unexpired = [row for row in rows if self._unexpired(row)]
@@ -876,16 +884,16 @@ class InteractionService:
 
     @_state_errors
     @_retry_busy
-    def claim_continuation(self, task, binding, run, generation):
+    def claim_continuation(self, task, binding, run, generation, *, operation=None):
         """Consumption by the admitted T3 child under its existing kernel lease."""
-        prior_id = run["predecessor_run_id"]
+        prior_id = run["run_id"] if operation == "resume" and run["kind"] == "initial" else run["predecessor_run_id"]
         if prior_id is None:
             return None
         task_id = task["task_id"]
         task, _, current_binding = self._task(task_id)
         _require(current_binding == binding, "BINDING_CHANGED")
         _require(task["run_id"] == run["run_id"] and run["generation"] == generation, "RUN_UNSETTLED")
-        candidates = self._previous_answers(task, binding, prior_id, generation, run["kind"])
+        candidates = self._previous_answers(task, binding, prior_id, generation, operation or run["kind"])
         if not candidates:
             return None
         eligible = [(row, answer) for row, answer in candidates
@@ -903,7 +911,7 @@ class InteractionService:
                  and lease["fence"] == owner["lease_fence"] and lease["task_id"] == run["workflow_dir"]
                  and lease["contract_hash"] == run["contract_hash"]
                  and lease["generation"] == canonical_json(generation).decode(), "RUN_UNSETTLED")
-        _require(not self._material_delivery(task, [row]), "DELIVERY_UNKNOWN")
+        _require(self._material_delivery(task, [row]) != "delivery_unknown", "DELIVERY_UNKNOWN")
         request = row["request"]
         request_id = request["request_id"]
         if (record := self._consumption(task, row)) is not None:
@@ -965,6 +973,20 @@ class InteractionService:
         name = self._notice_name(correlation, phase)
         with self._records(task["task_id"]) as fd:
             return _read_json(fd, name) if fd is not None and _existing(fd, name) is not None else None
+
+    def outbox(self, task):
+        for row in self._rows(task):
+            for phase, notice in row["outbox"].items():
+                yield phase, row["request"]["request_id"], notice
+        with self._records(task["task_id"]) as fd:
+            if fd is None:
+                return
+            for name in sorted(os.listdir(fd)):
+                phase, _, correlation = name.removesuffix(".json").partition("-")
+                if name.endswith(".json") and (
+                        phase in {"failure", "completion"} and _matches(_SHA, correlation)
+                        or phase == "question" and _valid_id(correlation, "request")):
+                    yield phase, correlation, _read_json(fd, name)
 
     def _reservation(self, task, correlation, phase):
         if phase != "completion":
@@ -1062,6 +1084,11 @@ class InteractionService:
             self._bus().authenticate(route.sender)
             self._bus().authenticate(route.target)
         return route
+
+    def cancel_unsent(self, task, notice, sender):
+        message = self._message(task, notice)
+        if message and not message["external_possible"] and message["state"] in {"queued", "claimed"}:
+            self._bus().cancel(sender, message["id"], source="unified reservation became stale")
 
     def _reserve_delivery(self, task, binding, item, phase, receipt=None):
         outward = phase != "answer"
@@ -1316,7 +1343,11 @@ class InteractionService:
                 _require(self._local_completion_route(latest, current, phase, current_item, create=False) == route,
                          "STALE_REQUEST")
 
-        guard()
+        try:
+            guard()
+        except TaskError:
+            self.cancel_unsent(task, notice, route.sender)
+            raise
         if message is None and notice["mailbox_id"] is None:
             # Scope the route and key to the original reservation. A restart
             # can recover its queued row, while a changed route cannot create one.
@@ -1335,15 +1366,28 @@ class InteractionService:
             try:
                 self._save_delivery(task, binding, row, correlation, updated)
             except TaskError as exc:
-                if exc.code in {"BINDING_CHANGED", "STALE_REQUEST"}:
-                    bus.cancel(route.sender, message["id"], source="unified reservation became stale")
+                if exc.code in {"BUSY", "BINDING_CHANGED", "STALE_REQUEST"}:
+                    self.cancel_unsent(task, updated, route.sender)
                 raise
             notice = updated
+
+        def pre_send():
+            try:
+                guard()
+            except TaskError:
+                current = bus.message(notice["mailbox_id"])
+                if current["state"] == "dispatching":
+                    # Only used synchronously by dispatch_one, before adapter.send.
+                    bus.finish_dispatch(current["id"], current["attempt_id"], state="failed")
+                else:
+                    self.cancel_unsent(task, notice, route.sender)
+                raise
+
         if message["state"] != "queued":
             self.observe_envelope(bus, route, notice["mailbox_id"], guard)
         elif self.dispatch_envelope is not None:
-            self.dispatch_envelope(bus, route, notice["mailbox_id"], guard)
+            self.dispatch_envelope(bus, route, notice["mailbox_id"], pre_send)
         elif route.owner_token and route.transports:
             transport.dispatch_one(bus, route.target, route.owner_token, route.transports,
-                                   message_id=notice["mailbox_id"], guard=guard)
+                                   message_id=notice["mailbox_id"], guard=pre_send)
         return self._delivery(task, notice)[0]

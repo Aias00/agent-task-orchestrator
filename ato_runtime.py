@@ -54,7 +54,10 @@ def main(argv):
             case ["read-handoff", ref]:
                 try:
                     host = Host(seal=runtime_seal(required=True), read_only=True).compose(render_notice=render_notice)
-                    result = {"valid": True, "data": read_handoff(host, host.actor_file(), ref)}
+                    try:
+                        result = {"valid": True, "data": read_handoff(host, host.actor_file(), ref)}
+                    finally:
+                        host.close_mailbox_snapshot()
                 except Exception:
                     result = dict(valid=False, action="end_silently", reason="stale_or_unavailable")
                 print(json.dumps(result, ensure_ascii=False, allow_nan=False))

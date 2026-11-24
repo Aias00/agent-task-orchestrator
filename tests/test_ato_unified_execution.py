@@ -211,6 +211,21 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed", result)
         self.assertEqual(result["run_history"][-1]["phase"], "settled")
 
+    def test_batch3_quarantined_unknown_task_does_not_release_itself_for_replay(self):
+        task = self.create()
+        (self.worker_home / "mode").write_text("unknown")
+        unknown = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(unknown["status"], "delivery_unknown")
+        peer = self.create()
+        self.assert_error("RUN_UNSETTLED", self.service.start, self.actor, peer)
+        self.assertEqual(execution.quarantine_task(self.store, task, "independent fixture check")["state"],
+                         "quarantined")
+        self.assertEqual(self.status(task)["reason"], "RUN_QUARANTINED")
+        self.assert_error("NOT_RESUMABLE", self.service.resume, self.actor, task)
+        self.assert_error("NOT_RESUMABLE", self.service.reconcile, self.actor, task)
+        (self.worker_home / "mode").unlink()
+        self.assertEqual(self.service.start(self.actor, peer, foreground=True)["status"], "completed")
+
     def test_batch2_failed_launch_preserves_previous_review_round_accounting(self):
         task = self.create(reviewer=dict(agent=dict(kind="codex"), max_review_rounds=1))
         first = self.service.start(self.actor, task, foreground=True)

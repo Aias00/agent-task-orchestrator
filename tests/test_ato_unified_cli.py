@@ -120,6 +120,8 @@ class PublicCLI(unittest.TestCase):
 
     def submission(self):
         normalized = self.store.normalize_spec(self.repo, self.spec_file)
+        self.registry(CONTROLLER, dict(enabled=True, reference=CONTROLLER, role="controller",
+            revisions=[1], repo_key=normalized.repository.key))
         self.registry(INTERACTION, dict(enabled=True, reference=INTERACTION, role="interaction",
             revisions=[1], repo_key=normalized.repository.key))
         origin = self.enroll("3", "controller", CONTROLLER, submissions=[dict(reference="approved-fixture",
@@ -155,6 +157,14 @@ class PublicCLI(unittest.TestCase):
         self.assertFalse(checkout.exists())
         self.assertTrue(git(self.repo, "rev-parse", "--verify", "refs/heads/" + binding["branch"]))
         code, result = self.invoke("resume", task_id, actor=origin, app=app)
+        self.assertEqual((code, result["error"]["code"]), (3, "FORBIDDEN"))
+        task = self.store.load_task(task_id)
+        with self.store._private(self.store._task_dir(task_id)) as fd:
+            scope = self.store._scope(fd, task_id)
+        scoped = self.enroll("8", "controller", CONTROLLER, scope=asdict(scope), binding_revision=1,
+            run_id=task["run_id"], generation=app.host.interaction._removed_generation(task),
+            operations=["observe", "resume"])
+        code, result = self.invoke("resume", task_id, actor=scoped, app=app)
         self.assertEqual((code, result["error"]["code"]), (4, "NOT_RESUMABLE"))
 
     def test_private_locator_selects_same_source_and_has_no_ambient_authority(self):
@@ -204,7 +214,7 @@ class PublicCLI(unittest.TestCase):
             endpoint[ref] = credential
             self.registry(ref, dict(enabled=True, reference=ref, role=role, repo_key=repo_key,
                                     revisions=revisions, mailbox=asdict(credential)))
-        self.registry("observation", dict(enabled=True, source_ref="fixture-observation"))
+        self.registry("observation", dict(enabled=True, source_ref="fixture-observation", transport_kinds=["local_cli"]))
         hub = write(interaction, "hub.json", json.dumps(dict(thread_id=INTERACTION)))
 
         def proof_for(actor):

@@ -30,12 +30,18 @@ def read_handoff(host, proof, ref):
     actor = host.store._principal(proof)
     service = host.interaction
     for task_id in service._task_ids():
-        if host.store._visible_scope(task_id, actor) is None:
-            continue
-        task, _, binding = service._task(task_id)
+        try:
+            if host.store._visible_scope(task_id, actor) is None:
+                continue
+            task, _, binding = service._task(task_id)
+            candidates = delivery_candidates(service, task)
+        except TaskError as exc:
+            if exc.code in {"STATE_CORRUPT", "SPEC_CHANGED", "BUSY", "CHECKS_REQUIRED", "PRODUCT_CHANGED"}:
+                continue
+            raise
         if task["creation"]["runtime_seal"] != host.store.runtime_seal:
             continue
-        for phase, correlation in delivery_candidates(service, task):
+        for phase, correlation in candidates:
             try:
                 _, item, notice = service._delivery_item(task, host.store.load_spec(task_id), correlation, phase)
                 target = binding["controller_ref" if phase == "answer" else "interaction_ref"]
@@ -86,13 +92,18 @@ def delivery_candidates(service, task):
         correlation, _, notice = published
         message = service._message(task, notice)
         if message and message["state"] != "queued":
-            if message["state"] in {"dispatching", "delivered", "delivery_unknown", "accepted", "responded"}:
-                candidates.append(("completion", correlation))
+            candidates.append(("completion", correlation))
             if notice["run_id"] == task["run_id"]:
                 return candidates
             _, receipts = service.store._run(task, task["run_id"])
             if receipts and receipts[-1][1]["outcome"] in DELIVERY_OUTCOMES:
                 return candidates
+    if not task["run_id"]:
+        return candidates
+    _, receipts = service.store._run(task, task["run_id"])
+    if not receipts or receipts[-1][1]["phase"] != "settled" or receipts[-1][1]["outcome"] not in (
+            DELIVERY_OUTCOMES | {"blocked", "failed"}):
+        return candidates
     status, generation, _ = service._view(task, service.store.load_spec(task["task_id"]))
     if service.render_notice is not None and (failed := service.failure_item(task, status, generation)):
         candidates.append(("failure", failed[0]))
