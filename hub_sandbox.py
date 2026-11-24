@@ -15,10 +15,12 @@ import time
 import tempfile
 from urllib.parse import urlsplit
 
-from pi_toolchain import write_exclusions
+from pi_toolchain import locate
 
 LIMIT = 1024*1024
 process_host = ContextVar("hub_process_host", default=None)
+trusted_node = ContextVar("hub_trusted_node", default=None)
+_ChildProcess = subprocess.Popen
 
 
 def canonical(path, *, exists=True):
@@ -99,9 +101,16 @@ def has_secret(value, private_values):
 
 
 def read_denials(runtime, protected):
-    return ['(deny file-read* (require-all (subpath ' +
-            json.dumps(str(canonical(path, exists=False))) + ') (require-not (subpath ' +
-            json.dumps(str(runtime)) + '))))' for path in protected]
+    q = lambda path: json.dumps(str(path))
+    rules = []
+    for path in protected:
+        root = Path(path).resolve()
+        rules.append('(deny file-read* (require-all (subpath ' + q(root)
+                     + ') (require-not (subpath ' + q(runtime) + '))))')
+        if runtime.is_relative_to(root):
+            rules.extend('(allow file-read-metadata (literal ' + q(parent) + '))'
+                         for parent in runtime.parents if parent.is_relative_to(root))
+    return rules
 
 
 def readonly_profile(runtime, *, protected, writable_native=(), protected_reads=()):
@@ -112,7 +121,7 @@ def readonly_profile(runtime, *, protected, writable_native=(), protected_reads=
     q=lambda p:json.dumps(str(p))
     rules=['(version 1)','(allow default)','(deny file-write*)',
         '(allow file-write* (literal "/dev/null"))',
-        '(allow file-write* (require-all (subpath '+q(runtime)+') '+write_exclusions(runtime)+'))']
+        '(allow file-write* (subpath '+q(runtime/'tmp')+') (literal '+q(runtime/'output.json')+'))']
     for raw in writable_native:
         path=canonical(raw,exists=False)
         if any(path==p or path.is_relative_to(p) or p.is_relative_to(path) for p in (*roots,runtime)):
@@ -137,8 +146,8 @@ def group_members(group):
     try:
         data=subprocess.check_output(['/bin/ps','-axo','pid=,pgid=,stat='],text=True,timeout=2,
             env={'PATH':'/usr/bin:/bin','LC_ALL':'C','TZ':'UTC'},stderr=subprocess.DEVNULL)
-        return {int(pid):identity(int(pid)) for pid,pgid,state in (row.split() for row in data.splitlines())
-                if int(pgid)==group and not state.startswith('Z')}
+        return {int(pid):birth for pid,pgid,state in (row.split() for row in data.splitlines())
+                if int(pgid)==group and not state.startswith('Z') and (birth:=identity(int(pid)))}
     except (OSError,ValueError,subprocess.SubprocessError):return None
 
 
@@ -154,6 +163,10 @@ class OwnedGroup:
         if rows is None:return None,False
         if self.process.pid in rows and rows[self.process.pid]!=self.leader_identity:return rows,False
         trusted=any(value and self.known.get(pid)==value for pid,value in rows.items())
+        # An unreaped session leader's PID still anchors its process group.
+        if (not trusted and self.leader_identity and isinstance(self.process, _ChildProcess)
+                and self.process.returncode is None and self.process.pid not in rows):
+            trusted = True
         if trusted:self.known.update({pid:value for pid,value in rows.items() if value})
         return rows,trusted
 
@@ -197,7 +210,7 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
         with os.fdopen(fd,'wb') as stream:
             if path==stdin:stream.write(prompt.encode())
     output,errors=bytearray(),bytearray();code='PROCESS_ERROR';process=None;owner=None;clean=True
-    truncated=False
+    truncated=False;exited=False;selector=None
     host=process_host.get()
     try:
         if stop():return ProcessResult('STOPPED',None)
@@ -208,42 +221,58 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
             process=subprocess.Popen(list(command),cwd=workspace,env=environment,stdin=source,
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,umask=0o077)
             if host is None:
-                birth=identity(process.pid);owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})
+                birth=identity(process.pid)
+                owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})
             else:
-                owner=host.own(process, runtime)
+                try:
+                    owner=host.own(process, runtime)
+                except Exception:
+                    birth=identity(process.pid)
+                    owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})
+                    raise
             selector=selectors.DefaultSelector()
             for stream in (process.stdout,process.stderr):
                 os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ)
-            try:
-                while True:
-                    if stop():code='STOPPED';break
-                    if time.monotonic()>=deadline:code='TIMEOUT';break
-                    owner.observe()
-                    for key,_ in selector.select(timeout=min(.1,max(.001,deadline-time.monotonic()))):
-                        chunk=os.read(key.fd,65536)
-                        if not chunk:selector.unregister(key.fileobj);continue
-                        target=output if key.fileobj is process.stdout else errors
-                        remaining=LIMIT-len(target)
-                        target.extend(chunk[:max(0,remaining)])
-                        if key.fileobj is process.stderr:log.write(chunk[:max(0,remaining)])
-                        if len(chunk)>remaining:
-                            truncated=True
-                            if not truncate:code='OUTPUT_LIMIT';break
-                    if code=='OUTPUT_LIMIT':break
-                    if process.poll() is not None:
-                        if not selector.get_map():code='OK' if process.returncode==0 else 'PROCESS_ERROR';break
-                        # A grandchild holding a pipe must not postpone cleanup.
-                        rows,_=owner.observe()
-                        if rows and process.pid not in rows:code='PIPE_EOF_UNKNOWN';break
-            finally:
-                selector.close();clean=owner.close()
-                try:process.wait(timeout=.5)
-                except subprocess.TimeoutExpired:clean=False
-                process.stdout.close();process.stderr.close()
+            next_observation = 0
+            while True:
+                if stop():code='STOPPED';break
+                if time.monotonic()>=deadline:code='TIMEOUT';break
+                for key,_ in selector.select(timeout=min(.1,max(.001,deadline-time.monotonic()))):
+                    chunk=os.read(key.fd,65536)
+                    if not chunk:selector.unregister(key.fileobj);continue
+                    target=output if key.fileobj is process.stdout else errors
+                    remaining=LIMIT-len(target)
+                    target.extend(chunk[:max(0,remaining)])
+                    if key.fileobj is process.stderr:log.write(chunk[:max(0,remaining)])
+                    if len(chunk)>remaining:
+                        truncated=True
+                        if not truncate:code='OUTPUT_LIMIT';break
+                if code=='OUTPUT_LIMIT':break
+                if time.monotonic() >= next_observation:
+                    rows,_ = owner.observe()
+                    next_observation = time.monotonic() + .1
+                    if rows is not None and process.pid not in rows:
+                        if not selector.get_map():
+                            exited=True
+                            break
+                        if rows:
+                            code='PIPE_EOF_UNKNOWN'
+                            break
     except Exception:
         code='PROCESS_ERROR'
+    finally:
+        if selector is not None:
+            selector.close()
         if process is not None:
             clean=owner is not None and owner.close()
+            try:
+                process.wait(timeout=.5)
+            except subprocess.TimeoutExpired:
+                clean=False
+            finally:
+                process.stdout.close();process.stderr.close()
+            if exited and clean and process.returncode == 0:
+                code='OK'
     if host is not None:
         host.finished(runtime, process, clean)
     return ProcessResult(code if clean else 'CLEANUP_BLOCKED',process.returncode if process else None,
@@ -278,13 +307,20 @@ def executable(kind, selected=None):
 
 def tool_environment(home, temporary, tool, *, codex=False, proxy=None):
     env=clean_environment(home,temporary,native_home=Path(home)/'.codex' if codex else None,proxy=proxy)
-    paths=[str(Path(tool).parent),'/usr/bin','/bin']
-    # Script CLIs may need their trusted Node loader. Do not inherit the
-    # ambient PATH or any loader/proxy/actor/key variables into native tools.
-    node=shutil.which('node')
-    if node:paths.insert(1,str(Path(node).resolve().parent))
-    env['PATH']=os.pathsep.join(dict.fromkeys(paths))
+    node = trusted_node.get()
+    if node is None and process_host.get() is None:
+        try:
+            node = locate('node')
+        except (OSError, ValueError):
+            pass
+    env['PATH'] = tool_path(tool, node)
     return env
+
+
+def tool_path(tool, node):
+    paths=[str(Path(tool).parent),'/usr/bin','/bin']
+    if node:paths.insert(1,str(Path(node).resolve().parent))
+    return os.pathsep.join(dict.fromkeys(paths))
 
 
 def write_private(path, data):

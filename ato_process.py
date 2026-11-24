@@ -4,6 +4,7 @@ import errno
 import hashlib
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -60,6 +61,19 @@ def identity(pid):
         return None
 
 
+def _darwin_zombie(pid):
+    if sys.platform != "darwin":
+        return False
+    try:
+        status = subprocess.check_output(
+            ["/bin/ps", "-p", str(pid), "-o", "stat=,lstart="],
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC"},
+            text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+        return status.startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def disposition(pid, birth):
     """A mismatch proves only that the current PID belongs to another process."""
     if type(pid) is not int or pid <= 0 or not birth:
@@ -67,19 +81,20 @@ def disposition(pid, birth):
     observed = identity(pid)
     if observed:
         return "live" if observed == birth else "reused"
+    unobserved = False
     try:
         _, zombie, stamp = _observe(pid)
         if zombie:
             return "absent" if _birth(pid, stamp) == birth else "reused"
     except (OSError, ValueError, IndexError):
-        pass
+        unobserved = True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return "absent"
     except OSError:
         pass
-    return "unknown"
+    return "absent" if unobserved and _darwin_zombie(pid) else "unknown"
 
 
 def _absent_group(group):

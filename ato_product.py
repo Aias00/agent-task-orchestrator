@@ -3,8 +3,9 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
+from tempfile import TemporaryDirectory
 
-from ato_task_store import (TaskError, _directory, _file_stamp, _git, _git_text, _read_file,
+from ato_task_store import (TaskError, _checkout_environment, _directory, _file_stamp, _git, _git_text, _read_file,
                             _require, _sha, _strict_json, canonical_json)
 
 
@@ -71,11 +72,13 @@ def measure(task):
                                code="PRODUCT_CHANGED")
         head = _git_text(root, "rev-parse", "--verify", "HEAD")
         tree = _git_text(root, "rev-parse", "--verify", head + "^{tree}")
-        tracked = set()
+        tracked, gitlinks = set(), {}
         for row in _names(_git(root, "ls-files", "--stage", "-z")[0]):
             header, name = row.split("\t", 1)
-            mode, _, stage = header.split()
-            _require(stage == "0" and mode in {"100644", "100755", "120000"}, "PRODUCT_CHANGED")
+            mode, oid, stage = header.split()
+            _require(stage == "0" and mode in {"100644", "100755", "120000", "160000"}, "PRODUCT_CHANGED")
+            if mode == "160000":
+                gitlinks[name] = oid
             tracked.add(name)
         untracked = set(_names(_git(root, "ls-files", "--others", "--exclude-standard", "-z")[0]))
         names = sorted(name for name in tracked | untracked if not _ignored_runtime(name, task))
@@ -83,6 +86,9 @@ def measure(task):
         entries = []
         remaining = _MAX_TOTAL
         for name in names:
+            if name in gitlinks:
+                entries.append(dict(path=name, kind="gitlink", oid=gitlinks[name]))
+                continue
             entry, size = _entry(root, name, remaining)
             entries.append(dict(path=name, **entry))
             remaining -= size
@@ -98,6 +104,81 @@ def measure(task):
         if isinstance(exc, TaskError):
             raise
         raise TaskError("PRODUCT_CHANGED") from None
+
+
+def retained_entries(manifest):
+    return [entry for entry in manifest["entries"] if entry["kind"] != "missing"]
+
+
+def index_bytes(task):
+    admin = Path(task["worktree"]["git_admin"])
+    with _directory(admin) as fd:
+        return _read_file(fd, "index", limit=_MAX_FILE, private=False, stable_path=True,
+                          code="PRODUCT_CHANGED")
+
+
+def install_index(task, data):
+    admin = Path(task["worktree"]["git_admin"])
+    with _directory(admin) as fd:
+        handle = os.open("index.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=fd)
+        installed = False
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace("index.lock", "index", src_dir_fd=fd, dst_dir_fd=fd)
+            installed = True
+            os.fsync(fd)
+        finally:
+            if not installed:
+                os.unlink("index.lock", dir_fd=fd)
+
+
+def build_retention(task, manifest, scratch, *, existing=None):
+    """Build the Git tree from accepted file bytes using an isolated index."""
+    root = Path(task["worktree"]["path"])
+    env = dict(_checkout_environment(root), GIT_AUTHOR_NAME="ATO Host", GIT_AUTHOR_EMAIL="ato-host@local",
+               GIT_COMMITTER_NAME="ATO Host", GIT_COMMITTER_EMAIL="ato-host@local")
+    with TemporaryDirectory(prefix="cleanup-index-", dir=scratch) as folder:
+        index = Path(folder)/"index"
+        env["GIT_INDEX_FILE"] = str(index)
+        _git(root, "read-tree", "--empty", env=env)
+        entries = bytearray()
+        for row in retained_entries(manifest):
+            path = root/row["path"]
+            if row["kind"] == "gitlink":
+                mode, oid = "160000", row["oid"]
+            else:
+                if row["kind"] == "link":
+                    target = os.readlink(path)
+                    _require(target == row["target"], "PRODUCT_CHANGED")
+                    mode, content = "120000", target.encode()
+                else:
+                    mode = "100755" if row["mode"] & stat.S_IXUSR else "100644"
+                    with _directory(path.parent) as fd:
+                        content = _read_file(fd, path.name, limit=_MAX_FILE, private=False,
+                                             stable_path=True, code="PRODUCT_CHANGED")
+                    _require(_sha(content) == row["sha256"], "PRODUCT_CHANGED")
+                oid = _git(root, "hash-object", "-w", "--stdin", env=env, input_data=content)[0].decode().strip()
+            entries.extend(f"{mode} {oid}\t{row['path']}\0".encode())
+        _git(root, "update-index", "-z", "--index-info", env=env, input_data=entries)
+        tree = _git(root, "write-tree", env=env)[0].decode().strip()
+        head = manifest["head"]
+        if existing is not None:
+            commit = existing
+            _require(_git_text(root, "rev-parse", "--verify", commit+"^{tree}") == tree,
+                     "CLEANUP_BLOCKED")
+            if commit != head:
+                _require(_git_text(root, "rev-parse", "--verify", commit+"^") == head, "CLEANUP_BLOCKED")
+        elif tree == manifest["tree"]:
+            commit = head
+        else:
+            commit = _git(root, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", head,
+                          "-m", "Retain accepted ATO product", env=env)[0].decode().strip()
+            _require(_git_text(root, "rev-parse", "--verify", commit+"^{tree}") == tree, "CLEANUP_BLOCKED")
+        return commit, tree, index.read_bytes()
 
 
 def retain_checks(store, task, run, generation, contract, criteria, manifest):

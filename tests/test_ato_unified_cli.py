@@ -145,6 +145,7 @@ class PublicCLI(unittest.TestCase):
         code, result = self.invoke("project", "cleanup", task_id, "--confirm", actor=origin, app=app)
         self.assertEqual((code, result["error"]["code"]), (4, "CLEANUP_BLOCKED"))
         self.assertTrue(stray.is_file())
+        self.assertFalse((self.store._task_dir(task_id)/"cleanup.json").exists())
         stray.unlink()
         for _ in range(2):
             code, result = self.invoke("project", "cleanup", task_id, "--confirm", actor=origin, app=app)

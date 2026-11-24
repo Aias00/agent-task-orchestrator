@@ -206,11 +206,12 @@ class InstalledATO(unittest.TestCase):
         self.registry(reference, dict(enabled=True, reference=reference, repo_key=repo_key,
                                      role=role, revisions=[revision]))
 
-    def task_spec(self, name, *, reviewer=False, host_handoff=False):
+    def task_spec(self, name, *, reviewer=False, host_handoff=False, ignore_runtime=True):
         repo = self.root / name
         repo.mkdir()
         git(repo, "init", "-q")
-        write(repo, ".gitignore", ".codex/tasks/\n")
+        if ignore_runtime:
+            write(repo, ".gitignore", ".codex/tasks/\n")
         write(repo, "source.txt", "fixture base\n")
         git(repo, "add", ".")
         git(repo, "commit", "-qm", "fixture base")
@@ -454,6 +455,33 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(self.cli("stop", task_id), cleaned)
         self.assertEqual(self.cli("status", task_id), cleaned)
         self.assertFalse((task_dir / "STOP.json").exists())
+
+    def test_batch2_cleanup_retains_uncommitted_verified_product_after_cutover(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("uncommitted retention", ignore_runtime=False)
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["acceptance"]["disposition"], "not_recorded")
+        task_id = result["task_id"]
+        task = self.store.load_task(task_id)
+        worktree = Path(task["worktree"]["path"])
+        branch = task["worktree"]["branch"]
+        self.assertIn("?? delivery.txt", git(worktree, "status", "--porcelain"))
+
+        replacement = snapshot(self.root / "retention release", executable=True, commit="d" * 40)
+        self.addCleanup(unseal, replacement)
+        paths = release.scoped_paths(self.bin, self.store.home, self.store.native_home)
+        release.activate(replacement, "d" * 40, paths, self.root / "retention cutover")
+        cleaned = self.cli("project", "cleanup", task_id, "--confirm")
+        self.assertEqual((cleaned["status"], cleaned["worktree_state"]), ("completed", "removed"))
+        self.assertEqual(cleaned["product"], result["product"])
+        self.assertFalse(worktree.exists())
+        self.assertEqual(git(repo, "show", "-s", "--format=%an <%ae>", branch), "ATO Host <ato-host@local>")
+        self.assertEqual(git(repo, "ls-tree", "-r", "--name-only", branch), "delivery.txt\nsource.txt")
+        self.assertEqual(git(repo, "show", branch + ":delivery.txt"), "fixture output")
+        self.assertEqual(git(repo, "status", "--porcelain"), "")
+        self.assertEqual(self.cli("project", "cleanup", task_id, "--confirm"), cleaned)
 
     def test_batch0_local_annotation_does_not_hide_product_invalidation(self):
         self.install()

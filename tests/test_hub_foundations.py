@@ -4,16 +4,21 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import hub_contract as contract
 import hub_ledger as ledger
 import hub_sandbox as sandbox
 import hub_worktree as worktree
+from ato_execution_host import CommandHost, HostProfile
+from pi_toolchain import locate
 from hub_support import git,repository,runtime,spec,verdict
 
 
@@ -238,6 +243,80 @@ class HubFoundationTests(unittest.TestCase):
             environment=sandbox.clean_environment(rt/'home',rt/'tmp'),timeout=10,stop=lambda:time.monotonic()-started>.4)
         self.assertEqual(result.code,'STOPPED');self.assertTrue(result.cleaned)
         self.assertLess(time.monotonic()-started,5);self.assertEqual(result.returncode,-signal.SIGKILL)
+
+    def test_batch2_own_group_terminates_orphan_after_unreaped_leader_exits(self):
+        leader = subprocess.Popen(["/bin/sh", "-c", "sleep .25; sleep 30 </dev/null >/dev/null 2>&1 &"],
+                                  start_new_session=True)
+        self.addCleanup(leader.wait, 5)
+        birth = sandbox.identity(leader.pid)
+        self.assertIsNotNone(birth)
+        group = sandbox.OwnedGroup(leader, birth, {leader.pid: birth})
+        self.addCleanup(group.close)
+        end = time.monotonic() + 3
+        while time.monotonic() < end:
+            rows = sandbox.group_members(leader.pid)
+            if rows and leader.pid not in rows:
+                break
+            time.sleep(.03)
+        self.assertTrue(rows and leader.pid not in rows)
+        self.assertIsNone(leader.returncode)
+        self.assertTrue(group.close())
+        self.assertEqual(sandbox.group_members(leader.pid), {})
+        self.assertEqual(leader.wait(timeout=3), 0)
+
+    def test_batch2_review_diff_refuses_a_fifo_without_blocking(self):
+        os.mkfifo(self.repo / "pipe")
+        binding = {"path": str(self.repo), "base_commit": git(self.repo, "rev-parse", "HEAD").strip()}
+        with self.assertRaisesRegex(ValueError, "UNSAFE_REVIEW_FILE"):
+            worktree.diff_bundle(binding)
+
+    def test_batch2_real_node_host_check_has_scratch_but_cannot_read_secrets_or_use_network(self):
+        node = locate("node")
+        home = self.root / "home"
+        home.mkdir(mode=0o700)
+        secret = home / ".ssh" / "fixture"
+        secret.parent.mkdir(mode=0o700)
+        secret.write_text("synthetic-secret")
+        store_home = self.root / "private-store"
+        store_home.mkdir(mode=0o700)
+        rt = store_home / "turn"
+        rt.mkdir(mode=0o700)
+        tmp = rt / "tmp"
+        tmp.mkdir(mode=0o700)
+        proof = self.root / "proof"
+        proof.mkdir(mode=0o700)
+        (rt / "schema.json").write_text("{}")
+        profile = HostProfile(str(node), str(home), proof_roots=(str(proof),))
+        store = SimpleNamespace(home=store_home, native_homes=())
+        driver = SimpleNamespace(store=store, task={"worktree": dict(
+            repo=str(self.repo), shared_link_identities={})})
+        host = CommandHost(driver, profile, store_home)
+        js = """
+const fs = require('node:fs'), net = require('node:net');
+const [secret, schema, port] = process.argv.slice(1);
+const can = (fn) => { try { fn(); return true; } catch (_) { return false; } };
+const observed = {
+    tmp: fs.realpathSync(process.env.TMPDIR),
+    secret: can(() => fs.readFileSync(secret)),
+    schema: can(() => fs.writeFileSync(schema, 'tampered')),
+    scratch: can(() => fs.writeFileSync(process.env.TMPDIR + '/writable', 'ok'))
+};
+const socket = net.connect(Number(port), '127.0.0.1');
+socket.once('connect', () => { console.log(JSON.stringify({...observed, connected: true})); socket.end(); });
+socket.once('error', (err) => console.log(JSON.stringify({...observed, connected: false, error: err.code})));
+"""
+        with self.enterContext(socket.socket()) as listener, patch.dict(os.environ, HOME=str(home)):
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            args = [str(node), "-e", js, str(secret), str(rt / "schema.json"), str(listener.getsockname()[1])]
+            result = sandbox.run(host._fence(args, rt, self.repo, write=False), workspace=self.repo, runtime=rt,
+                environment=sandbox.clean_environment(tmp, tmp), timeout=8)
+        self.assertEqual(result.code, "OK", result.stderr)
+        facts = json.loads(result.stdout)
+        self.assertEqual(facts["tmp"], str(tmp))
+        self.assertTrue(facts["scratch"])
+        self.assertFalse(facts["secret"] or facts["schema"] or facts["connected"])
+        self.assertIn(facts["error"], {"EPERM", "EACCES"})
 
     def test_O7_private_ledger_switch_rollover_and_immutable_spec(self):
         book=ledger.HubLedger.create(self.repo,contract.HubAgentSpec('agy'),max_turns=1)

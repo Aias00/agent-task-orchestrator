@@ -16,7 +16,7 @@ import ato_process
 import ato_product
 from ato_execution_host import CommandHost, HostProfile
 from ato_task_store import (DELIVERY_OUTCOMES, RunIntent, RunReceipt, TaskError, _directory, _existing,
-    _identity, _identifier, _locked_file, _publish, _read_json, _regular, _require, _save,
+    _identity, _identifier, _locked_file, _publish, _read_file, _read_json, _regular, _require, _save,
     _sha, _state_errors, _strict_json, _valid_id, canonical_json, new_id)
 import budget
 from hub_contract import HubAgentSpec, HubTurnRequest, blocker_fingerprint, validate_review_verdict
@@ -32,6 +32,10 @@ _ENTRY = Path(__file__).resolve().with_name("ato_runtime.py")
 _TERMINAL = {"settled", "launch_failed"}
 _RETRYABLE = {"stopped", "blocked", "failed", "launch_failed"}
 _STARTUP_SECONDS = 12
+_CONFIRMED_BLOCKERS = {
+    "BINDING_CHANGED", "PRODUCT_CHANGED", "REVIEW_DIFF_BOUND_EXCEEDED",
+    "UNSAFE_REVIEW_FILE", "INTEGRITY_BOUND_EXCEEDED", "INVALID_REVIEW_PROMPT",
+}
 
 
 def _initial_binding(task, spec):
@@ -171,6 +175,24 @@ def _evidence(store, task_id, receipt):
     return _strict_json(store.read_evidence(task_id, receipt["evidence_sha256"]), "STATE_CORRUPT")
 
 
+def _load_task(store, task_id):
+    for delay in (.005, .02, .05, .12, None):
+        try:
+            return store.load_task(task_id)
+        except TaskError as exc:
+            if exc.code != "BUSY" or delay is None:
+                raise
+            time.sleep(delay)
+
+
+def _last_settlement(store, task, run, receipts):
+    while receipts and receipts[-1][1]["phase"] == "launch_failed" and run["predecessor_run_id"]:
+        run, receipts = store._run(task, run["predecessor_run_id"])
+    if receipts and receipts[-1][1]["phase"] == "settled":
+        return _evidence(store, task["task_id"], receipts[-1][1])
+    return {}
+
+
 def _current(store, task):
     history = store._history(task)
     _require(bool(history), "NOT_RESUMABLE")
@@ -219,7 +241,7 @@ def _publish_receipt(store, run, phase, generation, evidence, outcome=None, *, v
     task_id = run["task_id"]
     evidence_ref = store.put_evidence(task_id, canonical_json(evidence))
     for _ in range(30):
-        task = store.load_task(task_id)
+        task = _load_task(store, task_id)
         if validate is not None:
             validate(task)
         receipt = RunReceipt(task_id, run["run_id"], run["spec_sha256"], run["runtime_seal"],
@@ -253,8 +275,9 @@ def _active_proof(store, run, receipts):
 
 
 def _verify_exit(owner):
-    _require(ato_process.disposition(owner["pid"], owner["birth"]) in {"absent", "reused"}
-             and ato_process.group_members(owner["pid"]) == {}, "CLEANUP_BLOCKED")
+    state = ato_process.disposition(owner["pid"], owner["birth"])
+    _require(state == "reused" or (state == "absent" and ato_process.group_members(owner["pid"]) == {}),
+             "CLEANUP_BLOCKED")
 
 
 def _verify_released(state, run, generation, fence):
@@ -406,7 +429,11 @@ class ExecutionService:
             _require(last["outcome"] != "cleanup_blocked", "CLEANUP_BLOCKED")
             _require(data.get("reason") not in {"REVIEWER_MUTATION_VIOLATION", "review_loop_exhausted",
                                                "repeated_blockers"}, "NOT_RESUMABLE")
-            _require(data.get("review_rounds", 0) < spec["reviewer"]["max_review_rounds"], "NOT_RESUMABLE")
+            settled = _last_settlement(self.store, task, run, receipts)
+            _require(settled.get("reason") not in {
+                "REVIEW_CHANGES_REQUIRED", "REVIEWER_MUTATION_VIOLATION", "review_loop_exhausted",
+                "repeated_blockers",
+            } and settled.get("review_rounds", 0) < spec["reviewer"]["max_review_rounds"], "NOT_RESUMABLE")
 
     @contextmanager
     def product_transaction(self, task_id):
@@ -552,7 +579,7 @@ class ExecutionService:
             raise TaskError("BUSY", task_id)
         return self.store.task_status(actor, task_id)
 
-    def _prior_admission(self, task, spec, binding, kind, state, kernel_stop, history):
+    def _prior_admission(self, task, spec, binding, kind, state, kernel_stop, history, *, stopped_recheck=False):
         local = self.hooks.local_acceptance(task)
         _require(local is None or not local[1], "NOT_RESUMABLE")
         run, receipts = history[-1]
@@ -600,7 +627,7 @@ class ExecutionService:
                              row.get("attempt_sequence", row["attempts"]) < limits["max_attempts"]
                              for row in child["tasks"].values()), "NOT_RESUMABLE")
         else:
-            _require(stop is None and phase == "settled" and bool(state["stages"])
+            _require((stop is None or stopped_recheck) and phase == "settled" and bool(state["stages"])
                      and (not state.get("active_run") or last["outcome"] == "needs_host"),
                      "NOT_RESUMABLE")
             if last["outcome"] == "needs_host":
@@ -628,8 +655,11 @@ class ExecutionService:
                 history = self.store._history(task)
                 current_run, current_receipts = history[-1]
                 reserved = not current_receipts and current_run["kind"] != "initial"
+                stopped_recheck = (reserved and current_run["kind"] == "recheck"
+                                   and kind in {"resume", "recheck"} and _stop(self.store, task) is not None)
                 if reserved:
-                    _require(current_run["kind"] == kind and current_run["generation"] == generation,
+                    _require((current_run["kind"] == kind or stopped_recheck)
+                             and current_run["generation"] == generation,
                              "RUN_UNSETTLED")
                 preceding = history[:-1] if reserved else history
                 previous, receipts = preceding[-1]
@@ -638,7 +668,14 @@ class ExecutionService:
                 # execution, even once the previous driver process has gone.
                 if known.get("phase") in _TERMINAL or not receipts:
                     _require(known["generation"] == generation, "RUN_UNSETTLED")
-                stop, handoff = self._prior_admission(task, spec, binding, kind, state, kernel_stop, preceding)
+                # A STOP between reservation and launch may retire a recheck
+                # reservation. Resume that checks-only work, without starting
+                # a Worker against a previously completed product.
+                if stopped_recheck:
+                    checks_only |= kind == "resume"
+                    kind = "recheck"
+                stop, handoff = self._prior_admission(task, spec, binding, kind, state, kernel_stop, preceding,
+                                                       stopped_recheck=stopped_recheck)
                 self.profile.verify(self.store, task, spec, work=kind != "recheck")
                 if spec["reviewer"] and not checks_only:
                     _require(spec["reviewer"]["session_mode"] != "require_resume", "UNSUPPORTED_CAPABILITY")
@@ -668,8 +705,13 @@ class ExecutionService:
             # Intent creation is fenced against an intervening STOP/handoff.
             reuse_initial = (kind == "resume" and not current_receipts
                              and current_run["kind"] == "initial" and stop is None)
+            if stopped_recheck:
+                task = _publish_receipt(self.store, current_run, "launch_failed", generation,
+                                        {"cleanup_verified": True, "reason": "STOPPED"}, "launch_failed",
+                                        validate=lambda latest: _require(latest["revision"] == task["revision"], "BUSY"))
+                reserved = False
             if kind != "initial" and not reserved and not reuse_initial:
-                if not history[-1][1]:
+                if not current_receipts and not stopped_recheck:
                     task = _publish_receipt(self.store, history[-1][0], "launch_failed", generation,
                                             {"cleanup_verified": True, "reason": "STOPPED"}, "launch_failed",
                                             validate=lambda latest: _require(latest["revision"] == task["revision"], "BUSY"))
@@ -721,8 +763,11 @@ class ExecutionService:
             os.close(write_end)
             write_end = None
             command = [runtime["python"], "-IB", runtime["entry"], "run-child", run["task_id"], run["run_id"]]
+            node = self.profile.node(self.store, _load_task(self.store, run["task_id"]))
+            tool_env = {"CTASK_NODE_BIN": str(node)} if node else {}
             return subprocess.Popen(command, cwd=_ENTRY.parent, env={
-                "PATH": os.defpath, "HOME": self.profile.worker_home, "LC_ALL": "C",
+                **tool_env, "PATH": hub_sandbox.tool_path(self.profile.worker_executable, node),
+                "HOME": self.profile.worker_home, "LC_ALL": "C",
                 "ATO_PRIVATE_PIPE_FD": str(read_end), "ATO_PRIVATE_ROOTS": canonical_json(_roots(self.store)).decode()},
                 pass_fds=(read_end, gate), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True, umask=0o077)
@@ -786,7 +831,7 @@ class _RunDriver:
     def __init__(self, store, run, launch, hooks, folder):
         self.store, self.run, self.launch, self.hooks = store, run, launch, hooks
         self.task_id = run["task_id"]
-        self.task, self.spec = store.load_task(self.task_id), store.load_spec(self.task_id)
+        self.task, self.spec = _load_task(store, self.task_id), store.load_spec(self.task_id)
         self.folder = folder
         self.profile = HostProfile.from_document(launch["profile"])
         self.host = CommandHost(self, self.profile, folder)
@@ -811,7 +856,7 @@ class _RunDriver:
         if run["predecessor_run_id"]:
             self.previous_run, old_receipts = store._run(self.task, run["predecessor_run_id"])
             self.previous_receipt = old_receipts[-1][1]
-            previous = _evidence(store, self.task_id, self.previous_receipt)
+            previous = _last_settlement(store, self.task, self.previous_run, old_receipts)
             self.review_rounds = previous.get("review_rounds", 0)
             self.fingerprints = previous.get("fingerprints", [])
             if previous.get("reason") == "REVIEW_CHANGES_REQUIRED":
@@ -982,11 +1027,12 @@ class _RunDriver:
         self._mark("running")
         self.guard()
         owner = self._workflow(for_work=True)
-        owner.execute(retry=retry, host_checks=host_handoff is not None, source=host_handoff)
-        # Workflow.execute sets its legacy handlers. Outside that call, use
-        # our own in-memory signal guard and the Task-level STOP journal.
-        signal.signal(signal.SIGTERM, self._handle_stop)
-        signal.signal(signal.SIGINT, self._handle_stop)
+        try:
+            owner.execute(retry=retry, host_checks=host_handoff is not None, source=host_handoff)
+        finally:
+            signal.signal(signal.SIGTERM, self._handle_stop)
+            signal.signal(signal.SIGINT, self._handle_stop)
+            self._record_kernel_stop()
         self.guard()
         state = owner.state
         if state["status"] == "cleanup_blocked":
@@ -999,6 +1045,34 @@ class _RunDriver:
                 self.reason = reason
             return state["status"] if state["status"] in {"needs_host", "waiting", "stopped"} else "blocked"
         return None
+
+    def _record_kernel_stop(self):
+        with _open_kernel_stop(self.task) as fd:
+            _require(_identity(os.fstat(fd)) == self.task["workflow"]["directory_identity"], "BINDING_CHANGED")
+            info = _existing(fd, "STOP")
+            if info is None or info.st_size != 0:
+                return
+            _regular(info, True, "STATE_CORRUPT")
+        for _ in range(30):
+            current = _load_task(self.store, self.task_id)
+            try:
+                with self.store._mutation(self.task_id, current["revision"]) as (fd, latest, _):
+                    journal = _raw_stop(fd, latest)
+                    if not journal or journal["epoch"] <= latest.get("stop_retired_epoch", 0):
+                        if journal:
+                            _save(fd, "STOP-" + str(journal["epoch"]) + ".json", journal)
+                        journal = dict(schema_version=1, task_id=self.task_id, run_id=self.run["run_id"],
+                                       epoch=latest["stop_epoch"] + 1, recorded_at=time.time())
+                        _save(fd, "STOP.json", journal)
+                    latest["stop_epoch"] = journal["epoch"]
+                    self.store._advance(fd, latest)
+                    _mirror_stop(latest, journal)
+                    return
+            except TaskError as exc:
+                if exc.code != "BUSY":
+                    raise
+                time.sleep(.01)
+        raise TaskError("BUSY")
 
     def _checks(self, owner, lease):
         self._mark("checking")
@@ -1033,19 +1107,27 @@ class _RunDriver:
             owner.persist()
             owner.event("workflow_finished", status=owner.state["status"])
 
-    def _snapshot_for_review(self):
+    def _snapshot_for_review(self, trusted_updates=None):
         # The tripwire includes ignored scratch and the whole kernel. An exact
         # mirror written by the trusted STOP path is the only exception.
-        record = _stop(self.store, self.store.load_task(self.task_id))
+        record = _stop(self.store, _load_task(self.store, self.task_id))
         mirror = Path(self.run["workflow_dir"]) / "STOP"
-        skip = None
-        if record:
-            with _open_kernel_stop(self.task) as fd:
-                if _existing(fd, "STOP") is not None and _read_json(fd, "STOP") == record:
-                    skip = mirror
-        return (hub_worktree.snapshot_integrity(self.run["worktree"], trusted_stop=skip,
-                    verified_shared=self.task["worktree"]["shared_link_identities"]),
-                ato_product.measure(self.task))
+        for _ in range(4):
+            self.lease.renew()
+            try:
+                snapshot = (hub_worktree.snapshot_integrity(
+                    self.run["worktree"], trusted_stop=mirror if record else None,
+                    stop_bytes=canonical_json(record) if record else None, trusted_updates=trusted_updates,
+                    verified_shared=self.task["worktree"]["shared_link_identities"]), ato_product.measure(self.task))
+            except FileNotFoundError:
+                snapshot = None
+            finally:
+                self.lease.renew()
+            latest = _stop(self.store, _load_task(self.store, self.task_id))
+            if latest == record and snapshot is not None:
+                return snapshot
+            record = latest
+        raise TaskError("BUSY")
 
     def _begin_review(self, generation):
         for _ in range(20):
@@ -1073,7 +1155,7 @@ class _RunDriver:
                 time.sleep(.01)
         raise TaskError("BUSY")
 
-    def _review(self, generation):
+    def _review(self, generation, owner):
         policy = self.spec["reviewer"]
         if self.review_rounds >= policy["max_review_rounds"]:
             self.reason = "review_loop_exhausted"
@@ -1084,7 +1166,10 @@ class _RunDriver:
         # Fresh one-shot adapters have no independently established idle
         # native session to adopt. Keep the frozen resume requirement explicit.
         _require(policy["session_mode"] != "require_resume", "UNSUPPORTED_CAPABILITY")
-        bundle = hub_worktree.diff_bundle(self.task["worktree"],
+        budget.poll(owner)
+        self.review_deadline = owner.deadline
+        before = self._snapshot_for_review()
+        bundle = hub_worktree.diff_bundle(self.task["worktree"], snapshot=before[0],
             verified_shared=self.task["worktree"]["shared_link_identities"])
         prompt = ("Perform a read-only technical review. Return only the structured review verdict. "
                   "Use the frozen scope and independent check evidence. Only blocker findings request repair.\n"
@@ -1092,8 +1177,44 @@ class _RunDriver:
                                         scope=self.spec["worker_contract"]["scope"], checklist=policy["checklist"],
                                         design_docs=self._design_context(policy), checks=self.checks,
                                         product_id=self.product["product_id"], diff=bundle)).decode())
-        request = HubTurnRequest(agent, Path(self.run["worktree"]), self.host.runtime(), prompt,
-            snapshot=self._snapshot_for_review, stop=self.host.stop, session_mode="fresh_only",
+        _require(len(prompt.encode()) <= 512 * 1024 and "\x00" not in prompt, "INVALID_REVIEW_PROMPT")
+        root = Path(self.run["worktree"])
+        budget_paths = (owner.dir / "budget.json", owner.dir / "events.jsonl")
+
+        def budget_state():
+            with _open_kernel_stop(self.task) as fd:
+                result = {}
+                for path in budget_paths:
+                    info = _existing(fd, path.name)
+                    result[str(path.relative_to(root))] = None if info is None else [
+                        "file", info.st_mode & 0o7777,
+                        _sha(_read_file(fd, path.name, limit=64 * 1024 * 1024, private=True, stable_path=True)),
+                    ]
+                return result
+
+        original_budget = current_budget = budget_state()
+        snapshots = []
+
+        def snapshot():
+            if not snapshots:
+                snapshots.append(before)
+            else:
+                updates = {path: (current_budget[path], original) for path, original in original_budget.items()
+                           if current_budget[path] != original}
+                snapshots.append(self._snapshot_for_review(updates))
+            return snapshots[-1]
+
+        def stop():
+            nonlocal current_budget
+            if time.time() >= min(getattr(owner, "_next_budget_poll", 0), owner.deadline):
+                _require(budget_state() == current_budget, "REVIEWER_MUTATION_VIOLATION")
+                budget.poll(owner)
+                self.review_deadline = owner.deadline
+                current_budget = budget_state()
+            return self.host.stop()
+
+        request = HubTurnRequest(agent, root, self.host.runtime(), prompt,
+            snapshot=snapshot, stop=stop, session_mode="fresh_only",
             timeout_seconds=policy["timeout_seconds"],
             protected_reads=(*self.profile.reviewer_read_fences(self.store, agent.kind),
                              Path(self.run["worktree"]) / ".codex/tasks"),
@@ -1102,12 +1223,13 @@ class _RunDriver:
             caps = adapter.capabilities()
             _require(caps.supported("read_only_cli") or caps.supported("os_sandbox_compatible"),
                      "UNSUPPORTED_CAPABILITY")
-        before = self._snapshot_for_review()
         try:
             result = adapter.run_turn(request)
         finally:
             try:
-                unchanged = before == self._snapshot_for_review()
+                if not snapshots:
+                    snapshot()
+                unchanged = before == (snapshots[-1] if len(snapshots) > 1 else snapshot())
             except (ValueError, OSError):
                 unchanged = False
             if not unchanged:
@@ -1122,7 +1244,7 @@ class _RunDriver:
         if result.status != "success":
             self.reason = result.code
             if result.code not in {"AUTH_BLOCKED", "EXECUTABLE_UNAVAILABLE", "VERSION_MISMATCH",
-                                   "REVIEWER_MUTATION_VIOLATION"}:
+                                   "REVIEWER_MUTATION_VIOLATION", "TIMEOUT", "INVALID_PROTOCOL"}:
                 self.host.unknown = True
             return None
         verdict = validate_review_verdict(result.output)
@@ -1201,9 +1323,10 @@ class _RunDriver:
                     self.reason = "CHECKS_REQUIRED"
                     return "blocked"
                 started = ato_core.now()
-                self.review_deadline = budget.deadline(owner.dir, owner.state, started=started)
+                owner._accounted_at = started
+                owner.deadline = budget.deadline(owner.dir, owner.state, started=started)
                 try:
-                    verdict = self._review(generation)
+                    verdict = self._review(generation, owner)
                 finally:
                     self.review_deadline = float("inf")
                     owner._accounted_at = started
@@ -1227,6 +1350,7 @@ class _RunDriver:
         signals = {sig: signal.signal(sig, self._handle_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
         command_token = runner.execution_host.set(self.host)
         process_token = hub_sandbox.process_host.set(self.host)
+        node_token = hub_sandbox.trusted_node.set(os.environ.get("CTASK_NODE_BIN"))
         try:
             try:
                 self._startup()
@@ -1239,10 +1363,13 @@ class _RunDriver:
                 if outcome not in {"stopped", "cleanup_blocked", "blocked"}:
                     self.host.unknown = True
             except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError) as exc:
-                code = exc.code if isinstance(exc, TaskError) else "RUN_UNSETTLED"
+                code = exc.code if isinstance(exc, TaskError) else str(exc)
+                if code not in _CONFIRMED_BLOCKERS and not isinstance(exc, TaskError):
+                    code = "RUN_UNSETTLED"
                 if self.admitted:
                     outcome = "blocked"
-                    self.host.unknown = True
+                    if code not in _CONFIRMED_BLOCKERS:
+                        self.host.unknown = True
                     self.reason = code
                 else:
                     outcome = "launch_failed"
@@ -1254,13 +1381,14 @@ class _RunDriver:
                 return
             self._settle(outcome)
         finally:
+            hub_sandbox.trusted_node.reset(node_token)
             hub_sandbox.process_host.reset(process_token)
             runner.execution_host.reset(command_token)
             for sig, handler in signals.items():
                 signal.signal(sig, handler)
 
     def _settle(self, outcome):
-        task = self.store.load_task(self.task_id)
+        task = _load_task(self.store, self.task_id)
         state, contract, generation, kernel_stop = self.store._kernel_facts(task)
         _, child_active, _ = self.store._stage_facts(task, contract, state)
         if (self.host.cleanup_blocked or self.host.processes or child_active or state.get("owner_pid")
@@ -1295,7 +1423,7 @@ def run_child(store, task_id, run_id, capability, hooks):
     _identifier(task_id, "task")
     _identifier(run_id, "run")
     _require(capability["task_id"] == task_id and capability["run_id"] == run_id, "FORBIDDEN")
-    task = store.load_task(task_id)
+    task = _load_task(store, task_id)
     run, receipts = _current(store, task)
     _require(run["run_id"] == run_id and receipts and receipts[-1][1]["phase"] == "launching",
              "RUN_UNSETTLED")

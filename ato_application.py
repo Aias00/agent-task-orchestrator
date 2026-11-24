@@ -1,5 +1,6 @@
 """Application composition for the public command groups."""
 import os
+import subprocess
 import sys
 from pathlib import Path
 import time
@@ -13,7 +14,7 @@ from ato_private import render_notice
 from ato_release_lib import ObserverProbe, Refused, mailbox
 from ato_seal import installed_boundary, runtime_seal
 from ato_task_store import (
-    TaskError, _existing, _git_worktrees, _git_text, _read_json, _require, _save,
+    TaskError, _existing, _git, _git_worktrees, _git_text, _read_json, _require, _save, _sha, _strict_json,
     normalize_repository,
 )
 import hub_worktree
@@ -254,28 +255,86 @@ def cleanup(host, proof, task_id):
             with _worker_lock(task):
                 store._verify_worktree(task)
                 status = store.task_status(proof, task_id)
-                _require(status["status"] in {"completed", "stopped"} and status["execution"]["verified"]
+                retained = intent and "product" in intent
+                _require((retained or status["status"] in {"completed", "stopped"}) and status["execution"]["verified"]
                          and status["execution"]["state"] == "idle", "CLEANUP_BLOCKED")
-                head = _git_text(path, "rev-parse", "--verify", "HEAD")
-                if status["status"] == "completed":
-                    manifest = ato_product.measure(task)
-                    _require(status["product"] and status["product"]["product_id"] == "product-" + ato_product._sha(
-                        ato_product.canonical_json(manifest)), "PRODUCT_CHANGED")
-                expected = dict(path=str(path), head=head, run_id=task["run_id"])
-
-                def admit_removal():
-                    _require(intent is None or intent == expected, "CLEANUP_BLOCKED")
-                    if intent is None:
-                        with execution.transaction(task_id, task["revision"], task["stop_epoch"],
-                                                   binding["revision"]) as (fd, _, _):
-                            _save(fd, "cleanup.json", expected, exclusive=True)
-
                 try:
-                    hub_worktree.cleanup(worktree, worker_locked=True, before_remove=admit_removal)
-                except (OSError, ValueError):
+                    _remove_task_worktree(store, execution, task, binding, status, branch, intent)
+                except TaskError:
+                    raise
+                except (OSError, ValueError, subprocess.SubprocessError):
                     raise TaskError("CLEANUP_BLOCKED", task_id) from None
         task = store.load_task(task_id)
         # The intent fences binding changes until the removal is published.
         with execution.transaction(task_id, task["revision"], task["stop_epoch"], binding["revision"]) as (fd, latest, _):
             latest["worktree_removed"] = True
     return host.interaction.task_status(proof, task_id)
+
+
+def _remove_task_worktree(store, execution, task, binding, status, branch, intent):
+    task_id = task["task_id"]
+    path = Path(task["worktree"]["path"])
+    head = _git_text(path, "rev-parse", "--verify", "HEAD")
+    expected = dict(path=str(path), head=head, run_id=task["run_id"])
+    retained = intent and "product" in intent
+    original = prepared = None
+    if not retained and status["status"] == "completed":
+        _require(status["product"] is not None, "PRODUCT_CHANGED")
+    if retained or (status["status"] == "completed" and intent is None):
+        product = intent["product"] if retained else status["product"]["product_id"].removeprefix("product-")
+        manifest = _strict_json(store.read_evidence(task_id, product), "PRODUCT_CHANGED")
+        _require(manifest["task_id"] == task_id and manifest["spec_sha256"] == task["spec_sha256"],
+                 "PRODUCT_CHANGED")
+        measured = ato_product.measure(task)
+        if retained and head == intent["head"]:
+            _require(ato_product.retained_entries(measured) == ato_product.retained_entries(manifest),
+                     "PRODUCT_CHANGED")
+        else:
+            _require(measured == manifest, "PRODUCT_CHANGED")
+        original = (store.read_evidence(task_id, intent["index"]) if retained else ato_product.index_bytes(task))
+        _require(_sha(original) == manifest["index_sha256"], "PRODUCT_CHANGED")
+        expected["head"], tree, prepared = ato_product.build_retention(
+            task, manifest, store._task_dir(task_id), existing=intent["head"] if retained else None)
+        _require(ato_product.measure(task) == measured, "PRODUCT_CHANGED")
+        expected.update(product=product, prior_head=manifest["head"], tree=tree,
+                        index=store.put_evidence(task_id, original))
+    if intent is not None and not retained and status["status"] == "completed":
+        # A prior release may have journaled a clean removal before exiting.
+        measured = ato_product.measure(task)
+        _require(status["product"]["product_id"] ==
+                 "product-" + _sha(ato_product.canonical_json(measured)), "PRODUCT_CHANGED")
+    _require(intent is None or intent == expected, "CLEANUP_BLOCKED")
+
+    def mutate():
+        current = store.load_task(task_id)
+        _require(current["run_id"] == task["run_id"] and not current["worktree_removed"], "CLEANUP_BLOCKED")
+        return execution.transaction(task_id, current["revision"], task["stop_epoch"], binding["revision"])
+
+    if intent is None:
+        with mutate() as (fd, _, _):
+            _save(fd, "cleanup.json", expected, exclusive=True)
+    try:
+        if prepared is not None:
+            if head != expected["head"]:
+                _git(path, "update-ref", branch, expected["head"], head)
+            if ato_product.index_bytes(task) != prepared:
+                ato_product.install_index(task, prepared)
+            _require(ato_product.retained_entries(ato_product.measure(task)) == ato_product.retained_entries(manifest),
+                     "PRODUCT_CHANGED")
+        hub_worktree.cleanup(task["worktree"], worker_locked=True)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if path.is_dir() and path.resolve() == path:
+            store._verify_worktree(task)
+            if prepared is not None:
+                current = _git_text(path, "rev-parse", "--verify", "HEAD")
+                _require(current in (expected["prior_head"], expected["head"]), "CLEANUP_BLOCKED")
+                _require(ato_product.index_bytes(task) in (prepared, original), "CLEANUP_BLOCKED")
+                if current != expected["prior_head"]:
+                    _git(path, "update-ref", branch, expected["prior_head"], current)
+                if ato_product.index_bytes(task) != original:
+                    ato_product.install_index(task, original)
+            with mutate() as (fd, _, _):
+                _require(_read_json(fd, "cleanup.json") == expected, "CLEANUP_BLOCKED")
+                os.unlink("cleanup.json", dir_fd=fd)
+                os.fsync(fd)
+        raise TaskError("CLEANUP_BLOCKED", task_id) from None

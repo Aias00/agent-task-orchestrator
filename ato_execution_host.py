@@ -3,16 +3,19 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+import pwd
 from tempfile import TemporaryDirectory
 import uuid
 
 import ato_core
 import ato_process
+from ato_release_lib import safe_record, verify_tools
 from ato_task_store import (TaskError, _absolute, _directory, _fields, _overlaps,
                             _read_file, _require, _save, _strict_json)
 import hub_contract
 import hub_sandbox
 from hub_registry import FACTORIES
+from pi_toolchain import locate, trusted_path
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,22 @@ class HostProfile:
         # AGY/Claude frontends authenticate inside the outer fence.
         return self.protected_reads(store, own_home=None if kind == "codex" else own_home)
 
+    def node(self, store, task):
+        roots = (store.home, Path(task["repo"]["root"]), Path(task["worktree"]["path"]))
+        manifest = Path(__file__).resolve().with_name(".release-manifest.json")
+        if not self.fixture:
+            if not manifest.is_file():
+                return None
+            record = json.loads(safe_record(manifest)[0]).get("tools", {}).get("node")
+            if record is None:
+                return None
+            verify_tools({"node": record})
+            return trusted_path(record["path"], forbidden=roots, executable=True)
+        try:
+            return locate("node", forbidden=roots)
+        except (OSError, ValueError):
+            return None
+
 
 @dataclass(frozen=True)
 class _FixtureReview:
@@ -167,7 +186,7 @@ class CommandHost:
     def stop(self):
         try:
             self.driver.guard()
-        except ato_core.Halt:
+        except (ato_core.Halt, TaskError):
             return True
         return False
 
@@ -186,10 +205,9 @@ class CommandHost:
         if self.profile.fixture:
             return argv
         q = lambda path: json.dumps(str(path))
-        from pi_toolchain import write_exclusions
-        rules = ["(version 1)", "(allow default)", "(deny file-write*)",
-                 '(allow file-write* (literal "/dev/null") (require-all (subpath ' + q(runtime)
-                 + ') ' + write_exclusions(runtime) + '))']
+        rules = ["(version 1)", "(allow default)", "(deny file-write*)", "(deny network*)",
+                 '(allow file-write* (literal "/dev/null") (subpath ' + q(runtime / "tmp")
+                 + ') (literal ' + q(runtime / "result.json") + ') (literal ' + q(runtime / "output.json") + '))']
         if write:
             rules.append("(allow file-write* (require-all (subpath " + q(root)
                          + ") (require-not (literal " + q(root) + "))))")
@@ -198,8 +216,11 @@ class CommandHost:
                      *(root / name for name in binding["shared_link_identities"]),
                      *(Path(binding["repo"]) / name for name in binding["shared_link_identities"])):
             rules.append("(deny file-write* (subpath " + q(path) + "))")
-        rules.extend(hub_sandbox.read_denials(runtime,
-            (*self.profile.protected_reads(self.driver.store), root / ".codex/tasks")))
+        credential_paths = (".ssh", ".aws", ".gnupg", ".claude", ".gemini", ".pi", ".config", "Library/Keychains")
+        homes = {Path(pwd.getpwuid(os.getuid()).pw_dir), Path.home()}
+        rules.extend(hub_sandbox.read_denials(runtime, (
+            *self.profile.protected_reads(self.driver.store), root / ".codex/tasks",
+            *(home / name for home in homes for name in credential_paths))))
         profile = runtime / "profile.sb"
         hub_sandbox.write_private(profile, "\n".join(rules))
         return ["/usr/bin/sandbox-exec", "-f", str(profile), *argv]
@@ -208,7 +229,7 @@ class CommandHost:
         def run(command):
             return hub_sandbox.run(command, workspace=owner.repo, runtime=runtime,
                 environment=environment, prompt=prompt, timeout=timeout,
-                stop=lambda: self._command_stop(owner), truncate=output is None)
+                stop=lambda: self._command_stop(owner), truncate=True)
 
         if self.profile.fixture:
             return run(args)
@@ -267,12 +288,13 @@ class CommandHost:
         if output is None and not self.profile.fixture:
             environment = hub_sandbox.clean_environment(tmp, tmp)
             environment["GIT_OPTIONAL_LOCKS"] = "0"
+        environment["PATH"] = hub_sandbox.tool_path(self.profile.worker_executable, hub_sandbox.trusted_node.get())
         result = self._invoke(args, owner, runtime, environment, input_text or "", timeout, output, write)
         with log.open("xb") as stream:
             stream.write(result.stdout)
             stream.write(result.stderr)
             if result.truncated:
-                stream.write(b"\n[Independent check output exceeded retained log capacity.]\n")
+                stream.write(b"\n[Command output exceeded retained log capacity.]\n")
             stream.flush()
             os.fsync(stream.fileno())
         if not result.cleaned or self.cleanup_blocked:

@@ -357,13 +357,13 @@ def _state_errors(method):
     return call
 
 
-def _git(repo, *args, allowed=(0,), env=None, pass_fds=()):
+def _git(repo, *args, allowed=(0,), env=None, pass_fds=(), input_data=None):
     git = shutil.which("git", path=os.defpath)
     _require(git is not None, "UNSUPPORTED_CAPABILITY")
     argv = [git, "-C", str(repo), "-c", "core.hooksPath=" + os.devnull,
             "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false",
             "-c", "protocol.allow=never", *args]
-    result = subprocess.run(argv, env=_GIT_ENV if env is None else env,
+    result = subprocess.run(argv, env=_GIT_ENV if env is None else env, input=input_data,
                             capture_output=True, timeout=30, pass_fds=pass_fds)
     if result.returncode not in allowed:
         raise ValueError("Git operation failed")

@@ -49,6 +49,8 @@ if mode == "linger":
     time.sleep(90)
 if mode == "unknown":
     sys.exit(17)
+if mode == "large-output":
+    print("x" * (2 * 1024 * 1024))
 if mode == "blocked":
     result = dict(status="blocked", summary="fixture blocker", next_step="repair fixture", blocker="blocked")
 else:
@@ -72,6 +74,8 @@ counter.write_text(str(round_number))
 mode = (home / "mode").read_text() if (home / "mode").exists() else "approve"
 if mode == "mutate":
     Path(".codex/tasks/fixture-mutation").write_text("tamper")
+if mode == "hold":
+    __import__("time").sleep(30)
 blockers = []
 if mode == "repair" and round_number == 1:
     blockers.append(dict(id="b1", severity="blocker", category="correctness",
@@ -199,6 +203,77 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual((Path(status["product"]["worktree"]) / "delivery.txt").read_text(), "implemented\n")
         self.assertFalse((self.repo / "delivery.txt").exists())
         self.assert_error("NOT_RESUMABLE", self.service.resume, self.actor, task)
+
+    def test_batch2_worker_json_event_flood_keeps_valid_output_and_settles(self):
+        task = self.create()
+        (self.worker_home / "mode").write_text("large-output")
+        result = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["run_history"][-1]["phase"], "settled")
+
+    def test_batch2_failed_launch_preserves_previous_review_round_accounting(self):
+        task = self.create(reviewer=dict(agent=dict(kind="codex"), max_review_rounds=1))
+        first = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(first["status"], "completed", first)
+        with patch.object(self.service, "_spawn_child", side_effect=FileNotFoundError):
+            self.assert_error("LAUNCH_FAILED", self.service.recheck, self.actor, task)
+        result = self.service.resume(self.actor, task, foreground=True)
+        self.assertEqual(result["reason"], "review_loop_exhausted", result)
+        self.assertEqual((self.reviewer_home / "round").read_text(), "1")
+
+    def test_batch2_oversized_review_diff_settles_with_exact_reason(self):
+        task = self.create(reviewer=dict(agent=dict(kind="codex"), max_review_rounds=2))
+        current = self.store.load_task(task)
+        (Path(current["worktree"]["path"]) / "large.txt").write_bytes(b"x" * (140 * 1024))
+        result = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(result["run_history"][-1]["phase"], "settled", result)
+        self.assertEqual(result["reason"], "REVIEW_DIFF_BOUND_EXCEEDED")
+
+    def test_batch2_darwin_reaped_pid_reuse_does_not_inspect_new_group(self):
+        with patch.object(ato_process, "disposition", return_value="reused"), \
+                patch.object(ato_process, "group_members", side_effect=AssertionError("unrelated group")):
+            execution._verify_exit({"pid": 3241, "birth": "old-identity"})
+
+    def test_batch2_stop_during_review_does_not_look_like_reviewer_mutation(self):
+        task = self.create(reviewer=dict(agent=dict(kind="codex"), max_review_rounds=3))
+        (self.reviewer_home / "mode").write_text("hold")
+        self.service.start(self.actor, task)
+        self.wait_for(lambda: (self.reviewer_home / "round").exists(), bool)
+        self.service.request_stop(self.actor, task)
+        status = self.wait_for(lambda: self.status(task), lambda row: row["status"] == "stopped")
+        self.assertEqual(status["reason"], "STOPPED")
+        (self.reviewer_home / "mode").unlink()
+        self.assertEqual(self.service.resume(self.actor, task, foreground=True)["status"], "completed")
+
+    def test_batch2_stopped_reserved_recheck_can_be_retried(self):
+        task = self.create()
+        completed = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(completed["status"], "completed")
+        current = self.store.load_task(task)
+        run, receipts = self.store._history(current)[-1]
+        reserved = execution.RunIntent(execution.new_id("run"), run["run_id"], "recheck",
+            current["run_count"] + 1, "explicit_recheck", self.store.runtime_seal,
+            tuple(receipts[-1][1]["generation"]))
+        self.store.append_run(task, reserved, current["revision"])
+        self.assertEqual(self.service.request_stop(self.actor, task)["status"], "stopped")
+        result = self.service.recheck(self.actor, task, foreground=True)
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["run_history"][-2]["phase"], "launch_failed")
+        self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work"])
+
+    def test_batch2_signal_stop_records_epoch_and_remains_resumable(self):
+        task = self.create()
+        (self.worker_home / "mode").write_text("linger")
+        self.service.start(self.actor, task)
+        self.wait_for(lambda: (self.worker_home / "worker.json").exists(), bool)
+        self.processes[-1].send_signal(signal.SIGTERM)
+        status = self.wait_for(lambda: self.status(task), lambda row: row["status"] == "stopped")
+        self.assertEqual(status["reason"], "STOPPED")
+        current = self.store.load_task(task)
+        mirror = Path(current["workflow"]["directory"]) / "STOP"
+        self.assertEqual(json.loads(mirror.read_text())["epoch"], current["stop_epoch"])
+        (self.worker_home / "mode").unlink()
+        self.assertEqual(self.service.resume(self.actor, task, foreground=True)["status"], "completed")
 
     def test_two_simultaneous_launches_share_the_repository_gate(self):
         first, second = self.create(), self.create()

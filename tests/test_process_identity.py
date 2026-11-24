@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import ato_core
+import ato_process
 import ato_release_lib
 import hub_sandbox
 import pi_session_coordinator
@@ -30,6 +31,23 @@ def start_identity(pid, environment):
 
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_batch2_real_macos_zombie_is_absent_before_wait(self):
+        child = subprocess.Popen(["/bin/sh", "-c", "sleep .25"])
+        self.addCleanup(child.wait, 5)
+        birth = ato_process.identity(child.pid)
+        self.assertIsNotNone(birth)
+        until = time.monotonic() + 3
+        while time.monotonic() < until:
+            state = subprocess.check_output(["/bin/ps", "-p", str(child.pid), "-o", "stat="],
+                                            env=UTC_ENV, text=True).strip()
+            if state.startswith("Z"):
+                break
+            time.sleep(.03)
+        self.assertTrue(state.startswith("Z"), state)
+        self.assertIsNone(child.returncode)
+        with patch.object(ato_process, "_observe", side_effect=ProcessLookupError):
+            self.assertEqual(ato_process.disposition(child.pid, birth), "absent")
+
     def test_real_current_pid_has_one_UTC_identity_across_timezones_and_locales(self):
         pid = os.getpid()
         expected = start_identity(pid, UTC_ENV)
