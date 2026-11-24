@@ -57,7 +57,7 @@ class Application:
             principal = host.store._principal(proof)
             _, task, _, _, _ = api._locate(principal, args.request_id)
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
-        elif operation in {"stop", "resume", "accept"} or subcommand in {"cleanup", "handoff", "reviewer", "recheck", "ask"}:
+        elif operation in {"stop", "resume"} or subcommand in {"cleanup", "handoff", "reviewer", "recheck", "ask"}:
             principal = host.store._principal(proof)
             _require(host.store._visible_scope(args.task_id, principal) is not None, "NOT_FOUND")
             task = host.store.load_task(args.task_id)
@@ -84,7 +84,7 @@ class Application:
         if operation == "answer":
             return api.record_answer(proof, args.request_id, args.answer, None)
         if operation == "accept":
-            return api.accept_product(proof, args.task_id, args.evidence)
+            return api.accept_product(proof, args.task_id, getattr(args, "evidence", None))
         if operation == "project":
             if subcommand == "trace":
                 host.execution._actor(proof, args.task_id, "trace")

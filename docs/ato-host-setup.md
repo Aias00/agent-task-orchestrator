@@ -135,5 +135,7 @@ The opt-in applies when a Task without a recorded submission session first
 needs human acceptance after binding. Tasks already waiting when the
 repository was first bound retain their existing state. Consult
 `ato status TASK_ID` for the product, checks, and delivery state. An unknown
-delivery keeps the original receipt. Both routes grant delivery only. Human
-acceptance still requires the actual user and the exact acceptance evidence.
+delivery keeps the original receipt. Both routes grant delivery only.
+Once the actual user approves, the local state owner can record the decision
+with `ato accept TASK_ID` and optionally attach evidence. A scoped user
+uses the exact product evidence for their acceptance.

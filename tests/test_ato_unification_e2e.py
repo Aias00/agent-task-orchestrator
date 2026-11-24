@@ -337,11 +337,66 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(list(self.proofs.iterdir()), [])
         self.assertEqual(list(self.store.root.glob("host/credential-*.json")), [])
 
-        evidence = self.acceptance(result, "local fixture acceptance")
-        self.cli("accept", task, "--evidence", evidence, error=(3, "AUTH_REQUIRED"))
-        user = self.host_setup("scope", task, "--role", "user")["proof"]
-        self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
+        evidence = write(self.root, "local acceptance.txt", "Explicit local fixture acceptance")
+        accepted = self.cli("accept", task, "--evidence", evidence)
+        self.assertEqual(accepted["status"], "completed")
+        self.assertEqual(accepted["acceptance"]["method"], "local_owner")
+        self.assertEqual(accepted["checks"], result["checks"])
+        receipt = json.loads(self.store._read_blob(task, accepted["acceptance"]["receipt_id"]))
+        self.assertEqual(self.store._read_blob(task, receipt["attachment_sha256"]), evidence.read_bytes())
+        self.assertEqual(self.cli("accept", task)["acceptance"], accepted["acceptance"])
+        self.cli("resume", task, error=(4, "NOT_RESUMABLE"))
         self.assertEqual(self.cli("status", task)["status"], "completed")
+        self.assertEqual(list(self.proofs.iterdir()), [])
+
+    def test_local_acceptance_records_decision_before_checks_and_across_releases(self):
+        self.install()
+        self.profile(mode="host", via_setup=True)
+        repo, spec, _ = self.task_spec("local acceptance across releases", host_handoff=True)
+        failed = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", error=(4, "RUN_UNSETTLED"))
+        task = failed["task_id"]
+        before = self.cli("status", task)
+        self.assertEqual(before["status"], "needs_host")
+        self.assertIsNone(before["product"])
+        self.assertTrue(before["execution"]["verified"])
+        self.assertEqual(before["execution"]["state"], "idle")
+
+        replacement = snapshot(self.root / "next acceptance source", executable=True, commit="d" * 40)
+        self.addCleanup(unseal, replacement)
+        paths = release.scoped_paths(self.bin, self.store.home, self.store.native_home)
+        release.activate(replacement, "d" * 40, paths, self.root / "local acceptance cutover")
+        self.assertEqual(self.cli("status", task)["reason"], "RUNTIME_MISMATCH")
+
+        accepted = self.cli("accept", task)
+        self.assertEqual(accepted["status"], "completed")
+        self.assertIsNone(accepted["product"])
+        self.assertEqual(accepted["acceptance"]["method"], "local_owner")
+        self.assertEqual(accepted["checks"], before["checks"])
+        self.assertEqual(accepted["execution"], before["execution"])
+        self.assertEqual(accepted["run_history"], before["run_history"])
+        self.assertEqual(self.cli("status", task)["acceptance"], accepted["acceptance"])
+        self.assertEqual(self.cli("list")["tasks"][0]["status"], "completed")
+
+    def test_local_acceptance_keeps_active_execution_visible(self):
+        self.install()
+        self.profile(mode="hold")
+        repo, spec, _ = self.task_spec("local acceptance during execution")
+        task = self.cli("run", "--repo", repo, "--spec", spec)["task_id"]
+        self.running[task] = None
+        before = self.wait_for(lambda: self.cli("status", task),
+                               lambda status: status["execution"]["state"] == "active")
+        accepted = self.cli("accept", task)
+        self.assertEqual(accepted["acceptance"]["method"], "local_owner")
+        self.assertEqual(accepted["execution"]["pid"], before["execution"]["pid"])
+        self.assertEqual(accepted["execution"]["state"], "active")
+        self.assertEqual(accepted["status"], "running")
+        self.cli("stop", task)
+        finished = self.wait_for(lambda: self.cli("status", task), lambda status: status["status"] == "completed")
+        self.assertEqual(finished["execution"]["state"], "idle")
+        self.assertTrue(finished["execution"]["stop_requested"])
+        self.assertEqual(finished["run_history"][-1]["outcome"], "stopped")
+        self.assertEqual(finished["acceptance"], accepted["acceptance"])
+        self.running.pop(task)
 
     def acceptance_mailbox(self, *projects):
         self.registry("observation", dict(enabled=True, source_ref="fixture-observation", transport_kinds=[]))
@@ -437,8 +492,7 @@ class InstalledATO(unittest.TestCase):
         for task in (historical, unrelated):
             self.assertEqual(self.cli("status", task["task_id"])["delivery"], [])
         self.assertTrue((self.store.root / "host" / (ACCEPTANCE_NOTIFICATIONS + ".json")).is_file())
-        decision = self.acceptance(current, "fixture still requires the actual user")
-        self.cli("accept", current["task_id"], "--evidence", decision, error=(3, "AUTH_REQUIRED"))
+        self.assertIsNone(observed["acceptance"]["receipt_id"])
 
     def test_local_tasks_from_two_sessions_route_to_their_own_verified_origin(self):
         self.install()
@@ -518,6 +572,8 @@ class InstalledATO(unittest.TestCase):
         self.cli("answer", request, "--answer", "Ready to review", actor=user)
         self.assertEqual(self.cli("inbox", actor=user)["items"][0]["kind"], "manual_acceptance")
         evidence = self.acceptance(work, "enrollment acceptance")
+        self.cli("accept", task, "--evidence", evidence, error=(3, "NOT_FOUND"))
+        self.cli("accept", task, actor=user, error=(2, "USAGE"))
         self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
 
     def test_installed_host_handoff_requires_actual_attestation_and_continues_checks(self):

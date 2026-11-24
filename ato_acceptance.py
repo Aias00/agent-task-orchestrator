@@ -31,6 +31,7 @@ import transport
 _PRODUCT = re.compile(r"product-[0-9a-f]{64}")
 _MAILBOX_ID = re.compile(r"msg-[0-9a-f]{32}")
 _MANUAL = "manual_acceptance"
+_LOCAL_ACCEPTANCE = "local-acceptance.json"
 _ASK_KINDS = {"decision", "missing_information", "handler_assignment", "permission", "host_handoff"}
 _GRANT_KINDS = {"permission", "host_handoff"}
 _ROLES = agent_registry.ActorRole
@@ -127,7 +128,7 @@ class InteractionService:
 
     def __init__(self, store, execution, *, authorize=None, verify_event=None,
                  verify_continuation=None, route=None, mailbox=None, render_notice=None,
-                 local_acceptance_route=None, clock=time.time):
+                 local_acceptance_route=None, authorize_local_acceptance=None, clock=time.time):
         self.store = store
         self.execution = execution
         self.authorize = authorize
@@ -135,6 +136,7 @@ class InteractionService:
         self.verify_continuation = verify_continuation
         self.route = route
         self.local_acceptance_route = local_acceptance_route
+        self.authorize_local_acceptance = authorize_local_acceptance
         self.mailbox = mailbox
         self.render_notice = render_notice
         self.dispatch_envelope = None
@@ -143,7 +145,8 @@ class InteractionService:
 
     def execution_hooks(self):
         """Compose with the existing binding reader in the parent and child."""
-        return replace(self.execution.hooks, acceptance=self.acceptance, pending=self.pending,
+        return replace(self.execution.hooks, acceptance=self.acceptance, local_acceptance=self.local_acceptance,
+                       pending=self.pending,
                        decision_status=self.decision_status, decision_barrier=self.decision_barrier,
                        claim_continuation=self.claim_continuation, host_handoff=self.host_handoff)
 
@@ -629,14 +632,57 @@ class InteractionService:
     def _manual_criteria(spec):
         return sorted(row["id"] for row in spec["worker_contract"]["acceptance"] if row["kind"] == "manual")
 
+    def local_acceptance(self, task):
+        """Project the local owner's explicit decision independently of machine checks."""
+        with self._records(task["task_id"]) as fd:
+            if fd is None or _existing(fd, _LOCAL_ACCEPTANCE) is None:
+                return None
+            pointer = _read_json(fd, _LOCAL_ACCEPTANCE)
+        _fields(pointer, ("receipt_id",))
+        ref = pointer["receipt_id"]
+        record = self._receipt(task["task_id"], ref, "local_acceptance")
+        _fields(record, ("schema_version", "task_id", "kind", "recorded_at", "actor_ref",
+                         "spec_sha256", "criteria", "attachment_sha256"))
+        _require(record["spec_sha256"] == task["spec_sha256"]
+                 and record["actor_ref"] == task["authorization_ref"]
+                 and re.fullmatch(r"local-owner:[0-9]+", record["actor_ref"])
+                 and _time(record["recorded_at"]) and isinstance(record["criteria"], list)
+                 and all(_matches(_ID, criterion) for criterion in record["criteria"])
+                 and (record["attachment_sha256"] is None or _matches(_SHA, record["attachment_sha256"])))
+        return dict(disposition="recorded", criteria=record["criteria"], receipt_id=ref, method="local_owner")
+
+    def _accept_local(self, actor, principal, scope, task, spec, evidence):
+        task_id = task["task_id"]
+        if self.local_acceptance(task) is None:
+            attachment = None
+            if evidence is not None:
+                _, data = read_input_file(evidence, code="INVALID_EVIDENCE")
+                attachment = self.store.put_evidence(task_id, data)
+            ref = self._retain(task_id, "local_acceptance", actor_ref=scope.authorization_ref,
+                               spec_sha256=scope.spec_sha256, criteria=self._manual_criteria(spec),
+                               attachment_sha256=attachment)
+            with self.store._mutation(task_id, task["revision"]) as (task_fd, latest, frozen):
+                binding = _binding(self.execution.hooks, latest, frozen)
+                _require(self.authorize_local_acceptance(principal, scope, binding), "FORBIDDEN")
+                with self._records(task_id, create=True, task_fd=task_fd) as fd:
+                    if _existing(fd, _LOCAL_ACCEPTANCE) is None:
+                        _save(fd, _LOCAL_ACCEPTANCE, dict(receipt_id=ref), exclusive=True)
+                        self.store._advance(task_fd, latest)
+        return self.task_status(actor, task_id)
+
     @_state_errors
     @_retry_busy
-    def accept_product(self, actor, task_id, decision, *, source_event=None):
-        """Commit the user's exact v1 evidence file and return current TaskStatus."""
+    def accept_product(self, actor, task_id, decision=None, *, source_event=None):
+        """Record a local decision or commit exact evidence under a scoped grant."""
         _identifier(task_id, "task")
         principal = self.store._principal(actor)
         scope = self._scope(task_id, principal)
         task, spec, binding = self._task(task_id)
+        if (source_event is None and self.authorize_local_acceptance is not None
+                and self.authorize_local_acceptance(principal, scope, binding)):
+            return self._accept_local(actor, principal, scope, task, spec, decision)
+        _require(task["creation"]["runtime_seal"] == self.store.runtime_seal, "RUNTIME_MISMATCH")
+        _require(decision is not None, "USAGE")
         generation, _ = self._kernel(task)
         if task["worktree_removed"]:
             generation = self._removed_generation(task)

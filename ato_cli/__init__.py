@@ -49,7 +49,7 @@ def build_parser():
     command(daily, "resume", "Resume an eligible task.", "task_id")
     command(daily, "inbox", "Read pending human decisions.")
     option(command(daily, "answer", "Record a user's answer.", "request_id"), "answer", required=True)
-    option(command(daily, "accept", "Accept an exact product version.", "task_id"), "evidence", required=True)
+    option(command(daily, "accept", "Record manual acceptance of a task.", "task_id"), "evidence")
 
     project = command(daily, "project", "Repository and worktree operations.")
     project = project.add_subparsers(dest="subcommand", required=True)

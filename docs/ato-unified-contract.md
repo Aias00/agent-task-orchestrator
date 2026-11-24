@@ -29,7 +29,7 @@ There is no human/JSON mode switch. Shell scripts consume named fields.
 | `ato resume TASK_ID` | Explicitly admits execution under the Task's current controller authority and recovery checks. When repository contention left an untouched initial reservation, resumes the same initial Run. A proved retryable prior execution requires a successor Run. Returns `TaskStatus` with the same background admission and startup proof as run. |
 | `ato inbox` | `{items: [InboxItem]}` containing authorized pending items, in creation order with ID as tie breaker. A read has no presentation or delivery effect. |
 | `ato answer REQUEST_ID --answer TEXT` | Records the actual user's answer to the exact pending request. Returns `{request_id, task_id, state, delivery, recorded_at}`, where `delivery` reports the canonical disposition. The execution owner consumes a valid decision separately. |
-| `ato accept TASK_ID --evidence FILE` | Records the current product's explicit human acceptance after independent checks and authority verification. Returns `TaskStatus` with the acceptance receipt reference. Repetition of the same decision returns that receipt. |
+| `ato accept TASK_ID [--evidence FILE]` | Records the local state owner's explicit acceptance of their Task. A scoped actor supplies exact product evidence with `--evidence`. Returns `TaskStatus` with the acceptance receipt reference. |
 
 The following is the v1 management surface. Maintenance, transport and
 release machinery outside this table is host code.
@@ -208,7 +208,7 @@ metadata only.
 
 The owner of the private ATO state can use the sealed local CLI to submit and
 manage local Tasks without a proof file. This applies to `run`, `list`,
-`status`, `stop`, `resume`, `project trace`, `project recheck`,
+`status`, `stop`, `resume`, `accept`, `project trace`, `project recheck`,
 `project cleanup` and `agent binding`. Local control follows the Task's
 current controller binding. Sessions under the same OS account share this
 local controller identity. Each Task records the submitting local account,
@@ -252,8 +252,8 @@ A project key is never substituted for a verified native/endpoint identity.
 
 | Principal | Authorized operations with the matching scope |
 | --- | --- |
-| Local state owner | Submit, observe and control local Tasks under the current controller binding. |
-| Actual user | Submit/observe or stop/resume when granted. Answer and accept as the always-distinct authenticated `user` actor of the bound interaction endpoint, with actual decision provenance. Authorize a binding transfer or changes to eligible review configuration through the audited host. |
+| Local state owner | Submit, observe and control local Tasks under the current controller binding. Explicitly accept a Task with the local controller and interaction binding. |
+| Scoped user | Submit/observe or stop/resume when granted. Answer and accept as the authenticated `user` actor of the bound interaction endpoint, with actual decision provenance. Authorize a binding transfer or changes to eligible review configuration through the audited host. |
 | Scoped controller / origin | Coordinate and observe its Tasks. Submit, stop, resume or request checks within an existing grant. Create a real user request or report a pending host handoff. Propose/record an already authorized handoff. Never infer or register a user's answer or acceptance under this role. |
 | Scoped interaction endpoint | Receive/read scoped pending human items and record actual presentation. Route the separately authenticated user's action to the service. It cannot self-elect as controller, create execution rights, issue itself credentials or speak as the user. |
 | Actual Run owner / host | Under the current kernel lease and exact generation, launch in-scope work, record technical evidence, consume the matched authorized answer and execute authorized host checks. Only the owning host renews, signals or releases its process/lease. This role carries no authority to accept a product. |
@@ -450,7 +450,7 @@ that Run.
 | `waiting` / `needs_input` / `needs_host` | Bounded external wait, an actual pending human request, or an authorized frozen host handoff respectively. Display current Run activity separately. A response, process exit or handoff read does not mean execution resumed. |
 | `blocked` | Verified failure, policy/limit barrier, unavailable required checks/review, or invalidated product/evidence. Keep existing counts and report specific reason. No automatic resume from an unknown state or a Reviewer mutation. |
 | `needs_acceptance` | Current product and independent checks verified, required technical review passed, and execution/cleanup settled. Manual approval is outstanding. An H1 approve or Workflow check pass reaches at most this state. |
-| `completed` | Current product/check identity and verified current human acceptance receipt, with no safety barrier. Terminal for execution and duplicate-safe for the same decision. A mismatch invalidates the completion projection and leaves historical receipts intact. |
+| `completed` | Verified idle execution with a local owner acceptance, or a current product/check identity and matching scoped acceptance receipt. A product mismatch invalidates the scoped completion projection and leaves historical receipts intact. |
 
 Explicit worktree cleanup is a lifecycle field
 `worktree_state: "present" | "removed"` in status, separate from acceptance
@@ -661,8 +661,16 @@ fence and checks the specific answer and its canonical delivery before
 advancing a Run. A pending answer whose relevant effect is unknown remains
 a recovery barrier.
 
-Manual acceptance input is a strict JSON object with exactly the fields
-below. `criteria` contains all frozen manual criterion IDs, once each.
+The local state owner records explicit acceptance with `ato accept TASK_ID`.
+An optional `--evidence FILE` retains the supplied bytes as a private
+attachment. The receipt records `acceptance.method=local_owner` and applies
+to the Task, including one pinned to an earlier runtime. Repeated acceptance
+returns the original receipt. Checks, review, Run history and execution
+state continue to report their measured results. The Task projects as
+`completed` when execution is verified idle.
+
+Scoped acceptance requires `--evidence FILE` with a strict JSON object
+with exactly the fields below. `criteria` contains all frozen manual criterion IDs, once each.
 `source` identifies the actual user instruction/event and `note` is
 their decision text. Both are nonblank and bounded to 8 KiB. When a trusted
 event record exists, verify that evidence against it. The user actor must
@@ -878,7 +886,7 @@ on authorized submission in the new namespace.
 | `unsupervise` | Internal. An authorized host disables recovery policy and invalidates claims. Already attempted or unknown deliveries remain recorded and stale actions are rejected. |
 | `validate` | Replaced by `ato project validate --repo PATH --spec FILE`. A standalone input maps to an explicit stage in the new versioned spec. |
 | `watch` | Internal. Register observation at successful new Task admission with verified binding, or record registration failure. No new shell command to adopt a legacy path. |
-| `workflow-close` | Replaced for successful delivery by `ato accept` with matching independent checks and version. The historical close-with-residuals projection remains historical and cannot be used to bypass failed checks in v1. |
+| `workflow-close` | History stays in the Workflow ledger. Use `ato accept` to record a local owner's explicit acceptance or a scoped acceptance of a checked product. |
 | `workflow-create` | Replaced by `ato run`. The host calls `workflow.create` under the generated worktree and binds its private ID. Origin and recovery configuration come from verified host setup, not public flags. |
 | `workflow-link` | Internal observation metadata. A same-Task Run link is automatic. For a separately authorized successor, preserve same-repo, pinned spec/evidence, complete acceptance mapping and no authority expansion. Never report successor completion as v1 acceptance of the old product. |
 | `workflow-validate` | Replaced by `ato project validate`. Reuse Workflow validation after strict versioned input normalization. |

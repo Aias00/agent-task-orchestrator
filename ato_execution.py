@@ -45,6 +45,7 @@ class ExecutionHooks:
     binding: object = _initial_binding
     decision_barrier: object = lambda task, binding, operation: None
     acceptance: object = lambda task, product: None
+    local_acceptance: object = lambda task: None
     pending: object = lambda task, binding: ()
     decision_status: object = lambda task, binding: None
     host_handoff: object = lambda task, binding, run, generation: None
@@ -422,6 +423,15 @@ class ExecutionService:
             yield snapshot
 
     def _project(self, task, spec, history, generation, status):
+        self._project_execution(task, spec, history, generation, status)
+        accepted = self.hooks.local_acceptance(task)
+        if accepted is not None:
+            status["acceptance"] = accepted
+            execution = status["execution"]
+            if execution["state"] == "idle" and execution["verified"]:
+                status.update(status="completed", reason=None, next_step=None)
+
+    def _project_execution(self, task, spec, history, generation, status):
         if not history:
             return
         journal = _stop(self.store, task)
@@ -506,6 +516,10 @@ class ExecutionService:
         for _ in range(30):
             task, spec, binding = self._actor(actor, task_id, "stop")
             _require(task["creation"]["phase"] == "ready", "NOT_RESUMABLE")
+            if self.hooks.local_acceptance(task) is not None:
+                status = self.store.task_status(actor, task_id)
+                if status["status"] == "completed":
+                    return status
             _, receipts = _current(self.store, task)
             if receipts and receipts[-1][1]["outcome"] == "needs_acceptance":
                 product = _evidence(self.store, task_id, receipts[-1][1]).get("product")
@@ -539,6 +553,7 @@ class ExecutionService:
         raise TaskError("BUSY", task_id)
 
     def _prior_admission(self, task, spec, binding, kind, state, kernel_stop, history):
+        _require(self.hooks.local_acceptance(task) is None, "NOT_RESUMABLE")
         run, receipts = history[-1]
         last = receipts[-1][1] if receipts else None
         phase = last["phase"] if last else "reserved"

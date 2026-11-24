@@ -67,7 +67,7 @@ class Host:
 
     def caller(self, operation):
         """Use the sealed CLI's local account for routine local operations."""
-        if operation not in _LOCAL_OPERATIONS or "ATO_ACTOR_FILE" in os.environ:
+        if operation not in _LOCAL_OPERATIONS | {"accept"} or "ATO_ACTOR_FILE" in os.environ:
             return self.actor_file()
         _require(_matches(_SHA, self.store.runtime_seal) and os.getuid() == os.geteuid(), "AUTH_REQUIRED")
         try:
@@ -92,6 +92,14 @@ class Host:
         if scope.authorization_ref == self._local_authorization():
             return self._local_binding(scope.repo_key, scope.spec_sha256)
         return None
+
+    def _owns_local_binding(self, scope, binding):
+        local = self._local_scope_binding(scope)
+        return local is not None and (binding["controller_ref"], binding["interaction_ref"]) == (
+            local.controller_ref, local.interaction_ref)
+
+    def authorize_local_acceptance(self, actor, scope, binding):
+        return actor is self._local_owner and self._owns_local_binding(scope, binding)
 
     def actor_file(self):
         raw = os.environ.get("ATO_ACTOR_FILE")
@@ -434,10 +442,7 @@ class Host:
         return None
 
     def local_acceptance_route(self, scope, binding, item):
-        local = self._local_scope_binding(scope)
-        if (local is None or binding["revision"] != 1
-                or (binding["controller_ref"], binding["interaction_ref"])
-                != (local.controller_ref, local.interaction_ref)):
+        if binding["revision"] != 1 or not self._owns_local_binding(scope, binding):
             return None
         if not self.acceptance_queue_binary():
             return None
@@ -509,7 +514,8 @@ class Host:
             hooks=ExecutionHooks(binding=partial(read_binding, self.store)))
         self.interaction = InteractionService(self.store, self.execution, authorize=self.authorize_interaction,
             verify_event=self.verify_event, verify_continuation=self.verify_continuation, route=self.route,
-            mailbox=self.mailbox, render_notice=render_notice, local_acceptance_route=self.local_acceptance_route)
+            mailbox=self.mailbox, render_notice=render_notice, local_acceptance_route=self.local_acceptance_route,
+            authorize_local_acceptance=self.authorize_local_acceptance)
         self.execution.hooks = self.interaction.execution_hooks()
         self.binding = BindingService(self.execution, actor_grant=self.actor_grant,
             endpoint_grant=self.endpoint_grant, verify_decision=self.verify_binding,

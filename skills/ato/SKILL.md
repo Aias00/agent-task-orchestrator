@@ -17,9 +17,10 @@ operations.
 3. Use `ato inbox` from the verified interaction endpoint. Relay the actual
    request to the user. The enrolled user records their decision using
    `ato answer REQUEST_ID --answer TEXT`.
-4. After the independent checks and any configured technical review pass, show
-   the user the exact product and check evidence. The enrolled user records
-   acceptance using `ato accept TASK_ID --evidence FILE`.
+4. Show the available product and check results. After explicit user approval,
+   record acceptance of a local task with `ato accept TASK_ID`. The local
+   state owner can attach an optional `--evidence FILE`. Use exact product
+   evidence with `ato accept TASK_ID --evidence FILE` for a scoped task.
 5. Use `ato stop TASK_ID` for an authorized STOP. Verify cleanup in status.
    Use `ato resume TASK_ID` only for an explicit authorized continuation.
    An unresolved delivery or execution result requires reconciliation before
