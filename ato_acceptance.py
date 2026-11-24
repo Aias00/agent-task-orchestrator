@@ -15,6 +15,7 @@ import agent_registry
 import ato_config
 from ato_execution import HostHandoffProof, _active_proof, _binding, _raw_stop
 import ato_process
+from ato_private import render_local_acceptance
 from ato_task_store import (
     TaskError, _ID, _REF, _SHA, _directory, _existing, _fields, _generation_valid,
     _identifier, _matches, _positive, _read_json, _regular, _require, _save, _sha,
@@ -93,6 +94,7 @@ class MailboxRoute:
     source_ref: str
     owner_token: str | None = None
     transports: Mapping[str, transport.ManagedTransport] | None = None
+    local_acceptance: bool = False
 
 
 def _retry_busy(method):
@@ -124,13 +126,15 @@ class InteractionService:
     """
 
     def __init__(self, store, execution, *, authorize=None, verify_event=None,
-                 verify_continuation=None, route=None, mailbox=None, render_notice=None, clock=time.time):
+                 verify_continuation=None, route=None, mailbox=None, render_notice=None,
+                 local_acceptance_route=None, clock=time.time):
         self.store = store
         self.execution = execution
         self.authorize = authorize
         self.verify_event = verify_event
         self.verify_continuation = verify_continuation
         self.route = route
+        self.local_acceptance_route = local_acceptance_route
         self.mailbox = mailbox
         self.render_notice = render_notice
         self.dispatch_envelope = None
@@ -724,6 +728,12 @@ class InteractionService:
                 for correlation, phase in notices:
                     status["delivery"].append(dict(request_id=request_id, phase=phase,
                         state=self._delivery(task, self._notice(task, correlation, phase))[0]))
+        elif manual:
+            request_id = manual["request_id"]
+            notice = self._notice(task, request_id, "question")
+            if notice and notice.get("local_acceptance") is True:
+                status["delivery"].append(dict(request_id=request_id, phase="question",
+                                              state=self._delivery(task, notice)[0]))
         _require(self.store.load_task(task_id)["revision"] == task["revision"]
                  and _binding(self.execution.hooks, task, spec)["revision"] == binding["revision"], "BUSY")
         _require(self._scope(task_id, principal) == scope, "NOT_FOUND")
@@ -926,8 +936,11 @@ class InteractionService:
     def _message(self, task, notice):
         _fields(notice, ("correlation_id", "phase", "binding_revision", "generation", "stop_epoch",
                          "run_id", "sender", "target", "source_ref", "mailbox_id", "expires_at",
-                         "body", "from_ref", "to_ref", "route_generation", "superseded"), ("supersedes",))
+                         "body", "from_ref", "to_ref", "route_generation", "superseded"),
+                ("supersedes", "local_acceptance"))
         _require(type(notice["superseded"]) is bool
+                 and ("local_acceptance" not in notice or
+                      (notice["local_acceptance"] is True and notice["phase"] == "question"))
                  and ("supersedes" not in notice or _matches(_SHA, notice["supersedes"])))
         bus = self._bus()
         if bus is None:
@@ -979,10 +992,18 @@ class InteractionService:
             return state, "waiting"
         return state, None
 
-    def _delivery_route(self, task, binding, phase, from_ref, to_ref):
-        if self.route is None or self._bus() is None:
+    def _local_acceptance_route(self, task, binding, phase, item):
+        if (self.local_acceptance_route is not None and phase == "question"
+                and item.get("kind") == _MANUAL):
+            return self.local_acceptance_route(self._scope_record(task), deepcopy(binding), item)
+        return None
+
+    def _delivery_route(self, task, binding, phase, from_ref, to_ref, item):
+        if self._bus() is None:
             return None
-        route = self.route(self._scope_record(task), deepcopy(binding), phase, from_ref, to_ref)
+        route = self._local_acceptance_route(task, binding, phase, item)
+        if route is None and self.route is not None:
+            route = self.route(self._scope_record(task), deepcopy(binding), phase, from_ref, to_ref)
         if route is not None:
             _require(type(route) is MailboxRoute and _matches(_REF, route.source_ref)
                      and type(route.sender) is EndpointCredential and type(route.target) is EndpointCredential
@@ -995,7 +1016,7 @@ class InteractionService:
         outward = phase != "answer"
         source = binding["controller_ref"] if outward else binding["interaction_ref"]
         target = binding["interaction_ref"] if outward else binding["controller_ref"]
-        route = self._delivery_route(task, binding, phase, source, target)
+        route = self._delivery_route(task, binding, phase, source, target, item)
         if route is None:
             return None
         correlation = receipt if phase in {"completion", "failure"} else item["request_id"]
@@ -1003,21 +1024,29 @@ class InteractionService:
         # reader, rather than a native message, supplies any decision text.
         body = canonical_json(dict(task_id=task["task_id"], request_id=item["request_id"],
                                    phase=phase, receipt_id=receipt)).decode()
-        if self.render_notice is not None:
+        if route.local_acceptance:
+            body = render_local_acceptance(task, binding, phase, correlation, item, target)
+        elif self.render_notice is not None:
             body = self.render_notice(task, binding, phase, correlation, item, target)
-        return dict(correlation_id=correlation, phase=phase, binding_revision=binding["revision"],
+        notice = dict(correlation_id=correlation, phase=phase, binding_revision=binding["revision"],
                     generation=item["generation"], stop_epoch=task["stop_epoch"], run_id=task["run_id"],
                     sender=route.sender.endpoint_id, target=route.target.endpoint_id,
                     from_ref=source, to_ref=target, source_ref=route.source_ref, mailbox_id=None,
                     route_generation=None, superseded=False, expires_at=item.get("expires_at"), body=body)
+        if route.local_acceptance:
+            notice["local_acceptance"] = True
+        return notice
 
     def _notification_eligible(self, task, binding, phase, item):
+        local = self._local_acceptance_route(task, binding, phase, item) is not None
         with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
             policy = notification_state.status()
-            if (policy.get("hub_thread") != binding["interaction_ref"]
+            if ((not local and policy.get("hub_thread") != binding["interaction_ref"])
                     or any(Path(rule["repo"]).resolve() == Path(task["repo"]["root"])
                            for rule in notification_state.project_mutes())):
                 return False
+        if local:
+            return True
         if phase == "failure":
             import failure_attention
             with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
@@ -1164,6 +1193,11 @@ class InteractionService:
                     "dispatching", "delivered", "delivery_unknown", "accepted", "responded"}):
             return self._delivery(task, notice)[0]
 
+        route = self._delivery_route(task, binding, phase, notice["from_ref"], notice["to_ref"], item)
+        _require(route and (route.sender.endpoint_id, route.target.endpoint_id, route.source_ref,
+                            route.local_acceptance) == (notice["sender"], notice["target"], notice["source_ref"],
+                                                        notice.get("local_acceptance", False)), "STALE_REQUEST")
+
         def guard():
             latest, frozen, current = self._task(task_id)
             current_row, current_item, reserved = self._delivery_item(latest, frozen, correlation, phase)
@@ -1177,11 +1211,11 @@ class InteractionService:
                          and (current_row is not None or phase != "question"
                               or not self._notice(latest, correlation, "present"))
                          and self._notification_eligible(latest, current, phase, current_item), "STALE_REQUEST")
+            if route.local_acceptance:
+                _require(self._local_acceptance_route(latest, current, phase, current_item) == route,
+                         "STALE_REQUEST")
 
         guard()
-        route = self._delivery_route(task, binding, phase, notice["from_ref"], notice["to_ref"])
-        _require(route and (route.sender.endpoint_id, route.target.endpoint_id, route.source_ref)
-                 == (notice["sender"], notice["target"], notice["source_ref"]), "STALE_REQUEST")
         if message is None and notice["mailbox_id"] is None:
             # Scope the route and key to the original reservation. A restart
             # can recover its queued row, while a changed route cannot create one.

@@ -10,6 +10,7 @@ import time
 import ato_config
 from agent_registry import SessionEvent, SessionIdentity
 import ato_process
+from codex_session_adapter import CodexSessionAdapter
 from ato_host import Host
 from ato_private import delivery_candidates, render_notice
 from ato_task_store import TaskError, _directory, _locked_file, _publish, _read_json, _require, _save, _sha, _state_errors
@@ -98,13 +99,19 @@ def _observe(host, bus, route, endpoint, adapter, message, guard):
 
 
 def _dispatch(host, bus, route, message_id, guard):
-    configured = host.record("observation", {})
     endpoint = bus.authenticate(route.target)
     kind = endpoint["kind"]
-    if kind not in configured.get("transport_kinds", ()):
-        return
-    import agents  # Register fixed local adapters before resolving a configured transport.
-    adapter = agents.registry.get(kind, "transport")
+    if route.local_acceptance:
+        binary = host.acceptance_queue_binary()
+        if kind != "codex" or binary is None:
+            return
+        adapter = CodexSessionAdapter(queue_binary=binary)
+    else:
+        configured = host.record("observation", {})
+        if kind not in configured.get("transport_kinds", ()):
+            return
+        import agents  # Register fixed local adapters before resolving a configured transport.
+        adapter = agents.registry.get(kind, "transport")
     with ato_config.use_unified_kernel(host.store.kernel_root, host.store.native_home):
         message = bus.message(message_id)
         if _observe(host, bus, route, endpoint, adapter, message, guard) or message["state"] != "queued":

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Trusted local operator setup; no services, native sessions or model calls."""
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict
+import fcntl
 import json
 from pathlib import Path
 import secrets
@@ -10,12 +12,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_registry import SessionIdentity
-from ato_host import Host
+import ato_config
+from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
 from ato_execution_host import HostProfile
 from ato_seal import installed_boundary, runtime_seal
 from ato_task_store import (
-    TaskError, _fields, _identifier, _require, _save, _sha, _strict_json, _text, read_input_file,
+    TaskError, _fields, _identifier, _repo_boundaries, _require, _save, _sha, _strict_json, _text,
+    normalize_repository, read_input_file,
 )
+from codex_session_adapter import CodexSessionAdapter
+from message_bus import EndpointCredential, IdentityError, MessageBus
 
 OPERATIONS = {
     "controller": ("observe", "initial", "stop", "resume", "recheck", "reconcile",
@@ -28,6 +34,72 @@ OPERATIONS = {
 def record(host, name, value):
     with host.store._private(host.folder, create=True) as fd:
         _save(fd, name + ".json", value, exclusive=True)
+
+
+class _EndpointRegistration(MessageBus):
+    """Register the pair with the existing mailbox API in one transaction."""
+
+    def __init__(self, connection, clock):
+        self.connection = connection
+        self.clock = clock
+
+    @contextmanager
+    def _transaction(self):
+        yield self.connection
+
+
+def _registered_acceptance_endpoints(bus, connection, row):
+    if row is None:
+        return False
+    credentials = [EndpointCredential(**row[key]) for key in ("sender", "target")]
+    found = []
+    for credential in credentials:
+        try:
+            bus._endpoint(connection, credential.endpoint_id)
+        except IdentityError:
+            continue
+        found.append(bus._authenticate(connection, credential))
+    if not found:
+        # A crash can leave the private record ahead of SQLite's commit.
+        return False
+    _require([(ep["kind"], ep["state"]) for ep in found] == [("local_cli", "active"), ("codex", "active")])
+    return True
+
+
+def bind_acceptance(host, args):
+    repository = normalize_repository(args.repo)
+    _repo_boundaries(repository, host.store.home, host.store.native_homes, selected=args.repo)
+    project = Path(args.session_project).resolve(strict=True)
+    _require(project.is_dir(), "INVALID_REPO")
+    _require(host.record("observation", {}).get("enabled") is True and host.acceptance_queue_binary(),
+             "UNSUPPORTED_CAPABILITY")
+    with ato_config.use_unified_kernel(host.store.kernel_root, host.store.native_home):
+        _require(CodexSessionAdapter().verify_session(args.session_id, str(project)), "FORBIDDEN")
+    bus = host.mailbox()
+    _require(bus is not None, "UNSUPPORTED_CAPABILITY")
+    with host.store._private(host.folder, create=True) as fd:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TaskError("BUSY") from None
+        row = host.acceptance_notifications()
+        if row is not None:
+            _require((row["native_home"], row["target"]["session_id"], row["target"]["project"])
+                     == (str(host.store.native_home), args.session_id, str(project)), "DECISION_CONFLICT")
+        with bus._transaction() as connection:
+            if not _registered_acceptance_endpoints(bus, connection, row):
+                registrar = _EndpointRegistration(connection, bus.clock)
+                source_ref = row["source_ref"] if row else "ato-acceptance-" + secrets.token_hex(16)
+                sender = registrar.register_endpoint(source_ref + "-sender", kind="local_cli",
+                    session_id=source_ref, project=project, source=args.source)
+                target = registrar.register_endpoint(source_ref + "-target", kind="codex",
+                    session_id=args.session_id, project=project, source=args.source)
+                row = dict(version=1, native_home=str(host.store.native_home), source_ref=source_ref,
+                           sender=asdict(sender), target=asdict(target),
+                           repositories=row["repositories"] if row else {})
+            row["repositories"].setdefault(repository.key, bus.clock())
+            _save(fd, ACCEPTANCE_NOTIFICATIONS + ".json", row)
+    return dict(configured=True, repo=repository.root, notify="manual_acceptance")
 
 
 def proof_directory(host, requested):
@@ -104,6 +176,9 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="operation", required=True)
     configure = commands.add_parser("configure", allow_abbrev=False)
     configure.add_argument("--profile", required=True)
+    bind = commands.add_parser("bind-acceptance", allow_abbrev=False)
+    for name in ("repo", "session-id", "session-project"):
+        bind.add_argument("--" + name, required=True)
     submit = commands.add_parser("submission", allow_abbrev=False)
     for name in ("repo", "spec"):
         submit.add_argument("--" + name, required=True)
@@ -116,7 +191,7 @@ def main(argv=None):
     evidence.add_argument("request_id")
     evidence.add_argument("--answer", required=True)
     evidence.add_argument("--performed", action="store_true")
-    for command in (configure, submit, scoped, evidence):
+    for command in (configure, bind, submit, scoped, evidence):
         command.add_argument("--source", required=True)
     args = parser.parse_args(argv)
     try:
@@ -131,6 +206,8 @@ def main(argv=None):
                 HostProfile.from_document(dict(row, fixture=False)).proof_directories(host.store)
                 record(host, "profile", row)
                 result = {"configured": True}
+            elif args.operation == "bind-acceptance":
+                result = bind_acceptance(host, args)
             else:
                 host.compose()
                 _require(host.execution.profile is not None, "UNSUPPORTED_CAPABILITY")

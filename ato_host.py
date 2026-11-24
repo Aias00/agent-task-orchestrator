@@ -14,10 +14,11 @@ from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
 from ato_binding import BindingDecision, BindingGrant, BindingService, read_binding
 from ato_execution import ExecutionHooks, ExecutionService, HostProfile
 from ato_task_store import (
-    InitialBinding, SubmissionGrant, TaskError, TaskScope, TaskStore, _SHA, _directory, _existing, _regular,
-    _fields, _matches, _overlaps, _read_file, _require, _sha, _strict_json, canonical_json,
+    InitialBinding, SubmissionGrant, TaskError, TaskScope, TaskStore, _REF, _SHA, _absolute, _directory,
+    _existing, _regular, _fields, _matches, _overlaps, _read_file, _require, _sha, _strict_json,
+    _time, canonical_json,
 )
-from message_bus import EndpointCredential, MessageBus
+from message_bus import EndpointCredential, MailboxError, MessageBus
 
 _CREDENTIAL = re.compile(r"credential-[0-9a-f]{32}")
 _SESSION = re.compile(r"agentref-[0-9a-f]{32}")
@@ -25,6 +26,7 @@ _ROLE = {"controller": "origin", "interaction": "hub", "user": "user"}
 _LOCAL_OPERATIONS = frozenset({"initial", "observe", "stop", "resume", "recheck",
                                "trace", "cleanup", "binding"})
 _CONTROLLER_OPERATIONS = _LOCAL_OPERATIONS | {"reconcile", "ask", "read_answer"}
+ACCEPTANCE_NOTIFICATIONS = "acceptance-notifications"
 
 
 def host_record(path, root, *, code="STATE_CORRUPT"):
@@ -336,6 +338,63 @@ class Host:
             return MailboxRoute(*credentials, source["source_ref"])
         return None
 
+    def acceptance_notifications(self):
+        row = self.record(ACCEPTANCE_NOTIFICATIONS)
+        if row is None:
+            return None
+        _fields(row, ("version", "native_home", "source_ref", "sender", "target", "repositories"))
+        _require(type(row["version"]) is int and row["version"] == 1
+                 and _absolute(row["native_home"]) and _matches(_REF, row["source_ref"])
+                 and isinstance(row["repositories"], dict)
+                 and all(_absolute(key) and _time(since) for key, since in row["repositories"].items()))
+        for key in ("sender", "target"):
+            endpoint = row[key]
+            _fields(endpoint, ("endpoint_id", "session_id", "project", "token"))
+            _require(all(isinstance(value, str) and value for value in endpoint.values())
+                     and _absolute(endpoint["project"]))
+        _require(row["sender"]["endpoint_id"] != row["target"]["endpoint_id"])
+        return row
+
+    def acceptance_queue_binary(self):
+        packages = self.store.native_home / "packages/standalone"
+        try:
+            executable = (packages / "current/bin/codex").resolve(strict=True)
+            releases = (packages / "releases").resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if (releases == packages / "releases" and executable.is_relative_to(releases)
+                and executable.is_file() and os.access(executable, os.X_OK)):
+            return str(executable)
+        return None
+
+    def local_acceptance_route(self, scope, binding, item):
+        local = self._local_scope_binding(scope)
+        if (local is None or binding["revision"] != 1
+                or (binding["controller_ref"], binding["interaction_ref"])
+                != (local.controller_ref, local.interaction_ref)):
+            return None
+        row = self.acceptance_notifications()
+        if row is None or row["native_home"] != str(self.store.native_home):
+            return None
+        since = row["repositories"].get(scope.repo_key)
+        if since is None or item["created_at"] < since or not self.acceptance_queue_binary():
+            return None
+        observer = self.record("observation", {})
+        if observer.get("enabled") is not True:
+            return None
+        bus = self.mailbox()
+        if bus is None:
+            return None
+        sender = EndpointCredential(**row["sender"])
+        target = EndpointCredential(**row["target"])
+        try:
+            endpoints = [bus.authenticate(endpoint) for endpoint in (sender, target)]
+        except MailboxError:
+            return None
+        if [(ep["kind"], ep["state"]) for ep in endpoints] != [("local_cli", "active"), ("codex", "active")]:
+            return None
+        return MailboxRoute(sender, target, row["source_ref"], local_acceptance=True)
+
     def mailbox(self):
         path = self.store.kernel_root / "ctask-interaction" / "mailbox" / "state.sqlite"
         try:
@@ -346,7 +405,8 @@ class Host:
                 _regular(info, True, "STATE_CORRUPT")
         except FileNotFoundError:
             return None
-        bus = _ExistingMailbox() if self.read_only else MessageBus.__new__(MessageBus)
+        bus_type = _ExistingMailbox if self.read_only else MessageBus
+        bus = bus_type.__new__(bus_type)
         bus.path, bus.clock = path, time.time
         return bus
 
@@ -355,7 +415,7 @@ class Host:
             hooks=ExecutionHooks(binding=partial(read_binding, self.store)))
         self.interaction = InteractionService(self.store, self.execution, authorize=self.authorize_interaction,
             verify_event=self.verify_event, verify_continuation=self.verify_continuation, route=self.route,
-            mailbox=self.mailbox, render_notice=render_notice)
+            mailbox=self.mailbox, render_notice=render_notice, local_acceptance_route=self.local_acceptance_route)
         self.execution.hooks = self.interaction.execution_hooks()
         self.binding = BindingService(self.execution, actor_grant=self.actor_grant,
             endpoint_grant=self.endpoint_grant, verify_decision=self.verify_binding,

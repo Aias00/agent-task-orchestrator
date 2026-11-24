@@ -17,6 +17,14 @@ def render_notice(task, binding, phase, correlation, item, target):
     return f"[ato handoff {ref}]\n{command}"
 
 
+def render_local_acceptance(task, binding, phase, correlation, item, target):
+    ref = handoff_id(task, binding, phase, correlation, item, target)
+    task_id = _identifier(task["task_id"], "task")
+    return (f"[ato handoff {ref}]\n"
+            f"ATO 任务 {task_id} 待人工验收。请在当前对话简短提醒用户一次，"
+            f"可用 ato status {task_id} 查看。请等待用户决定。")
+
+
 def read_handoff(host, proof, ref):
     _identifier(ref, "handoff")
     actor = host.store._principal(proof)

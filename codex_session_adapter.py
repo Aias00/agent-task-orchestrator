@@ -270,6 +270,11 @@ class CodexSessionAdapter:
     observe_recovery = staticmethod(observe_recovery)
     observe_reply = staticmethod(observe_reply)
 
+    def __init__(self, *, queue_binary=None):
+        self.queue_binary = queue_binary
+        if queue_binary is not None:
+            self.capabilities = self.session_capabilities
+
     def verify_target(self, target, home_dir=None):
         if identity(target) != target:
             raise ValueError('legacy Codex thread must be a canonical UUID')
@@ -317,7 +322,10 @@ class CodexSessionAdapter:
         except (ValueError, OSError):
             return DeliveryResult('failed')  # No subprocess was started.
         try:
-            result, receipt = queue(home_dir or home(), target, text, cwd=cwd)
+            if self.queue_binary is None:
+                result, receipt = queue(home_dir or home(), target, text, cwd=cwd)
+            else:
+                result, receipt = _queue(home_dir or home(), target, text, cwd=cwd, binary=self.queue_binary)
             return DeliveryResult('delivered' if receipt else 'delivery_unknown', receipt,
                                   (result.stdout + result.stderr)[-4000:])
         except (FileNotFoundError, PermissionError):

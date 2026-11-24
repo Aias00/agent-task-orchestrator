@@ -97,3 +97,29 @@ keeps the exact endpoint lease while observing a pending attempt. A correlated
 terminal event closes the mailbox turn. If the lease is lost or the old
 attempt cannot be verified, the observer preserves the existing delivery
 disposition without replaying it.
+
+### Acceptance reminders for local Tasks
+
+A trusted operator can opt a repository into acceptance reminders by
+selecting an existing Codex control session. Run this from the selected
+sealed source with the same native and ATO homes as the Observer.
+
+```sh
+.venv/bin/python -IB scripts/ato_host_setup.py bind-acceptance \
+  --repo "$TASK_REPO" --session-id "$CONTROL_THREAD_ID" \
+  --session-project "$CONTROL_THREAD_CWD" --source "operator selected control session"
+```
+
+Specify the exact session ID and the working directory recorded when that
+session was created. The command verifies both in the configured local Codex
+home. It uses the native standalone Codex installation and the prepared unified
+mailbox. Repeat with another repository to opt it into the same session.
+The host stores mailbox capabilities privately and provisions them only once.
+
+When a local Task in an opted-in repository first needs human acceptance
+after binding, the Observer sends a short notice to the selected session.
+Consult `ato status TASK_ID` for the product, checks, and the recorded delivery
+state. An unknown delivery keeps the original receipt and is never replayed.
+Project mutes apply. Tasks already waiting when the repository was first
+bound retain their existing state. The route grants delivery only. Human
+acceptance still requires the actual user and the exact acceptance evidence.
