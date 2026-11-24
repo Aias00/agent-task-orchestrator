@@ -1,8 +1,4 @@
-"""Private host configuration and grants for the unified services.
-
-Files are provisioned by a trusted local host using the scoped actor boundary.
-The CLI never issues credentials or grants. Repository content is data only.
-"""
+"""Private host configuration, local CLI authority and scoped actor grants."""
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 from functools import partial
@@ -26,8 +22,9 @@ from message_bus import EndpointCredential, MessageBus
 _CREDENTIAL = re.compile(r"credential-[0-9a-f]{32}")
 _SESSION = re.compile(r"agentref-[0-9a-f]{32}")
 _ROLE = {"controller": "origin", "interaction": "hub", "user": "user"}
-_CONTROLLER_OPERATIONS = frozenset({"initial", "observe", "stop", "resume", "recheck",
-                                    "reconcile", "trace", "cleanup", "binding", "ask", "read_answer"})
+_LOCAL_OPERATIONS = frozenset({"initial", "observe", "stop", "resume", "recheck",
+                               "trace", "cleanup", "binding"})
+_CONTROLLER_OPERATIONS = _LOCAL_OPERATIONS | {"reconcile", "ask", "read_answer"}
 
 
 def host_record(path, root, *, code="STATE_CORRUPT"):
@@ -42,6 +39,7 @@ class Host:
         self.folder = self.store.root / "host"
         self.profile = profile
         self.read_only = read_only
+        self._local_owner = object()
         self.store.authenticate = self.authenticate
         self.store.can_observe = self.can_observe
         self.store.authorize_submit = self.authorize_submit
@@ -60,6 +58,34 @@ class Host:
             return None
         _fields(row, ("worker_executable", "worker_home", "review_tools", "proof_roots"))
         return HostProfile.from_document(dict(row, fixture=False))
+
+    def caller(self, operation):
+        """Use the sealed CLI's local account for routine local operations."""
+        if operation not in _LOCAL_OPERATIONS or "ATO_ACTOR_FILE" in os.environ:
+            return self.actor_file()
+        _require(_matches(_SHA, self.store.runtime_seal) and os.getuid() == os.geteuid(), "AUTH_REQUIRED")
+        try:
+            with self.store._private(self.store.home):
+                pass
+        except FileNotFoundError:
+            # A fresh read-only invocation must not initialize the state root.
+            pass
+        return self._local_owner
+
+    def _local_authorization(self):
+        return f"local-owner:{os.geteuid()}"
+
+    def _local_binding(self, repo_key, spec_sha256):
+        source = [self._local_authorization(), str(self.store.home), repo_key, spec_sha256]
+        controller, interaction = (
+            "agentref-" + _sha(canonical_json([*source, role]))[:32] for role in ("controller", "interaction")
+        )
+        return InitialBinding(controller, interaction)
+
+    def _local_scope_binding(self, scope):
+        if scope.authorization_ref == self._local_authorization():
+            return self._local_binding(scope.repo_key, scope.spec_sha256)
+        return None
 
     def actor_file(self):
         raw = os.environ.get("ATO_ACTOR_FILE")
@@ -87,6 +113,8 @@ class Host:
         return None
 
     def authenticate(self, locator):
+        if locator is self._local_owner:
+            return self._local_owner
         if locator is None:
             return None
         proof, ref, path = locator
@@ -120,6 +148,9 @@ class Host:
         return None
 
     def initial(self, spec, actor):
+        if actor is self._local_owner:
+            binding = self._local_binding(spec.repository.key, spec.spec_sha256)
+            return SubmissionGrant(self._local_authorization(), spec.repository.key, spec.spec_sha256, binding)
         row = self._actor_row(actor)
         _require(row and row["role"] == "controller" and row.get("scope") is None
                  and actor.project == spec.repository.root, "FORBIDDEN")
@@ -139,14 +170,20 @@ class Host:
         return grant if grant.binding == binding else None
 
     def can_observe(self, actor, scope):
-        row = self._actor_row(actor)
-        if row is None:
-            return False
-        scoped = row.get("scope") is not None
-        if scoped and (row["scope"] != asdict(scope) or "observe" not in row["operations"]):
-            return False
-        if not scoped and self._submitted(row, scope) is None:
-            return False
+        local = None
+        if actor is self._local_owner:
+            local = self._local_scope_binding(scope)
+            if local is None:
+                return False
+        else:
+            row = self._actor_row(actor)
+            if row is None:
+                return False
+            scoped = row.get("scope") is not None
+            if scoped and (row["scope"] != asdict(scope) or "observe" not in row["operations"]):
+                return False
+            if not scoped and self._submitted(row, scope) is None:
+                return False
         try:
             task = self.store.load_task(scope.task_id)
             binding = read_binding(self.store, task, self.store.load_spec(scope.task_id))
@@ -154,6 +191,8 @@ class Host:
             # Scope is already verified. The projection reports damaged state
             # without disclosing unrelated scope records.
             return exc.code in {"STATE_CORRUPT", "SPEC_CHANGED"}
+        if local is not None:
+            return binding["controller_ref"] == local.controller_ref
         route = "controller_ref" if row["role"] == "controller" else "interaction_ref"
         # A prospective controller needs observation to record an authorized
         # handoff. Its operation grant remains fenced inside BindingService.
@@ -169,6 +208,11 @@ class Host:
                      (scope.repo_key, scope.spec_sha256, scope.authorization_ref)), None)
 
     def actor_grant(self, actor, scope, binding, operation):
+        if actor is self._local_owner:
+            local = self._local_scope_binding(scope)
+            if local and binding["controller_ref"] == local.controller_ref:
+                return BindingGrant(scope, local.controller_ref, "controller", binding["revision"], _LOCAL_OPERATIONS)
+            return None
         row = self._actor_row(actor)
         if row is None:
             return None
@@ -189,6 +233,8 @@ class Host:
             return False
         if grant.role not in {"controller", "user"}:
             return False
+        if actor is self._local_owner:
+            return True
         row = self._actor_row(actor)
         if row is None:
             return False
@@ -208,6 +254,9 @@ class Host:
         return None
 
     def endpoint_grant(self, ref, scope, role, revision):
+        local = self._local_scope_binding(scope)
+        if local and role in {"controller", "interaction"} and ref == getattr(local, role + "_ref"):
+            return BindingGrant(scope, ref, role, revision, frozenset())
         row = self._endpoint(ref, scope.repo_key, role)
         if row and (row.get("scope") is None or row["scope"] == asdict(scope)) and revision in row["revisions"]:
             return BindingGrant(scope, ref, role, revision, frozenset())

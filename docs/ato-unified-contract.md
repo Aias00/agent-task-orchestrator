@@ -26,7 +26,7 @@ There is no human/JSON mode switch. Shell scripts consume named fields.
 | `ato list [--repo PATH]` | `{tasks: [TaskSummary], warnings: [code]}` sorted by Task ID. Omitting the repo lists visible Tasks across repositories. Filtering is exact by normalized Git identity. |
 | `ato status TASK_ID` | Returns `TaskStatus` with overall state, actual execution, Run history, stage, checks, review, product, acceptance, pending items, delivery, and next step. |
 | `ato stop TASK_ID` | Durably fences the observed Run, then returns `TaskStatus` with the actual stop or cleanup progress. Repetition returns the existing disposition. |
-| `ato resume TASK_ID` | Explicitly admits execution for an existing Task under its current scoped grant and recovery checks. When repository contention left an untouched initial reservation, resumes the same initial Run. A proved retryable prior execution requires a successor Run. Returns `TaskStatus` with the same background admission and startup proof as run. |
+| `ato resume TASK_ID` | Explicitly admits execution under the Task's current controller authority and recovery checks. When repository contention left an untouched initial reservation, resumes the same initial Run. A proved retryable prior execution requires a successor Run. Returns `TaskStatus` with the same background admission and startup proof as run. |
 | `ato inbox` | `{items: [InboxItem]}` containing authorized pending items, in creation order with ID as tie breaker. A read has no presentation or delivery effect. |
 | `ato answer REQUEST_ID --answer TEXT` | Records the actual user's answer to the exact pending request. Returns `{request_id, task_id, state, delivery, recorded_at}`, where `delivery` reports the canonical disposition. The execution owner consumes a valid decision separately. |
 | `ato accept TASK_ID --evidence FILE` | Records the current product's explicit human acceptance after independent checks and authority verification. Returns `TaskStatus` with the acceptance receipt reference. Repetition of the same decision returns that receipt. |
@@ -48,8 +48,9 @@ actual host work is recorded, checks-only may advance its existing technical
 gates under the same lease. Preserve an already-passed review only when its
 product, spec, check set and review revision still match. A changed product
 or Reviewer requires fresh qualifying evidence. Recheck of a current accepted
-product returns its existing status without launching work. Cleanup requires a
-scoped operator, proven idle execution and terminal completion or STOP. Apply the
+product returns its existing status without launching work. Cleanup requires
+controller or scoped operator authority, proven idle execution and terminal
+completion or STOP. Apply the
 existing H1 checks for branch/common-dir/links and dirty tree. Record removal
 once, preserve the branch, accepted receipt and retained product/check
 evidence. For accepted cleanup, verify the retained clean Git tree matches
@@ -205,10 +206,19 @@ metadata only.
 
 ## Authority, credentials and roles
 
+The owner of the private ATO state can use the sealed local CLI to submit and
+manage local Tasks without a proof file. This applies to `run`, `list`,
+`status`, `stop`, `resume`, `project trace`, `project recheck`,
+`project cleanup` and `agent binding`. Local control follows the Task's
+current controller binding. Sessions under the same OS account share this
+local controller identity. Each Task records the submitting local account,
+canonical repository and frozen spec digest. A caller with an explicit
+`ATO_ACTOR_FILE` uses that actor's scope.
+
 An authenticated actor is a verified local CLI or trusted adapter principal.
-A CLI process selects one proof through `ATO_ACTOR_FILE`, a locator for a
-private actor file, or receives proof directly from the trusted host
-integration. A proof is always validated against the identity registry and
+For scoped operations, the CLI selects a private actor file through
+`ATO_ACTOR_FILE` or receives proof directly from the trusted host integration.
+A proof is always validated against the identity registry and
 current bindings. Process environment, working directory, a native home,
 a thread/session ID, a repository match and a string citing a source convey
 no authority by themselves. No ambient Codex or legacy `CTASK_*` identity
@@ -216,13 +226,13 @@ fallback applies to v1. Enrollment and grant issuance stay with the trusted
 host using the existing scoped actor/adapter machinery. A scoped key cannot
 mint or refresh itself. Bootstrap uses an explicitly enrolled principal
 and authority, with separate user, controller and interaction roles.
-Initial task creation selects a verified initial controller and interaction
+Scoped task creation selects a verified initial controller and interaction
 binding from the repo's trusted host configuration and records their IDs and
 binding revision. There is no auto-selection by session recency.
 
 A repo-scoped submit grant covers the allowed objective and scope, actions,
 paths, capabilities and limits. The host establishes that grant from real user
-authorization and binds it to the frozen digest at admission. Task-level
+authorization and binds it to the frozen digest at admission. Scoped Task-level
 grants pin canonical repo, Task ID, spec digest, role and applicable binding
 revision, plus Run/kernel generation for execution-scoped operations. The
 Workflow contract's `authorization`, optional `permissions.source` and
@@ -235,6 +245,7 @@ A project key is never substituted for a verified native/endpoint identity.
 
 | Principal | Authorized operations with the matching scope |
 | --- | --- |
+| Local state owner | Submit, observe and control local Tasks under the current controller binding. |
 | Actual user | Submit/observe or stop/resume when granted. Answer and accept as the always-distinct authenticated `user` actor of the bound interaction endpoint, with actual decision provenance. Authorize a binding transfer or changes to eligible review configuration through the audited host. |
 | Scoped controller / origin | Coordinate and observe its Tasks. Submit, stop, resume or request checks within an existing grant. Create a real user request or report a pending host handoff. Propose/record an already authorized handoff. Never infer or register a user's answer or acceptance under this role. |
 | Scoped interaction endpoint | Receive/read scoped pending human items and record actual presentation. Route the separately authenticated user's action to the service. It cannot self-elect as controller, create execution rights, issue itself credentials or speak as the user. |

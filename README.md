@@ -16,11 +16,11 @@ directory and, optionally, a Skill directory.
 ato --help
 ```
 
-Set `ATO_HOME` to the selected private state root and `ATO_ACTOR_FILE` to the
-credential issued by your trusted host. The default state root is
-`$HOME/.local/share/ato`. Existing state and native homes retain their original
-paths. See [trusted host setup](docs/ato-host-setup.md) for profile, enrollment
-and scoped grants.
+Configure the Worker once and run the installed `ato` as the account that
+owns its private state. The default root is `$HOME/.local/share/ato`. Set
+`ATO_HOME` to select a different private root. This account can submit and
+manage its local tasks directly. Set `ATO_ACTOR_FILE` when acting as an
+explicitly enrolled actor. [Trusted host setup](docs/ato-host-setup.md)
 
 Write a JSON spec next to the repository or use an absolute `repo` path.
 
@@ -55,7 +55,6 @@ ato project validate --repo "$REPO" --spec "$SPEC"
 ato run --repo "$REPO" --spec "$SPEC"
 ato status "$TASK_ID"
 ato list --repo "$REPO"
-ato inbox
 ```
 
 `run` returns the Task ID once it verifies background admission. Add
@@ -65,14 +64,15 @@ authorized interaction identity. The enrolled user records their own answer
 and, once independent checks pass, accepts the precise product and checks.
 
 ```sh
-ato answer "$REQUEST_ID" --answer "$USER_ANSWER"
-ato accept "$TASK_ID" --evidence "$EVIDENCE"
+ATO_ACTOR_FILE="$USER_PROOF" ato inbox
+ATO_ACTOR_FILE="$USER_PROOF" ato answer "$REQUEST_ID" --answer "$USER_ANSWER"
+ATO_ACTOR_FILE="$USER_PROOF" ato accept "$TASK_ID" --evidence "$EVIDENCE"
 ato stop "$TASK_ID"
 ato resume "$TASK_ID"
 ```
 
-Check status after requesting STOP. Resume requires a verified cleanup and
-a current scoped operation grant. Unresolved native delivery or execution
+Check status after requesting STOP. Resume requires verified cleanup and
+the current controller's authority. Unresolved native delivery or execution
 remains fenced until the host can reconcile it. Management help is under
 `ato project --help`, `ato agent --help` and `ato system --help`.
 

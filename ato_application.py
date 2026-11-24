@@ -50,7 +50,9 @@ class Application:
             return notification_policy(host, getattr(args, "repo", None))
         if operation == "agent" and subcommand == "doctor":
             return doctor(host)
-        proof = host.actor_file()
+        actor_operation = {"run": "initial", "list": "observe", "status": "observe"}.get(
+            operation, subcommand or operation)
+        proof = host.caller(actor_operation)
         if operation == "answer":
             principal = host.store._principal(proof)
             _, task, _, _, _ = api._locate(principal, args.request_id)

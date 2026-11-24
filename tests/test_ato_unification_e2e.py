@@ -193,7 +193,7 @@ class InstalledATO(unittest.TestCase):
         self.registry(reference, dict(enabled=True, reference=reference, repo_key=repo_key,
                                      role=role, revisions=[revision]))
 
-    def submission(self, name, origin, interaction, *, reviewer=False, via_setup=False, host_handoff=False):
+    def task_spec(self, name, *, reviewer=False, host_handoff=False):
         repo = self.root / name
         repo.mkdir()
         git(repo, "init", "-q")
@@ -216,6 +216,10 @@ class InstalledATO(unittest.TestCase):
         spec_file = write(self.root, name + ".json", json.dumps(spec))
         normalized = self.cli("project", "validate", "--repo", repo, "--spec", spec_file)
         self.assertEqual(normalized["repo"], str(repo))
+        return repo, spec_file, normalized
+
+    def submission(self, name, origin, interaction, *, reviewer=False, via_setup=False, host_handoff=False):
+        repo, spec_file, normalized = self.task_spec(name, reviewer=reviewer, host_handoff=host_handoff)
         if via_setup:
             enrolled = self.host_setup("submission", "--repo", repo, "--spec", spec_file)
             self.assertEqual(enrolled["spec_sha256"], normalized["spec_sha256"])
@@ -296,7 +300,8 @@ class InstalledATO(unittest.TestCase):
         self.assertTrue(status["mailbox"]["idle"])
         self.cli("system", "notification-policy")
         self.assertEqual(self.cli("agent", "doctor")["qualification"], "unverified")
-        self.cli("list", error=(3, "AUTH_REQUIRED"))
+        self.assertEqual(self.cli("list"), {"tasks": [], "warnings": []})
+        self.cli("list", actor=self.root / "invalid-proof.json", error=(3, "AUTH_REQUIRED"))
         private = self.source / "ato_runtime.py"
         for command in ("run-child", "observe", "supervise"):
             args = {"run-child": ("task-" + "a" * 32, "run-" + "b" * 32),
@@ -308,12 +313,32 @@ class InstalledATO(unittest.TestCase):
         self.assertFalse(self.store.home.exists())
         self.assertFalse(self.store.native_home.exists())
 
+    def test_installed_local_dispatch_and_queries_need_no_submission_proof(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("local submission")
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        task = result["task_id"]
+        self.assertEqual(result["status"], "needs_acceptance")
+        self.assertEqual(self.cli("status", task)["product"], result["product"])
+        self.assertEqual([row["task_id"] for row in self.cli("list", "--repo", repo)["tasks"]], [task])
+        self.assertEqual(self.cli("agent", "binding", task)["revision"], 1)
+        self.assertEqual(list(self.proofs.iterdir()), [])
+        self.assertEqual(list(self.store.root.glob("host/credential-*.json")), [])
+
+        evidence = self.acceptance(result, "local fixture acceptance")
+        self.cli("accept", task, "--evidence", evidence, error=(3, "AUTH_REQUIRED"))
+        user = self.host_setup("scope", task, "--role", "user")["proof"]
+        self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
+        self.assertEqual(self.cli("status", task)["status"], "completed")
+
     def test_installed_host_enrollment_and_scoped_question_without_fixture_grants(self):
         self.install()
         self.profile(via_setup=True)
         repo, spec, bootstrap = self.submission("enrollment fixture", "1", "2", via_setup=True)
         work = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
         task = work["task_id"]
+        self.cli("status", task, error=(3, "NOT_FOUND"))
         controller = self.host_setup("scope", task, "--role", "controller")["proof"]
         user = self.host_setup("scope", task, "--role", "user")["proof"]
         ask = ("agent", "ask", task, "--kind", "decision", "--question", "Review this candidate?",

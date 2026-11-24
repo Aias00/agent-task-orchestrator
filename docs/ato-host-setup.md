@@ -15,9 +15,11 @@ local credentials under the operator's authority. It starts no sessions.
 
 1. Run `configure --profile FILE --source SOURCE` once to publish the private
    execution profile described below.
-2. Run `submission --repo PATH --spec FILE --source SOURCE` for an approved
-   specification. The returned controller proof authorizes the exact normalized
-   submission. Select it in `ATO_ACTOR_FILE` for `ato run`.
+2. Run the installed `ato run --repo PATH --spec FILE` as the account that
+   owns the private ATO state. The same account can list and control its
+   local tasks. For explicitly scoped submission, use
+   `submission --repo PATH --spec FILE --source SOURCE` and select the returned
+   controller proof in `ATO_ACTOR_FILE` for that invocation.
 3. Run `scope TASK_ID --role controller|interaction|user --source SOURCE`
    from the trusted host for the approved role. Give the resulting proof only
    to that role. Reissue scoped proofs after a Run or binding change.
