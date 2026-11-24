@@ -11,18 +11,20 @@ import hub_sandbox as sandbox
 
 class CodexHubAdapter:
     kind='codex'
+    expected_version = '0.171.0'
 
     def __init__(self, executable=None, *, home=None, proxy=None):
         self.executable=sandbox.executable(self.kind,executable)
         self.home=sandbox.canonical(home if home is not None else Path.home())
         self.proxy=sandbox.validate_loopback_proxy(proxy)
 
-    def capabilities(self):
+    @staticmethod
+    def capabilities():
         return HubCapabilities({name:dict(state='unsupported' if name=='long_lived_stream' else 'supported',
             evidence='H1 Spike S4: Codex 0.171.0 native read-only Seatbelt; post-turn integrity') for name in
             ('structured_output','session_resume','interactive_attach','read_only_cli','os_sandbox_compatible','long_lived_stream')})
 
-    def doctor(self):return sandbox.doctor(self.kind,self.executable,'0.171.0')
+    def doctor(self):return sandbox.doctor(self.kind,self.executable,self.expected_version)
 
     def attach_argv(self, session_id, workspace):
         token(session_id);sandbox.canonical(workspace);require(self.executable is not None,'EXECUTABLE_UNAVAILABLE')

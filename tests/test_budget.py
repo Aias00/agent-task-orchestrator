@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import budget
+import host_budget
 import runner
 import workflow
 import test_workflow as fixtures
@@ -56,6 +57,19 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(budget.summary(d)['hard_seconds'],5)
         self.assertEqual(budget.summary(d)['mode'],'fixed')
         self.assertFalse((d/'budget.json').exists())
+
+    def test_batch4_host_command_refuses_stale_running_without_rewriting_state(self):
+        directory = self.prepared()
+        state = runner.read(directory/'state.json')
+        state.update(status='running',owner_pid=None)
+        runner.save(directory/'state.json',state)
+        before = (directory/'state.json').read_bytes()
+        marker = self.repo/'must-not-run'
+        with self.assertRaisesRegex(ValueError,'idle, resumable'):
+            host_budget.run(directory,['/usr/bin/touch',str(marker)],'offline fixture',
+                            accounting=budget,core=runner)
+        self.assertFalse(marker.exists())
+        self.assertEqual((directory/'state.json').read_bytes(),before)
 
     def test_policy_preserves_frozen_contract_elapsed_and_all_history(self):
         d=self.prepared();before=(d/'contract.json').read_bytes()

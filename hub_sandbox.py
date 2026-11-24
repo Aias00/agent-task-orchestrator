@@ -360,14 +360,16 @@ def turn_context(request, tool, home, *, outer=True, writable_native=(), codex=F
     return rt,env,prefix
 
 
-def doctor(kind, tool, expected):
+def doctor(kind, tool, expected, *, protected_reads=()):
     if tool is None:return dict(kind=kind,available=False,version=None,code='EXECUTABLE_UNAVAILABLE')
     with tempfile.TemporaryDirectory(prefix='h1-doctor-') as folder:
         rt=Path(folder).resolve();rt.chmod(0o700);home=rt/'home';home.mkdir(mode=0o700);temporary=rt/'tmp';temporary.mkdir(mode=0o700)
-        profile=readonly_profile(rt,protected=())
+        profile=readonly_profile(rt,protected=(),protected_reads=protected_reads) + '(deny network*)\n'
         result=run(['/usr/bin/sandbox-exec','-p',profile,str(tool),'--version'],workspace=rt,runtime=rt,
             environment=tool_environment(home,temporary,tool),timeout=3)
-        found=re.search(rb'(?<![0-9])'+re.escape(expected.encode())+rb'(?![0-9])',result.stdout)
-        good=result.code=='OK' and bool(found)
-        return dict(kind=kind,available=good,version=expected if good else None,
+        found = re.search(rb'(?<![0-9.])[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?(?![0-9.])',
+                          result.stdout[:4096])
+        version = found.group().decode('ascii') if result.code == 'OK' and found else None
+        good = version is not None and (expected is None or expected == version)
+        return dict(kind=kind,available=good,version=version,
                     code='OK' if good else result.code if result.code!='OK' else 'VERSION_MISMATCH')

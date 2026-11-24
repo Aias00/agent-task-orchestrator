@@ -14,7 +14,8 @@ From the selected sealed source, the trusted local operator can run
 local credentials under the operator's authority. It starts no sessions.
 
 1. Run `configure --profile FILE --source SOURCE` once to publish the private
-   execution profile described below.
+   execution profile described below. Use `--update` to replace an existing
+   profile after verifying the new tools and proof roots.
 2. Run the installed `ato run --repo PATH --spec FILE` as the account that
    owns the private ATO state. The same account can list and control its
    local tasks. For explicitly scoped submission, use
@@ -23,6 +24,8 @@ local credentials under the operator's authority. It starts no sessions.
 3. Run `scope TASK_ID --role controller|interaction|user --source SOURCE`
    from the trusted host for the approved role. Give the resulting proof only
    to that role. Reissue scoped proofs after a Run or binding change.
+   A submission proof may resume an untouched initial reservation. Use a
+   scoped controller proof to resume, recheck or reconcile subsequent Runs.
 4. With the scoped controller proof, run
    `ato agent ask TASK_ID --kind decision --question TEXT --reason REASON`.
    The actual scoped user can then use `ato inbox` and `ato answer`.
@@ -46,8 +49,9 @@ call [Host](../ato_host.py) to compose the same services as the CLI.
   native home. Actor proofs are accepted only inside these roots. Command
   tools and independent checks cannot read the proof roots, state or native
   homes. AGY and Claude can read their own authentication home inside their
-  outer sandbox. `ato agent doctor` reports local file
-  availability and capability evidence.
+  outer sandbox. `ato agent doctor` reports local availability and Reviewer
+  capabilities. Add `--probe-versions` for sandboxed, time-limited version
+  checks and a match against each Reviewer's required version.
 - A proof file contains `version: 2`, an opaque `reference`, and
   `proof: {method, credential_ref, challenge}`. Use the local CLI proof
   method `local-cli-token` and a secret challenge. The corresponding
@@ -68,8 +72,8 @@ call [Host](../ato_host.py) to compose the same services as the CLI.
   `enabled`, `reference`, `repo_key`, `role`, and applicable `revisions`.
   An endpoint may further pin `scope` to a single Task. The optional
   `mailbox` credential comes from the existing trusted managed mailbox.
-  Grant changes belong to the enrolled host. A credential can be revoked by
-  disabling its registry record.
+  Grant changes belong to the enrolled host. Use `revoke REFERENCE --source SOURCE`
+  to disable a credential or endpoint.
 
 The authenticated user's explicit invocation is the event for ordinary answers
 and acceptance. Privileged answers require the host's exact correlated event
@@ -81,12 +85,36 @@ authority fields. A binding/reviewer transition additionally requires
 verified events and their purpose. They are separate from user-supplied
 evidence files.
 
+## Binding changes and delivery recovery
+
+1. Prepare the next binding revision with
+   `enroll-endpoint --repo PATH --role controller|interaction --revision N --source SOURCE`.
+   Pass `--reference REF` to add the revision to an enabled existing endpoint.
+   To register a native mailbox route, provide both `--native-kind codex|pi_acp`
+   and `--native-session ID`. The host verifies the native session and repository
+   before recording its credentials.
+2. With the current scoped user proof, run
+   `approve-binding TASK_ID handoff --to REF --source SOURCE` or
+   `approve-binding TASK_ID reviewer --kind KIND --source SOURCE`.
+   Supply an interaction reference or Reviewer model/effort when they are part
+   of the approved change. Pass the returned `decision` file to the corresponding
+   `ato agent` command. After the handoff, issue new scoped credentials.
+3. Use `reconcile-delivery TASK_ID MESSAGE_ID --source SOURCE` for a correlated
+   delivery whose effect is uncertain. The host acquires the target lease and
+   checks current native idle evidence for the exact session and generation.
+   The existing message and attempt remain in the audit history.
+4. Use `quarantine-task TASK_ID --source SOURCE` to close an unresolved Run that
+   has no prepared settlement and has verified process exit. Quarantine
+   releases the repository admission barrier for other tasks and retains this
+   task's worktree and evidence for review.
+
 ## Observation
 
 The release tool can preserve authorized observation when the target host
 already has an enabled `observation.json`, a `source_ref`, and a prepared
 managed mailbox in the selected unified namespace. The optional
-`transport_kinds` list selects already registered trusted adapters. Prepare
+`transport_kinds` list selects already registered trusted adapters. Its default
+allows Codex and managed Pi ACP. Prepare
 route credentials and notification policy through the trusted host. Read-only
 diagnosis and installation work with the observer absent. The observer routes
 compact references. Its reader verifies the current Task, generation,

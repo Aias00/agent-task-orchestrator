@@ -1302,7 +1302,8 @@ class _RunDriver:
         if result.status != "success":
             self.reason = result.code
             if result.code not in {"AUTH_BLOCKED", "EXECUTABLE_UNAVAILABLE", "VERSION_MISMATCH",
-                                   "REVIEWER_MUTATION_VIOLATION", "TIMEOUT", "INVALID_PROTOCOL"}:
+                                   "REVIEWER_MUTATION_VIOLATION", "TIMEOUT", "INVALID_PROTOCOL",
+                                   "REVIEW_PROMPT_TOO_LARGE"}:
                 self.host.unknown = True
             return None
         verdict = validate_review_verdict(result.output)

@@ -8,6 +8,8 @@ import time
 import ato_config
 import ato_process
 import ato_product
+import budget
+import hub_sandbox
 from ato_execution import _current, _repo_gate, _worker_lock, _verify_exit, _active_proof
 from ato_host import Host, host_record
 from ato_private import render_notice
@@ -54,7 +56,7 @@ class Application:
                 return system_status(host)
             return notification_policy(host, getattr(args, "repo", None))
         if operation == "agent" and subcommand == "doctor":
-            return doctor(host)
+            return doctor(host, probe_versions=getattr(args, "probe_versions", False))
         actor_operation = {"run": "initial", "list": "observe", "status": "observe"}.get(
             operation, subcommand or operation)
         proof = host.caller(actor_operation)
@@ -169,17 +171,24 @@ def notification_policy(host, repo):
     store = host.store
     normalized = normalize_repository(repo) if repo is not None else None
     with ato_config.use_unified_kernel(store.kernel_root, store.native_home):
-        policy = notification_state.status()
-        muted = bool(normalized and any(Path(rule["repo"]).resolve() == Path(normalized.root)
-                                       for rule in notification_state.project_mutes()))
+        def read(path):
+            return host_record(path, store.home)
+
+        try:
+            policy = notification_state.status(read=read)
+            muted = bool(normalized and any(Path(rule["repo"]).resolve() == Path(normalized.root)
+                                           for rule in notification_state.project_mutes(read=read)))
+        except (OSError, ValueError, TypeError, KeyError):
+            raise TaskError("STATE_CORRUPT") from None
     return dict(mode=policy["mode"], configured=policy["configured"],
                 completion=policy.get("completion", "silent"), muted=muted,
-                disposition="recorded_only" if muted else policy["mode"])
+                disposition="recorded_only" if muted or not policy["configured"] else policy["mode"])
 
 
 def system_status(host):
     home = host.store.kernel_root / "ctask-interaction"
-    for delay in (.01, .03, .08, None):
+    delays = (.01, .03, .08, None)
+    for delay in delays:
         try:
             mailbox_summary = mailbox(home)
             break
@@ -191,17 +200,24 @@ def system_status(host):
             time.sleep(delay)
     state = "absent"
     pid = None
-    try:
-        row = host_record(home / "control/process.json", host.store.home)
-    except FileNotFoundError:
-        pass
-    else:
+    row = None
+    for delay in delays:
+        try:
+            row = host_record(home / "control/process.json", host.store.home)
+            break
+        except FileNotFoundError:
+            break
+        except (OSError, ValueError) as exc:
+            if delay is None:
+                raise TaskError(getattr(exc, "code", "STATE_CORRUPT")) from None
+            time.sleep(delay)
+    if row is not None:
         pid = row.get("pid")
         state = ato_process.disposition(pid, row.get("pid_identity"))
         if state == "live":
             source = dict(root=str(Path(__file__).resolve().parent), python=os.path.abspath(sys.executable),
                           surface="ato-v1", seal=host.store.runtime_seal)
-            for delay in (.01, .03, .08, None):
+            for delay in delays:
                 try:
                     state = "watching" if ObserverProbe().observer(home, source) else "unverified"
                     break
@@ -210,27 +226,45 @@ def system_status(host):
                         state = "unverified"
                     else:
                         time.sleep(delay)
-    return dict(schema_version=1, release=host.store.runtime_seal, namespace="unified-v1",
+    with ato_config.use_unified_kernel(host.store.kernel_root, host.store.native_home):
+        try:
+            time_policy = budget.time_policy(read=lambda path: host_record(path, host.store.home))["mode"]
+        except (OSError, ValueError, TypeError, KeyError):
+            raise TaskError("STATE_CORRUPT") from None
+    return dict(schema_version=1, release=host.store.runtime_seal, namespace="unified-v1", time_policy=time_policy,
                 observer=dict(pid=pid, state=state, **host.observer_transport()), mailbox=mailbox_summary)
 
 
-def doctor(host):
+def doctor(host, *, probe_versions=False):
     import agents
     from hub_registry import FACTORIES
 
-    def capability(path):
+    def capability(kind, path, expected=None):
         selected = Path(path)
-        available = selected.is_absolute() and selected.resolve() == selected and selected.is_file()
-        return dict(available=available and os.access(selected, os.X_OK),
-                    version=None, probe="local_file")
+        try:
+            available = (selected.is_absolute() and selected.resolve() == selected and selected.is_file()
+                         and os.access(selected, os.X_OK))
+        except (OSError, RuntimeError):
+            available = False
+        result = dict(available=available, version=None, probe="local_file", expected_version=expected,
+                      version_match=None)
+        if probe_versions and available and sandbox:
+            paths = profile.protected_reads(host.store)
+            probe = hub_sandbox.doctor(kind, selected, expected, protected_reads=paths)
+            result.update(version=probe["version"], probe="sandboxed_version", code=probe["code"],
+                          version_match=probe["code"] == "OK" if expected is not None else None)
+        return result
 
     profile = host.configured_profile()
     sandbox = Path("/usr/bin/sandbox-exec").is_file()
     worker = dict(kind="codex", configured=profile is not None, available=False)
     reviewers = {}
     if profile:
-        worker.update(capability(profile.worker_executable))
-        reviewers = {kind: capability(path) for kind, path, _ in profile.review_tools}
+        worker.update(capability("codex", profile.worker_executable))
+        for kind, path, _ in profile.review_tools:
+            adapter = FACTORIES[kind]
+            reviewers[kind] = capability(kind, path, adapter.expected_version)
+            reviewers[kind]["capabilities"] = adapter.capabilities().values
     worker.update(local_ready=worker["available"] and sandbox)
     sessions = {kind: agents.registry.session_capabilities(kind).to_mapping()
                 for kind in agents.registry.kinds()}

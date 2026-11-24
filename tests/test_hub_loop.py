@@ -86,6 +86,11 @@ class HubLoopTests(unittest.TestCase):
         original=self.create();handlers=[signal.getsignal(s) for s in (signal.SIGINT,signal.SIGTERM)]
         state=self.loop.run('task-one');self.assertEqual(state['status'],'ready_for_user_review',state)
         self.assertEqual(state['review_round'],2);self.assertEqual(len(state['workflow_history']),2)
+        first, final = [runner.read(Path(path)/'state.json')['elapsed_seconds']
+                        for path in state['workflow_history']]
+        self.assertGreater(first, 0)
+        self.assertGreater(final, first)
+        self.assertEqual(state['workflow_elapsed_seconds'], final)
         worktree=Path(state['worktree']['path']);self.assertEqual((worktree/'result.txt').read_text(),'done-fixed')
         frozen=self.ledger.read_task('task-one')[0]['worker_contract']
         for name in state['workflow_history']:

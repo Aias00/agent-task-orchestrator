@@ -10,6 +10,7 @@ import shutil
 import uuid
 
 import budget
+import ato_config
 import ato_core as core
 from hub_contract import (HubAgentSpec, HubTurnRequest, blocker_fingerprint,
                           require, validate_review_verdict, validate_task_spec)
@@ -217,6 +218,9 @@ class HubLoop:
                 checks=[copy.deepcopy(argv) for c in commands for argv in c['checks']])])
             contract['stages']=[dict(id='hub-initial',covers=[c['id'] for c in commands],plan=plan)]
         self.transition(identifier,state,'running_worker')
+        used = state.get('workflow_elapsed_seconds')
+        if used is None:
+            used = sum(budget.summary(path)['used_seconds'] for path in state.get('workflow_history',[]))
         source=self.ledger.task(identifier)/('worker-contract-'+uuid.uuid4().hex+'.json');save(source,contract)
         signals={signum:signal.getsignal(signum) for signum in (signal.SIGINT,signal.SIGTERM)}
         log=self.ledger.task(identifier)/('worker-host-'+uuid.uuid4().hex+'.log')
@@ -226,6 +230,9 @@ class HubLoop:
             state.setdefault('workflow_history',[]).append(str(directory));state['active_workflow_dir']=str(directory)
             self.ledger.update_task(identifier,state)
             owner=GuardedWorkflow(directory,lambda:self.guard(identifier))
+            if used:
+                owner.state['elapsed_seconds'] = used
+                core.save(directory/'state.json',owner.state)
             try:
                 if checks_only:owner.verify_only()
                 else:
@@ -238,6 +245,7 @@ class HubLoop:
             finally:
                 for signum,handler in signals.items():signal.signal(signum,handler)
         row=core.read(directory/'state.json')
+        state['workflow_elapsed_seconds'] = budget.summary(directory,row)['used_seconds']
         state['host_checks']=copy.deepcopy(row['criteria'])
         allowed=all(row['criteria'][c['id']]['status']=='passed' for c in contract['acceptance'] if c['kind']=='command')
         clean=not row.get('owner_pid') and not row.get('active_process') and not row.get('active_run')
@@ -262,10 +270,16 @@ class HubLoop:
             +'\nBounded source diff\n'+json.dumps(bundle))
         runtime=self.ledger.task(identifier)/'runtime'/('review-'+str(state['review_round']))
         runtime.mkdir(mode=0o700)
+        protected_reads = ()
+        if agent.kind == 'codex':
+            protected_reads = (self.ledger.root, root/'.codex/tasks', ato_config.codex_home())
+            if self.worker_codex_home is not None:
+                protected_reads += (self.worker_codex_home,)
         result=adapter.run_turn(HubTurnRequest(agent,root,runtime,prompt,
             snapshot=lambda:hub_worktree.snapshot_integrity(root),
             stop=lambda:(self.ledger.task(identifier)/'STOP').exists(),resume_session_id=sid,
-            session_mode=mode,timeout_seconds=spec['review_policy']['timeout_seconds'],provenance=provenance))
+            session_mode=mode,timeout_seconds=spec['review_policy']['timeout_seconds'],provenance=provenance,
+            protected_reads=protected_reads))
         if result.status!='success':
             status=result.status if result.status in ('stopped','cleanup_blocked') else 'blocked'
             self.transition(identifier,state,status,result.code);return False

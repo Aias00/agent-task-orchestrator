@@ -1,6 +1,6 @@
 ---
 name: ato
-description: Submit, observe, stop and resume durable agent tasks. Use ATO to route human decisions and verify an exact product for acceptance.
+description: Submit, observe, stop and resume durable agent tasks. Route human decisions and report verified task completion.
 ---
 
 # ATO
@@ -10,8 +10,8 @@ operations.
 
 1. Generate the task spec from the user's instructions and preview it using
    `ato project validate --repo PATH --spec FILE`. Include the task's command
-   checks. Use the installed `ato`
-   under the account that owns the private ATO state. Submit using
+   checks. Manual criteria are optional. Use the installed `ato` as the
+   account that owns the private ATO state for local tasks. Submit using
    `ato run --repo PATH --spec FILE` and retain the Task ID.
 2. Read `ato status TASK_ID` to check execution, independent checks, pending
    decisions and the next action. Use `ato list --repo PATH` for the project.
@@ -19,13 +19,17 @@ operations.
    request to the user. The enrolled user records their decision using
    `ato answer REQUEST_ID --answer TEXT`.
 4. Report completion and the product location once `ato status` shows
-   `completed`. Record optional approval only when the user explicitly wants
-   a receipt. Use `ato accept TASK_ID` for a local task or
+   `completed`. The Observer can notify the verified submitting Codex session
+   on the first successful completion. Record optional approval only when the
+   user explicitly wants a receipt. Use `ato accept TASK_ID` for a local task or
    `ato accept TASK_ID --evidence FILE` for a scoped task.
 5. Use `ato stop TASK_ID` for an authorized STOP. Verify cleanup in status.
    Use `ato resume TASK_ID` only for an explicit authorized continuation.
    An unresolved delivery or execution result requires reconciliation before
    another attempt.
+6. Use `ato project cleanup TASK_ID --confirm` for authorized removal of a
+   verified idle worktree. Completed Tasks retain their verified product on
+   the task branch. Stopped Tasks require clean worktrees.
 
 A technical review, message delivery, or handoff does not record user approval.
 For scoped operations, select the enrolled actor's proof via `ATO_ACTOR_FILE`.

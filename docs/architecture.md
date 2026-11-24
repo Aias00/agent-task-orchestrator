@@ -6,7 +6,26 @@
 
 不要求用户开启 `/goal`。模型负责需求与实现判断，确定性程序负责状态、期限、锁、检查命令、消息去重和可审计的推进证据。
 
-## 组件与调用关系
+## 统一入口与隔离边界
+
+`bin/ato` 选择封存源码。公开命令由 `ato.py`、`ato_cli/__init__.py`
+和 `ato_application.py` 处理。`ato_runtime.py` 承接经验证的私有运行、
+Observer 和交接读取。用户用 `ato agent binding` 查询控制端、交互端、
+Reviewer 与实际 Run owner，用 `ato agent handoff` 在授权后更新绑定。
+
+| 层 | 职责 |
+| --- | --- |
+| `ato_task_store.py`、`ato_execution.py` | 把不可变规格、Git 工作树、Run、STOP 和原生 Workflow 代次绑定到同一任务 |
+| `ato_host.py`、`ato_binding.py`、`ato_acceptance.py` | 检查当前端点、凭据作用域和授权证据，记录交接、答复与精确产物验收 |
+| `ato_execution_host.py`、`hub_sandbox.py`、`hub_worktree.py` | 隔离 Worker 和 Reviewer，保护私有路径，运行独立检查并回收进程组 |
+| `ato_product.py`、`ato_application.py` | 验真被接受的产物，在任务分支保留精确提交后移除完成的工作树 |
+| `ato_observer.py`、`ato_release_lib.py` | 观察相关投递、维护端点租约、检查切换门禁和封存快照 |
+
+旧运行内核仍支撑阶段执行、独立 checks 和受管 Mailbox。下列章节描述
+内核的职责和历史命令语义。当前公开命令以统一契约为准。
+[统一契约](ato-unified-contract.md) · [模块地图](source-map.md)
+
+## 运行内核组件与调用关系
 
 ```mermaid
 flowchart TD
@@ -32,7 +51,7 @@ flowchart TD
 | 模块 | 责任 | 不承担的责任 |
 | --- | --- | --- |
 | `ato_core.py` | 标准库基础原语、原子读写、锁、PID 身份与共享 Halt 类型 | 不导入业务模块，不注册适配器或启动服务 |
-| `ato_cli/` | 保留原参数表面，按领域调度命令；由 runner 门面传入运行上下文 | 不从计划加载代码，不改变验收或权限 |
+| `ato_cli/` | 校验统一命令参数，调用应用层并输出结构化结果 | 不从计划加载代码，不改变验收或权限 |
 | `runner.py` | 校验 DAG、阶段 worker、重试、进程组清理、仓库锁、宿主 checks | 不从 worker 的自述推断通过 |
 | `workflow.py` | 完整合约、最终验收、阶段规划与累计预算、人工条件 | 不把新阶段当新总目标；不自行批准人工验收 |
 | `recovery.py` | 有来源的有限接管、回复观察、证据登记与恢复 | 不无限修复或重置预算 |

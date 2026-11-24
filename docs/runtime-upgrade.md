@@ -84,25 +84,38 @@ sealed sources, entrypoint bytes and modes, mailbox state and process
 identities. It restores each recorded original executable and deletes
 transaction-created executables that were previously absent. It restores the
 previously authorized observer in its original context. Repeating a verified
-rollback leaves that selection in place. A third-party file replacement,
-changed source, ambiguous PID, or busy mailbox records `recovery_required`
-for inspection. Retain the journal and the sealed snapshots for recovery.
+rollback leaves that selection in place. A failed preflight leaves the
+journal unchanged. If recovery fails after mutation begins, the journal
+records `recovery_required`. Retain the journal and sealed snapshots for
+recovery.
 
 Task and Run ledgers, STOP, attempt histories, worktrees and delivery claims
 remain available in their original namespaces. Verified idle Tasks can stay
 on their original sealed release during activation or rollback, including
 Tasks with older successful Run receipts. The current CLI projects these
 Tasks as completed once it verifies the stored product and checks. Active
-commands, unsettled execution or provisioning,
-and busy mailbox or turn slots still require a safe boundary.
+commands, unsettled execution or provisioning, and busy mailbox or turn
+slots still require a safe boundary.
+
+The selected release can clean up verified idle completed or stopped Tasks
+from an earlier release with `ato project cleanup TASK_ID --confirm`. For
+completed Tasks, it rechecks the retained product and preserves its exact
+contents on the task branch before removing the worktree. A stopped Task
+requires a clean worktree.
 
 `ato status` reports `RUNTIME_MISMATCH` and `SELECT_TASK_RUNTIME` for an
 unfinished Task pinned to a different release. Retain the older sealed
 snapshot and transaction journal. The journal identifies the release and
 interpreter selected before the switch. Use that exact interpreter and
-`ato.py` with the same recorded ATO and Codex homes for the Task's commands.
-Fixture qualification and source installation leave real activation and
-provider verification pending.
+`ato.py` with the same recorded ATO and Codex homes for operations that require
+the Task's original release, such as resuming work. Fixture qualification and
+source installation leave real activation and provider verification pending.
+
+The installer, release script and runtime share snapshot, mailbox and
+launcher verification through `ato_release_lib.py`. See the
+[host setup guide](ato-host-setup.md) for authorized delivery reconciliation
+and the [module map](source-map.md) for the public and private runtime
+boundaries.
 
 Optional Skill installation is locked separately. Before upgrading a Skill,
 archive the current version outside its destination, then install from the

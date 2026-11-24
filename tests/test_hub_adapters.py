@@ -78,6 +78,13 @@ class HubAdapterTests(unittest.TestCase):
                     self.assertNotIn('/private/fixture-path',encoded)
                     self.assertNotIn('stderr',encoded)
 
+    def test_batch4_agy_rejects_prompt_above_argv_limit_before_launch(self):
+        adapter = adapter_fixture(self.root, AgyHubAdapter, dict(verdict=verdict()))
+        request = self.request(adapter)
+        request = replace(request, prompt='界' * 40000)
+        with patch.object(adapter, 'doctor', side_effect=AssertionError('must not launch')):
+            self.assertEqual(adapter.run_turn(request).code, 'REVIEW_PROMPT_TOO_LARGE')
+
     def test_O2_each_malformed_auth_failure_timeout_is_closed(self):
         for klass in CLASSES:
             folder=self.root/klass.kind;folder.mkdir()

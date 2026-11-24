@@ -5,16 +5,16 @@ import ato_core as core
 MODES = ('all', 'user_input_only')
 
 
-def hub_config():
+def hub_config(*, read=core.read):
     path = ato_config.interaction_directory()/'hub.json'
-    return core.read(path) if path.exists() else {}
+    return read(path) if path.exists() or path.is_symlink() else {}
 
 
-def status():
+def status(*, read=core.read):
     path = ato_config.interaction_directory()/'notification-policy.json'
-    hub = hub_config()
-    if path.exists():
-        policy = core.read(path)
+    hub = hub_config(read=read)
+    if path.exists() or path.is_symlink():
+        policy = read(path)
         if policy.get('hub_thread') == hub.get('thread_id'):
             if policy.get('mode') not in MODES:
                 raise ValueError('invalid notification policy')
@@ -22,12 +22,12 @@ def status():
     return dict(mode='all', configured=False, hub_thread=hub.get('thread_id'))
 
 
-def project_mutes():
+def project_mutes(*, read=core.read):
     path = ato_config.interaction_directory()/'notification-project-mutes.json'
-    hub = hub_config()
-    if not path.exists():
+    hub = hub_config(read=read)
+    if not path.exists() and not path.is_symlink():
         return []
-    data = core.read(path)
+    data = read(path)
     if data.get('hub_thread') != hub.get('thread_id'):
         return []
     return [r for r in data.get('rules', []) if r.get('muted') is True]

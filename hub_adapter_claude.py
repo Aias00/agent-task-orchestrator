@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+from tempfile import mkdtemp
 import uuid
 
 from hub_contract import (HubCapabilities,HubTurnResult,REVIEW_VERDICT_SCHEMA,HUB_TASK_SPEC_SCHEMA,
@@ -11,18 +12,20 @@ import hub_sandbox as sandbox
 
 class ClaudeHubAdapter:
     kind='claude'
+    expected_version = '2.1.325'
 
     def __init__(self, executable=None, *, home=None, proxy=None):
         self.executable=sandbox.executable(self.kind,executable)
         self.home=sandbox.canonical(home if home is not None else Path.home())
         self.proxy=sandbox.validate_loopback_proxy(proxy)
 
-    def capabilities(self):
+    @staticmethod
+    def capabilities():
         states=dict(structured_output='unknown',session_resume='unknown',interactive_attach='unknown',
             read_only_cli='supported',os_sandbox_compatible='supported',long_lived_stream='unsupported')
         return HubCapabilities({name:dict(state=value,evidence='H1 Spike S4-Claude: restricted auth_blocked observed; authenticated structured output/resume unqualified') for name,value in states.items()})
 
-    def doctor(self):return sandbox.doctor(self.kind,self.executable,'2.1.325')
+    def doctor(self):return sandbox.doctor(self.kind,self.executable,self.expected_version)
 
     def attach_argv(self, session_id, workspace):
         token(session_id);sandbox.canonical(workspace);require(self.executable is not None,'EXECUTABLE_UNAVAILABLE')
@@ -58,7 +61,7 @@ class ClaudeHubAdapter:
                     diagnostic=result.stderr.lower()+json.dumps(final).lower().encode()
                     auth=any(marker in diagnostic for marker in (b'not logged in',b'not authenticated',b'login required',b'authentication required'))
                     if not auth and final.get('is_error') is True and final.get('structured_output') is None and final.get('total_cost_usd')==0:
-                        probe=rt/'auth-check';probe.mkdir(mode=0o700)
+                        probe=Path(mkdtemp(prefix='auth-check-',dir=rt))
                         status=sandbox.run(prefix+[str(self.executable),'auth','status'],workspace=request.workspace,
                             runtime=probe,environment=env,timeout=min(3,request.timeout_seconds),stop=request.stop)
                         auth=status.code=='OK' and strict_json(status.stdout).get('loggedIn') is False

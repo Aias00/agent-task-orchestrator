@@ -56,12 +56,12 @@ def build_parser():
     spec(command(project, "validate", "Preview a normalized specification."))
     command(project, "trace", "Read a bounded task timeline.", "task_id")
     option(command(project, "recheck", "Recheck the existing product.", "task_id"), "checks-only", flag=True)
-    option(command(project, "cleanup", "Remove an eligible clean worktree.", "task_id"),
+    option(command(project, "cleanup", "Retain accepted changes and remove an eligible worktree.", "task_id"),
            "confirm", required=True, flag=True)
 
     agent = command(daily, "agent", "Capabilities, ownership and technical review.")
     agent = agent.add_subparsers(dest="subcommand", required=True)
-    command(agent, "doctor", "Inspect configured local adapter capabilities.")
+    option(command(agent, "doctor", "Inspect configured local adapter capabilities."), "probe-versions", flag=True)
     command(agent, "binding", "Read the verified task binding.", "task_id")
     handoff = command(agent, "handoff", "Record an authorized controller handoff.", "task_id")
     option(handoff, "to", required=True)

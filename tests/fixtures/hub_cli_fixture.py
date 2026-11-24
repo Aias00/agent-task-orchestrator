@@ -21,7 +21,15 @@ elif kind=='claude':
     assert args[args.index('--tools')+1]=='Read,Glob,Grep' and '--resume' not in args
 else:
     assert args[0]=='exec' and 'approval_policy="never"' in args
-    assert 'sandbox_mode="read-only"' in args if 'resume' in args else args[args.index('--sandbox')+1]=='read-only'
+    if 'default_permissions="ato-host"' in args:
+        profiles = [value for value in args if value.startswith('permissions.ato-host=')]
+        assert len(profiles) == 1 and '--sandbox' not in args
+        policy = profiles[0]
+        assert '":root"="read"' in policy and 'network={enabled=false}' in policy
+        assert json.dumps(str(Path.cwd()/'.codex/tasks')) + '="deny"' in policy
+        assert json.dumps(str(Path.cwd())) + '="write"' not in policy
+    else:
+        assert 'sandbox_mode="read-only"' in args if 'resume' in args else args[args.index('--sandbox')+1]=='read-only'
     assert '-C' not in args
 for name in ('CTASK_SESSION_REF','CTASK_SESSION_TOKEN','ATO_ACTOR_FILE','PYTHONPATH','NODE_OPTIONS','DYLD_INSERT_LIBRARIES','H1_SECRET','HTTPS_PROXY'):
     assert name not in os.environ

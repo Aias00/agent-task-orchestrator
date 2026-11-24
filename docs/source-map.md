@@ -1,16 +1,15 @@
 # Source and capability map
 
-The unified public entry is [ato](../README.md#quick-start). This map records
-the earlier implementation and its internal compatibility mechanisms.
-
-The stable source baseline is exported from the deployed compact-handoff
-controller, including the compatible CLI runtime. Publication does not switch
-installed launchers, migrate task records or grant execution permissions.
+The unified public entry is [ato](../README.md#quick-start). The selected
+sealed source provides the public CLI, private runtime and the internal
+Workflow kernel.
 
 | Responsibility | Source |
 |---|---|
 | Standard-library primitives, shared public exception and compatibility exports | `ato_core.py`; re-exported by `runner.py` and `recovery.py` |
-| Argument surface and domain CLI dispatch | `ato_cli/parser.py`, `ato_cli/*_cmd.py`; `runner.main()` remains the entrypoint |
+| Public launcher, command parsing and composition | `bin/ato`, `ato.py`, `ato_cli/__init__.py`, `ato_application.py` |
+| Task/Run ledger, admission, ownership and accepted product retention | `ato_task_store.py`, `ato_execution.py`, `ato_execution_host.py`, `ato_product.py`, `ato_process.py` |
+| Enrolled credentials, bindings, answers, acceptance and observation | `ato_host.py`, `ato_binding.py`, `ato_acceptance.py`, `ato_observer.py`, `ato_private.py`, `ato_runtime.py` |
 | Complete workflow, stage execution and independent checks | `workflow.py`, `runner.py`, `permissions.py` |
 | Bounded recovery, host actions and accumulated time | `recovery.py`, `execution_state.py`, `host_recheck.py`, `host_budget.py`, `budget.py` |
 | Durable task observation, questions and disposition | `control.py`, `interaction.py`, `workflow_closure.py`, `failure_attention.py` |
@@ -25,17 +24,17 @@ installed launchers, migrate task records or grant execution permissions.
 | Per-action existing-owner budget fence, conservative request reservations | `pi_production_fence.py`, `pi-coordinator-guard.mjs` |
 | Owned CONNECT exit, bounded custom HTTPS/SSE transport and native group anchor | `pi_production_egress.py`, `pi_production_transport.mjs`, `pi_production_exec.py` |
 | Compact private host/failure material and once-only completion policy | `coordination.py`, `failure_notice.py`, `completion_notifications.py`, `notifications.py`, `hub_queue_gate.py` |
-| Read-only snapshot qualification, journaled entrypoint/observer cutover and executable-only rollback | `scripts/release_snapshot.py` |
-| CLI entrypoints and optional conversation integration | `bin/`, `scripts/install.py`, `skills/codex-long-task/` |
+| Snapshot qualification, read-only inspection and journaled cutover/rollback | `scripts/release_snapshot.py`, `ato_release_lib.py`, `ato_seal.py` |
+| Source installation, trusted operator administration and conversation integration | `scripts/install.py`, `scripts/ato_host_setup.py`, `skills/ato/SKILL.md` |
 | Neutral read-only hub contracts, OS boundary, worktree integrity and private session ledger (offline candidate) | `hub_contract.py`, `hub_sandbox.py`, `hub_worktree.py`, `hub_ledger.py` |
 | Code-owned thin AGY/Claude/Codex reviewers and explicit capability registry | `hub_adapter_agy.py`, `hub_adapter_claude.py`, `hub_adapter_codex.py`, `hub_registry.py` |
-| Bounded isolated work/check/review/fix loop and independent source-only CLI/skill | `hub_loop.py`, `hub_cli.py`, `skills/ato-hub-orchestrator/SKILL.md` |
+| Internal H1 work/check/review/fix loop and guarded Workflow bridge | `hub_loop.py` |
 
-The structural source refactor preserves the protected core filenames and public
-CLI. Passive stores add no independent ledger, delivery path or authorization;
-they read/write the same existing tables and files. The document index is in
-[README.md](README.md). Project metadata does not replace checkout installation
-or activate an installed runtime.
+The eight protected core modules retain their original implementation and
+existing Workflow and mailbox records. Unified services bind those records to
+the selected Task, Run and enrolled actor. Project metadata distributes the
+launcher, Node guards and integration manifests. The sealed source installer
+selects the runtime. [Documentation index](README.md)
 
 An adapter being installed is distinct from authenticated readiness, native
 continuation support, real-provider qualification and full task acceptance.

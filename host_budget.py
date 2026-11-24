@@ -18,9 +18,9 @@ def run(directory, argv, source, *, accounting, core):
     with (Path(state['repo'])/'.codex/tasks/.worker.lock').open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         core.ensure_resumable(d)
-        if core.read(d/'state.json')['status'] in ('stopped', 'completed'):
-            raise ValueError('origin host command cannot restart a stopped or completed task')
         owner = Workflow(d)
+        if owner.state['status'] in ('running', 'stopped', 'completed'):
+            raise ValueError('origin host command requires an idle, resumable workflow')
         owner.guard()  # STOP and frozen contract checked before recording any execution.
         with recovery.execution_owner(d, owner.state, role='origin') as ownership:
             owner._execution_owner = ownership

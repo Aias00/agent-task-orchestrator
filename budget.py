@@ -27,18 +27,17 @@ def use_time_policy(policy):
         _run_time_policy.reset(token)
 
 
-def time_policy():
+def time_policy(*, read=None):
     """Machine-local user policy; absence preserves legacy installations exactly."""
     if (pinned := _run_time_policy.get()) is not None:
         return dict(pinned)
-    import interaction
     import ato_config
-    path = interaction.directory()/'time-policy.json'
-    if not path.exists():
+    path = ato_config.interaction_directory()/'time-policy.json'
+    if not path.exists() and not path.is_symlink():
         if ato_config.in_unified_kernel():
             return dict(mode='advisory', source='Unified execution default', revision=None)
         return dict(mode='enforced', source='Legacy installation; no advisory policy recorded', revision=None)
-    value = core.read(path)
+    value = (read or core.read)(path)
     prior = 'ctask-time-policy-v1'
     for row in value['history']:
         body = {k: v for k, v in row.items() if k != 'checksum'}

@@ -10,18 +10,20 @@ import hub_sandbox as sandbox
 
 class AgyHubAdapter:
     kind='agy'
+    expected_version = '1.5.14'
 
     def __init__(self, executable=None, *, home=None, proxy=None):
         self.executable=sandbox.executable(self.kind,executable)
         self.home=sandbox.canonical(home if home is not None else Path.home())
         self.proxy=sandbox.validate_loopback_proxy(proxy)
 
-    def capabilities(self):
+    @staticmethod
+    def capabilities():
         states=dict(structured_output='supported',session_resume='supported',interactive_attach='supported',
             read_only_cli='unsupported',os_sandbox_compatible='supported',long_lived_stream='unsupported')
         return HubCapabilities({name:dict(state=value,evidence='H1 Spike S1-S3: AGY 1.5.14, outer Seatbelt and post-turn integrity') for name,value in states.items()})
 
-    def doctor(self):return sandbox.doctor(self.kind,self.executable,'1.5.14')
+    def doctor(self):return sandbox.doctor(self.kind,self.executable,self.expected_version)
 
     def attach_argv(self, session_id, workspace):
         token(session_id);sandbox.canonical(workspace)
@@ -32,6 +34,7 @@ class AgyHubAdapter:
         private_values=sandbox.secrets(os.environ)
         try:
             require(request.agent.kind==self.kind)
+            require(len(request.prompt.encode()) <= 96 * 1024,'REVIEW_PROMPT_TOO_LARGE')
             def invoke():
                 doc=self.doctor();require(doc['available'],doc['code'])
                 persistent=request.session_mode!='fresh_only'

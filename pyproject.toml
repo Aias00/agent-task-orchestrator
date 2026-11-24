@@ -102,7 +102,15 @@ py-modules = [
 ]
 
 [tool.setuptools.data-files]
-"share/agent-task-orchestrator/integrations/pi-acp" = ["integrations/pi-acp/compatibility.json"]
+"share/agent-task-orchestrator" = ["pi-path-guard.mjs", "pi-coordinator-guard.mjs", "pi_production_transport.mjs"]
+
+"share/agent-task-orchestrator/bin" = ["bin/ato"]
+
+"share/agent-task-orchestrator/integrations/pi-acp" = [
+  "integrations/pi-acp/compatibility.json",
+  "integrations/pi-acp/package.json",
+  "integrations/pi-acp/package-lock.json"
+]
 
 "share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py", "scripts/ato_host_setup.py"]
 

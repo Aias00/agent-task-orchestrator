@@ -118,6 +118,15 @@ class PublicCLI(unittest.TestCase):
         self.assertFalse(self.store.home.exists())
         self.assertFalse(self.store.native_home.exists())
 
+    def test_batch4_system_status_retries_observer_record_replacement(self):
+        app = self.app()
+        with patch("ato_application.host_record", side_effect=[TaskError("BUSY"), FileNotFoundError]) as read:
+            code, response = self.invoke("system", "status", app=app)
+        self.assertEqual(code, 0, response)
+        self.assertEqual(response["data"]["observer"]["state"], "absent")
+        self.assertEqual(read.call_count, 2)
+        self.assertFalse(self.store.home.exists())
+
     def submission(self):
         normalized = self.store.normalize_spec(self.repo, self.spec_file)
         self.registry(CONTROLLER, dict(enabled=True, reference=CONTROLLER, role="controller",

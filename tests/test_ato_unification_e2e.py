@@ -47,6 +47,9 @@ import subprocess
 import sys
 import time
 
+if sys.argv[1:] == ["--version"]:
+    print("codex-cli 0.171.0")
+    sys.exit(0)
 assert sys.argv[1] == "exec"
 assert "--sandbox" not in sys.argv
 assert 'default_permissions="ato-host"' in sys.argv
@@ -734,6 +737,24 @@ class InstalledATO(unittest.TestCase):
         self.profile()
         for command in (("system", "status"), ("agent", "doctor")):
             self.assertEqual(self.cli(*command)["observer"]["codex_queue"], "ready")
+
+    def test_batch4_diagnostics_probe_versions_and_validate_notification_files(self):
+        self.install()
+        self.assertEqual(self.cli("system", "status")["time_policy"], "advisory")
+        policy = self.cli("system", "notification-policy")
+        self.assertFalse(policy["configured"])
+        self.assertEqual(policy["disposition"], "recorded_only")
+        self.profile(via_setup=True)
+        diagnostics = self.cli("agent", "doctor", "--probe-versions")
+        self.assertEqual(diagnostics["worker"]["version"], "0.171.0")
+        reviewer = diagnostics["reviewers"]["codex"]
+        self.assertTrue(reviewer["version_match"])
+        self.assertEqual(reviewer["capabilities"]["read_only_cli"]["state"], "supported")
+        self.assertEqual(diagnostics["qualification"], "unverified")
+        state = self.store.kernel_root / "ctask-interaction"
+        write(state, "fixture")
+        (state / "notification-policy.json").symlink_to(self.root / "missing-policy")
+        self.cli("system", "notification-policy", error=(5, "STATE_CORRUPT"))
 
     def test_installed_host_handoff_requires_actual_attestation_and_continues_checks(self):
         self.install()

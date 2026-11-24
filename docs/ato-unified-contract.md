@@ -25,7 +25,7 @@ There is no human/JSON mode switch. Shell scripts consume named fields.
 | `ato run --repo PATH --spec FILE [--foreground]` | Validate and freeze the specification, allocate a new Task and its first Run, and admit it through the same launcher used by resume. Returns the task status record and only reports a live launch once the exact owner and startup receipt are verified. Default is background. Foreground waits for the same Run to settle, including at an external or human boundary with no further active work. |
 | `ato list [--repo PATH]` | `{tasks: [TaskSummary], warnings: [code]}` sorted by Task ID. Omitting the repo lists visible Tasks across repositories. Filtering is exact by normalized Git identity. |
 | `ato status TASK_ID` | Returns `TaskStatus` with overall state, actual execution, Run history, stage, checks, review, product, acceptance, pending items, delivery, and next step. |
-| `ato stop TASK_ID` | Durably fences the observed Run, then returns `TaskStatus` with the actual stop or cleanup progress. Repetition returns the existing disposition. |
+| `ato stop TASK_ID` | Durably fences the observed Run, then returns `TaskStatus` with the actual stop or cleanup progress. For completed Tasks and Tasks whose worktrees were removed, it returns the existing status without writing STOP. |
 | `ato resume TASK_ID` | Explicitly admits execution under the Task's current controller authority and recovery checks. When repository contention left an untouched initial reservation, resumes the same initial Run. A proved retryable prior execution requires a successor Run. Returns `TaskStatus` with the same background admission and startup proof as run. |
 | `ato inbox` | `{items: [InboxItem]}` containing authorized pending items, in creation order with ID as tie breaker. A read has no presentation or delivery effect. |
 | `ato answer REQUEST_ID --answer TEXT` | Records the actual user's answer to the exact pending request. Returns `{request_id, task_id, state, delivery, recorded_at}`, where `delivery` reports the canonical disposition. The execution owner consumes a valid decision separately. |
@@ -36,9 +36,9 @@ release machinery outside this table is host code.
 
 | Group | Exact operations |
 | --- | --- |
-| `project` | `validate --repo PATH --spec FILE` validates and previews the normalized repository, base commit and structural digest without creating state. `trace TASK_ID` returns bounded, redacted execution and delivery summaries. `recheck TASK_ID [--checks-only]` performs a foreground technical recheck of the already bound product under existing execution fences. `cleanup TASK_ID --confirm` removes an eligible clean worktree and retains its branch and evidence. |
-| `agent` | `doctor` returns installed/registered Worker, Reviewer and session capabilities with version/probe evidence and separate readiness. `binding TASK_ID` returns the scoped controller, interaction, Reviewer and actual Run owner summary. `handoff TASK_ID --to SESSION_REF [--interaction SESSION_REF] --evidence FILE` performs the binding transition below. `reviewer TASK_ID --kind KIND [--model MODEL] [--effort EFFORT] --evidence FILE` selects a permitted Reviewer for subsequent technical review. `ask TASK_ID --kind KIND --question TEXT --reason REASON [--continuation OP] [--purpose-ref REF]` records a canonical request under the current controller's scoped grant. |
-| `system` | `status` reports schema/release, observer identity and health, and mailbox summary in the selected namespace. `notification-policy [--repo PATH]` reports effective policy and its disposition for the optional repository. Both are read-only and redact private locators. |
+| `project` | `validate --repo PATH --spec FILE` validates and previews the normalized repository, base commit and structural digest without creating state. `trace TASK_ID` returns bounded, redacted execution and delivery summaries. `recheck TASK_ID [--checks-only]` performs a foreground technical recheck of the already bound product under existing execution fences. `cleanup TASK_ID --confirm` retains the verified product of a completed Task on its branch and removes the eligible worktree. A stopped Task requires a clean worktree. |
+| `agent` | `doctor [--probe-versions]` returns installed Worker, Reviewer and session capabilities. The optional probe checks versions locally under a read-only sandbox. It reports probe evidence and readiness separately from real-provider qualification. `binding TASK_ID` returns the scoped controller, interaction, Reviewer and actual Run owner summary. `handoff TASK_ID --to SESSION_REF [--interaction SESSION_REF] --evidence FILE` performs the binding transition below. `reviewer TASK_ID --kind KIND [--model MODEL] [--effort EFFORT] --evidence FILE` selects a permitted Reviewer for subsequent technical review. `ask TASK_ID --kind KIND --question TEXT --reason REASON [--continuation OP] [--purpose-ref REF]` records a canonical request under the current controller's scoped grant. |
+| `system` | `status` reports schema and release, observer identity, health and transport readiness, mailbox state, and the namespace's `advisory` or `enforced` time policy. `notification-policy [--repo PATH]` reports effective policy and its disposition for the optional repository. Both are read-only and redact private locators. |
 
 `project recheck` invokes only the authorized frozen host checks, and by
 default the configured Reviewer when present. `--checks-only` omits the
@@ -50,12 +50,12 @@ product, spec, check set and review revision still match. A changed product
 or Reviewer requires fresh qualifying evidence. An explicit recheck can refresh
 the checks and review of a completed product. Cleanup requires
 controller or scoped operator authority, proven idle execution and terminal
-completion or STOP. Apply the
-existing H1 checks for branch/common-dir/links and dirty tree. Record removal
-once, preserve the branch, accepted receipt and retained product/check
-evidence. For accepted cleanup, verify the retained clean Git tree matches
-the accepted product before removal. A stopped Task whose worktree was
-removed is sealed against resume.
+completion or STOP, including eligible tasks pinned to an earlier release.
+Apply the existing H1 checks for branch, common directory and shared links.
+For a completed Task the trusted host verifies the sealed product, commits
+its exact contents to the task branch when needed, and verifies the retained
+Git tree before removal. Preserve branch, Run and product/check evidence.
+A stopped Task must be clean, and removal seals it against resume.
 
 ### Parsing and command results
 
@@ -220,7 +220,9 @@ after checking its exact native index entry and session header. This private
 record selects the original conversation for completion notices.
 The session working directory and the submitted repository are independent.
 This routing metadata grants no actor authority and changes no controller
-or acceptance binding. See [host setup](ato-host-setup.md#completion-notices-for-local-tasks).
+or acceptance binding. An explicit submission proof can resume an untouched
+initial Run reservation. Subsequent Runs require a current scoped controller
+proof. See [host setup](ato-host-setup.md#completion-notices-for-local-tasks).
 
 An authenticated actor is a verified local CLI or trusted adapter principal.
 For scoped operations, the CLI selects a private actor file through
@@ -304,8 +306,9 @@ Directories are `0700`, regular state/evidence files are `0600`. Reject
 symlinks, hard links on trusted files, path escape, wrong owner, unsafe
 modes and schema drift. Open private records by verified directory and
 filename, and publish fsynced atomic replacements or exclusive creations
-in the same filesystem. Start the trusted runtime with umask `077` for
-kernel-created records as well. A private store can be absent without a read
+in the same filesystem. Host-created private files and directories get
+explicit modes. Child runtimes start with umask `077`. A private store can
+be absent without a read
 creating it. Registry, grants, locks, outbox and kernel-support state live
 under this versioned root. Bind the existing sealed core's config/storage
 lookups to `unified-v1/kernel/` via a code-owned initialization in the
@@ -425,7 +428,7 @@ attempts and elapsed time from Workflow. `checks` lists criterion IDs,
 states and receipt IDs. `review` gives the technical verdict and its
 receipt. `product` gives `product_id`, base, branch, authorized worktree
 location and `checks_sha256`. `acceptance` gives disposition
-(`pending`, `recorded`, `invalidated`), bound criteria and receipt ID.
+(`not_recorded`, `recorded`, `invalidated`), bound criteria and receipt ID.
 `pending` contains authorized request summaries. `delivery` uses canonical
 mailbox dispositions (including `recorded_only` when no transport is
 configured and `delivery_unknown` when admission is unconfirmed).
@@ -435,7 +438,7 @@ private prompts or transport transcripts.
 
 Overall status is derived from verified facts. In this table earlier safety
 conditions take priority over later progress signals. An ordinary unknown
-notification stays in `delivery` after valid acceptance and cannot undo it.
+notification stays in `delivery` without changing a verified `completed` state.
 Unresolved execution or decision delivery that could affect a new Run fences
 that Run.
 
@@ -625,9 +628,9 @@ A general edit, worktree substitution, changed index, missing evidence,
 or new check set invalidates a previous acceptance for the current
 product. A valid intentional cleanup preserves the sealed product as the
 current delivery. Queries diagnose a changed or unavailable current
-product without writing a replacement or repairing it. Independent
-recheck and a new matching user decision are required for the new
-version. Prior receipts remain auditable.
+product without writing a replacement or repairing it. Independent recheck
+verifies the new version. A new optional user receipt must match that product
+and check set. Prior receipts remain auditable.
 
 ### Requests, answers and acceptance
 
@@ -663,8 +666,9 @@ a recovery barrier.
 The local state owner records explicit acceptance with `ato accept TASK_ID`.
 An optional `--evidence FILE` retains the supplied bytes as a private
 attachment. The receipt records `acceptance.method=local_owner` and applies
-to the Task, including one pinned to an earlier runtime. Repeated acceptance
-returns the original receipt. Checks, review, Run history, execution and
+to the Task, including one pinned to an earlier runtime. Repeating the
+same approval returns the original receipt. A different attachment on repeat
+returns `DECISION_CONFLICT`. Checks, review, Run history, execution and
 completion continue to report their measured results. Existing owner receipts
 that explicitly closed historical Tasks retain their effect. Without a human
 receipt, `acceptance.disposition` is `not_recorded`.
@@ -837,7 +841,7 @@ on authorized submission in the new namespace.
 | `_supervisor` | Internal. Preserve only explicitly authorized, bounded observation/recovery through a sealed supervisor caller. `recovery.start`'s internal launch is translated to the bound Run. Queries use `ato status`. |
 | `_worker` | Internal. Legacy `run_cmd` spawn becomes the sealed `run-child` operation with intent, ownership and receipt checks. |
 | `accept-answer` | Internal. Origin/Run host consumes the exact current answer through the T4 decision seam. The answer wake-up carries a compact private read reference. It no longer suggests a path-based shell command. |
-| `acknowledge` | Replaced by `ato accept` for the complete manual delivery on an immutable product/check set. Keep existing per-criterion historical acknowledgements in old records. |
+| `acknowledge` | Replaced by `ato accept` for an optional approval of an immutable product and check set. Keep existing per-criterion historical acknowledgements in old records. |
 | `agent-doctor` | Replaced by `ato agent doctor`. Probe code-owned adapters for versions/capabilities and redact. Do not turn diagnostics into login, turn submission or provider validation. |
 | `answer` | Retained as `ato answer REQUEST_ID --answer TEXT` with actual user proof/provenance and a versioned request. Old `--source` and `--actor-file` callers use the trusted actor/decision context. |
 | `ask` | Replaced by `ato agent ask TASK_ID`. A scoped controller creates one verified request with canonical correlation. The user sees it through `ato inbox` or optional authorized notification. |
