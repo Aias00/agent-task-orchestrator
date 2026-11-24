@@ -100,9 +100,24 @@ disposition without replaying it.
 
 ### Acceptance reminders for local Tasks
 
-A trusted operator can opt a repository into acceptance reminders by
-selecting an existing Codex control session. Run this from the selected
-sealed source with the same native and ATO homes as the Observer.
+For a local `ato run` launched from Codex, ATO uses `CODEX_THREAD_ID` to look
+up the exact session in the configured native Codex home. It checks the native
+index and session header and privately records the verified ID and session
+working directory with the Task. The Task's repository still comes from
+`--repo`. Different conversations can submit to the same repository and
+receive their own acceptance reminders.
+
+With the Observer, managed mailbox and native standalone Codex available,
+the Observer verifies the saved session and sends a short reminder there
+when the Task first needs human acceptance. An unverified locator or a
+saved session that later becomes unavailable leaves the item recorded in ATO.
+Project mutes apply. This applies to new Tasks captured at submission. ATO
+does not infer earlier origins from repository names or replay reminders.
+
+For a terminal submission without a session locator, a trusted operator can
+opt a repository into reminders through an existing Codex control session.
+Run this from the selected sealed source with the same native and ATO homes
+as the Observer.
 
 ```sh
 .venv/bin/python -IB scripts/ato_host_setup.py bind-acceptance \
@@ -116,10 +131,9 @@ home. It uses the native standalone Codex installation and the prepared unified
 mailbox. Repeat with another repository to opt it into the same session.
 The host stores mailbox capabilities privately and provisions them only once.
 
-When a local Task in an opted-in repository first needs human acceptance
-after binding, the Observer sends a short notice to the selected session.
-Consult `ato status TASK_ID` for the product, checks, and the recorded delivery
-state. An unknown delivery keeps the original receipt and is never replayed.
-Project mutes apply. Tasks already waiting when the repository was first
-bound retain their existing state. The route grants delivery only. Human
+The opt-in applies when a Task without a recorded submission session first
+needs human acceptance after binding. Tasks already waiting when the
+repository was first bound retain their existing state. Consult
+`ato status TASK_ID` for the product, checks, and delivery state. An unknown
+delivery keeps the original receipt. Both routes grant delivery only. Human
 acceptance still requires the actual user and the exact acceptance evidence.

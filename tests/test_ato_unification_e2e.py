@@ -343,27 +343,32 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
         self.assertEqual(self.cli("status", task)["status"], "completed")
 
-    def test_configured_local_acceptance_notifies_once_without_granting_acceptance(self):
-        self.install()
-        self.profile(via_setup=True)
-        repo, spec, _ = self.task_spec("local acceptance notifications")
-        historical = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
-        self.assertEqual(historical["status"], "needs_acceptance")
+    def acceptance_mailbox(self, *projects):
         self.registry("observation", dict(enabled=True, source_ref="fixture-observation", transport_kinds=[]))
         native = self.store.native_home
-        session_id = str(uuid4())
-        rollout = write(native, "session.jsonl", json.dumps(dict(
-            type="session_meta", payload=dict(id=session_id, cwd=str(self.root)))) + "\n")
+        sessions = [str(uuid4()) for _ in projects]
+        for session_id, project in zip(sessions, projects, strict=True):
+            write(native, session_id + ".jsonl", json.dumps(dict(
+                type="session_meta", payload=dict(id=session_id, cwd=str(project)))) + "\n")
         with closing(sqlite3.connect(native / "state_1.sqlite")) as index, index:
             index.execute("create table threads (id text, rollout_path text)")
-            index.execute("insert into threads values (?,?)", (session_id, str(rollout)))
+            index.executemany("insert into threads values (?,?)",
+                              [(session_id, str(native / (session_id + ".jsonl"))) for session_id in sessions])
         packages = native / "packages/standalone"
         binary = write(packages, "releases/fixture/bin/codex", "#!/bin/sh\nexit 97\n", 0o700)
         (packages / "current").symlink_to("releases/fixture", target_is_directory=True)
         mailbox = self.store.kernel_root / "ctask-interaction/mailbox/state.sqlite"
         with self.store._private(mailbox.parent, create=True):
             pass
-        bus = MessageBus(mailbox)
+        return sessions, binary, MessageBus(mailbox)
+
+    def test_configured_local_acceptance_notifies_once_without_granting_acceptance(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("local acceptance notifications")
+        historical = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        self.assertEqual(historical["status"], "needs_acceptance")
+        (session_id,), binary, bus = self.acceptance_mailbox(self.root)
 
         args = ("bind-acceptance", "--repo", repo, "--session-id", session_id, "--session-project", self.root)
         wrong = self.command(self.python, "-IB", self.source / "scripts/ato_host_setup.py",
@@ -434,6 +439,67 @@ class InstalledATO(unittest.TestCase):
         self.assertTrue((self.store.root / "host" / (ACCEPTANCE_NOTIFICATIONS + ".json")).is_file())
         decision = self.acceptance(current, "fixture still requires the actual user")
         self.cli("accept", current["task_id"], "--evidence", decision, error=(3, "AUTH_REQUIRED"))
+
+    def test_local_tasks_from_two_sessions_route_to_their_own_verified_origin(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("shared dispatch repository")
+        sessions, binary, bus = self.acceptance_mailbox(self.root, repo)
+        self.host_setup("bind-acceptance", "--repo", repo, "--session-id", sessions[0],
+                        "--session-project", self.root)
+        legacy = self.host.acceptance_notifications()
+        unverified = str(uuid4())
+        task_ids = []
+        for locator, project in zip([*sessions, unverified], [self.root, repo, None], strict=True):
+            self.env["CODEX_THREAD_ID"] = locator
+            result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+            self.assertEqual(result["status"], "needs_acceptance")
+            self.assertNotIn(locator, json.dumps(result))
+            task_id = result["task_id"]
+            task_ids.append(task_id)
+            origin = self.store.tasks / task_id / "origin-session.json"
+            self.assertEqual(origin.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(origin.read_text()), dict(version=1, task_id=task_id,
+                native_home=str(self.store.native_home), session_id=locator if project else None,
+                project=str(project) if project else None))
+            self.assertEqual(list(self.host.folder.glob("acceptance-origin-*.json")), [])
+
+        attempts = {}
+
+        class Adapter:
+            capabilities = {"native_queue_serialization"}
+
+            def send(self, endpoint, message):
+                attempts.setdefault(message["task_id"], []).append((endpoint["session_id"], message))
+                return DeliveryResult("delivery_unknown")
+
+        self.host = Host(store=self.store).compose(render_notice=ato_observer.render_notice)
+        self.host.interaction.dispatch_envelope = partial(ato_observer._dispatch, self.host)
+        self.host.interaction.observe_envelope = partial(ato_observer._dispatch, self.host)
+        with patch.object(ato_observer, "CodexSessionAdapter", return_value=Adapter()) as adapter:
+            with patch.object(notification_state, "project_mutes", return_value=[{"repo": str(repo)}]):
+                self.assertEqual(ato_observer.tick(self.host), {})
+                self.assertEqual(attempts, {})
+                self.assertEqual(list(self.host.folder.glob("acceptance-origin-*.json")), [])
+            for _ in range(2):
+                self.assertEqual(ato_observer.tick(self.host), {})
+            self.assertTrue(adapter.call_args_list)
+            self.assertTrue(all(call.kwargs == {"queue_binary": str(binary)} for call in adapter.call_args_list))
+
+        self.assertEqual(set(attempts), set(task_ids[:2]))
+        for task_id, expected_session in zip(task_ids[:2], sessions, strict=True):
+            self.assertEqual(len(attempts[task_id]), 1)
+            recipient, message = attempts[task_id][0]
+            self.assertEqual(recipient, expected_session)
+            self.assertIn(task_id, message["body"])
+            self.assertNotIn(expected_session, message["body"])
+            self.assertEqual(bus.message(message["id"])["state"], "delivery_unknown")
+            result = self.cli("status", task_id)
+            self.assertEqual(result["acceptance"]["disposition"], "pending")
+            self.assertEqual([row["state"] for row in result["delivery"]], ["delivery_unknown"])
+        self.assertEqual(attempts[task_ids[0]][0][1]["target"], legacy["target"]["endpoint_id"])
+        self.assertEqual(self.host.acceptance_notifications(), legacy)
+        self.assertEqual(self.cli("status", task_ids[2])["delivery"], [])
 
     def test_installed_host_enrollment_and_scoped_question_without_fixture_grants(self):
         self.install()

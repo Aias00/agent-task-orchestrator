@@ -1038,15 +1038,15 @@ class InteractionService:
         return notice
 
     def _notification_eligible(self, task, binding, phase, item):
-        local = self._local_acceptance_route(task, binding, phase, item) is not None
         with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
             policy = notification_state.status()
-            if ((not local and policy.get("hub_thread") != binding["interaction_ref"])
-                    or any(Path(rule["repo"]).resolve() == Path(task["repo"]["root"])
-                           for rule in notification_state.project_mutes())):
+            if any(Path(rule["repo"]).resolve() == Path(task["repo"]["root"])
+                   for rule in notification_state.project_mutes()):
                 return False
-        if local:
+        if self._local_acceptance_route(task, binding, phase, item) is not None:
             return True
+        if policy.get("hub_thread") != binding["interaction_ref"]:
+            return False
         if phase == "failure":
             import failure_attention
             with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):

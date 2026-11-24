@@ -280,11 +280,26 @@ class CodexSessionAdapter:
             raise ValueError('legacy Codex thread must be a canonical UUID')
         return session_path(home_dir or home(), target)
 
+    def _session_header(self, native_id):
+        with Path(self.verify_target(native_id)).open('rb') as stream:
+            return json.loads(stream.readline(MAX_LINE + 1))
+
+    def session_project(self, native_id):
+        """Resolve the project from the exact native session's own metadata."""
+        try:
+            row = self._session_header(native_id)
+            meta = row['payload']
+            if row.get('type') == 'session_meta' and meta['id'] == native_id:
+                cwd = Path(meta['cwd'])
+                if cwd.is_absolute() and cwd.is_dir():
+                    return str(cwd.resolve(strict=True))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+            pass
+        return None
+
     def verify_session(self, native_id, project):
         try:
-            path = self.verify_target(native_id)
-            with Path(path).open('rb') as stream:
-                meta = json.loads(stream.readline(MAX_LINE + 1))['payload']
+            meta = self._session_header(native_id)['payload']
             return bool(meta.get('cwd') and Path(meta['cwd']).resolve() == Path(project).resolve())
         except (OSError, ValueError, KeyError, TypeError):
             return False

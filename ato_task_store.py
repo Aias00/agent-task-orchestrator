@@ -87,6 +87,7 @@ def result_envelope(*, data=None, error=None):
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}")
 _SHA = re.compile(r"[0-9a-f]{64}")
+_NATIVE_SESSION_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 _COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _WORKFLOW_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
 _GIT_BRANCH = "refs/heads/ato/"
@@ -640,6 +641,24 @@ class InitialBinding:
 
 
 @dataclass(frozen=True)
+class SubmissionOrigin:
+    """Private routing metadata. Null session/project mark an unverified locator."""
+
+    native_home: str
+    session_id: str | None
+    project: str | None
+
+    def valid(self):
+        try:
+            return _absolute(self.native_home) and (
+                (self.session_id is None and self.project is None)
+                or (_matches(_NATIVE_SESSION_ID, self.session_id) and _absolute(self.project))
+            )
+        except ValueError:
+            return False
+
+
+@dataclass(frozen=True)
 class SubmissionGrant:
     """The host verifier returns this only after checking the exact submission."""
 
@@ -647,6 +666,7 @@ class SubmissionGrant:
     repo_key: str
     spec_sha256: str
     binding: InitialBinding
+    origin: SubmissionOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -888,6 +908,19 @@ class TaskStore:
                  and _matches(_SHA, scope["spec_sha256"]) and _matches(_REF, scope["authorization_ref"]))
         return TaskScope(task_id, scope["repo_key"], scope["spec_sha256"], scope["authorization_ref"])
 
+    @_state_errors
+    def submission_origin(self, task_id):
+        with self._private(self._task_dir(task_id)) as fd:
+            try:
+                row = _read_json(fd, "origin-session.json")
+            except FileNotFoundError:
+                return None
+        _fields(row, ("version", "task_id", "native_home", "session_id", "project"))
+        origin = SubmissionOrigin(row["native_home"], row["session_id"], row["project"])
+        _require(type(row["version"]) is int and row["version"] == 1 and row["task_id"] == task_id
+                 and origin.valid())
+        return origin
+
     def _spec(self, fd, task):
         try:
             data = _read_file(fd, "spec.json", limit=_STATE_LIMIT, code="SPEC_CHANGED")
@@ -1072,6 +1105,9 @@ class TaskStore:
                     _save(staged, "worker-contract.json", spec.document["worker_contract"], exclusive=True)
                     _save(staged, "scope.json", scope, exclusive=True)
                     _save(staged, "task.json", task, exclusive=True)
+                    if grant.origin is not None:
+                        _save(staged, "origin-session.json", dict(
+                            version=1, task_id=task_id, **asdict(grant.origin)), exclusive=True)
                     for name in ("runs", "evidence", "bindings", "interaction"):
                         os.mkdir(name, mode=0o700, dir_fd=staged)
                     # Stage real, private lock inodes before publishing the Task.
@@ -1322,6 +1358,8 @@ class TaskStore:
         _require(type(grant) is SubmissionGrant and grant.binding == binding
                  and grant.spec_sha256 == spec.spec_sha256 and grant.repo_key == spec.repository.key
                  and _matches(_REF, grant.reference), "FORBIDDEN")
+        _require(grant.origin is None or (type(grant.origin) is SubmissionOrigin and grant.origin.valid()),
+                 "FORBIDDEN")
         _require(_matches(_SHA, self.runtime_seal), "RUNTIME_MISMATCH")
         _require(_matches(_SHA, spec.input_sha256) and canonical_json(spec.document) == spec.canonical,
                  "INVALID_SPEC")

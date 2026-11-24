@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Trusted local operator setup; no services, native sessions or model calls."""
 import argparse
-from contextlib import contextmanager
 from dataclasses import asdict
-import fcntl
 import json
 from pathlib import Path
 import secrets
@@ -13,15 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_registry import SessionIdentity
 import ato_config
-from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
+from ato_host import Host
 from ato_execution_host import HostProfile
 from ato_seal import installed_boundary, runtime_seal
 from ato_task_store import (
-    TaskError, _fields, _identifier, _repo_boundaries, _require, _save, _sha, _strict_json, _text,
+    SubmissionOrigin, TaskError, _fields, _identifier, _repo_boundaries, _require, _save, _sha, _strict_json, _text,
     normalize_repository, read_input_file,
 )
 from codex_session_adapter import CodexSessionAdapter
-from message_bus import EndpointCredential, IdentityError, MessageBus
 
 OPERATIONS = {
     "controller": ("observe", "initial", "stop", "resume", "recheck", "reconcile",
@@ -36,36 +33,6 @@ def record(host, name, value):
         _save(fd, name + ".json", value, exclusive=True)
 
 
-class _EndpointRegistration(MessageBus):
-    """Register the pair with the existing mailbox API in one transaction."""
-
-    def __init__(self, connection, clock):
-        self.connection = connection
-        self.clock = clock
-
-    @contextmanager
-    def _transaction(self):
-        yield self.connection
-
-
-def _registered_acceptance_endpoints(bus, connection, row):
-    if row is None:
-        return False
-    credentials = [EndpointCredential(**row[key]) for key in ("sender", "target")]
-    found = []
-    for credential in credentials:
-        try:
-            bus._endpoint(connection, credential.endpoint_id)
-        except IdentityError:
-            continue
-        found.append(bus._authenticate(connection, credential))
-    if not found:
-        # A crash can leave the private record ahead of SQLite's commit.
-        return False
-    _require([(ep["kind"], ep["state"]) for ep in found] == [("local_cli", "active"), ("codex", "active")])
-    return True
-
-
 def bind_acceptance(host, args):
     repository = normalize_repository(args.repo)
     _repo_boundaries(repository, host.store.home, host.store.native_homes, selected=args.repo)
@@ -77,28 +44,8 @@ def bind_acceptance(host, args):
         _require(CodexSessionAdapter().verify_session(args.session_id, str(project)), "FORBIDDEN")
     bus = host.mailbox()
     _require(bus is not None, "UNSUPPORTED_CAPABILITY")
-    with host.store._private(host.folder, create=True) as fd:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise TaskError("BUSY") from None
-        row = host.acceptance_notifications()
-        if row is not None:
-            _require((row["native_home"], row["target"]["session_id"], row["target"]["project"])
-                     == (str(host.store.native_home), args.session_id, str(project)), "DECISION_CONFLICT")
-        with bus._transaction() as connection:
-            if not _registered_acceptance_endpoints(bus, connection, row):
-                registrar = _EndpointRegistration(connection, bus.clock)
-                source_ref = row["source_ref"] if row else "ato-acceptance-" + secrets.token_hex(16)
-                sender = registrar.register_endpoint(source_ref + "-sender", kind="local_cli",
-                    session_id=source_ref, project=project, source=args.source)
-                target = registrar.register_endpoint(source_ref + "-target", kind="codex",
-                    session_id=args.session_id, project=project, source=args.source)
-                row = dict(version=1, native_home=str(host.store.native_home), source_ref=source_ref,
-                           sender=asdict(sender), target=asdict(target),
-                           repositories=row["repositories"] if row else {})
-            row["repositories"].setdefault(repository.key, bus.clock())
-            _save(fd, ACCEPTANCE_NOTIFICATIONS + ".json", row)
+    origin = SubmissionOrigin(str(host.store.native_home), args.session_id, str(project))
+    host.register_acceptance_route(bus, origin, args.source, repo_key=repository.key)
     return dict(configured=True, repo=repository.root, notify="manual_acceptance")
 
 

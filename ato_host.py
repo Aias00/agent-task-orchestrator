@@ -1,24 +1,28 @@
 """Private host configuration, local CLI authority and scoped actor grants."""
 from contextlib import closing, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import fcntl
 from functools import partial
 import hmac
 import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import time
 
 import agent_registry
+import ato_config
 from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
 from ato_binding import BindingDecision, BindingGrant, BindingService, read_binding
 from ato_execution import ExecutionHooks, ExecutionService, HostProfile
 from ato_task_store import (
-    InitialBinding, SubmissionGrant, TaskError, TaskScope, TaskStore, _REF, _SHA, _absolute, _directory,
-    _existing, _regular, _fields, _matches, _overlaps, _read_file, _require, _sha, _strict_json,
+    InitialBinding, SubmissionGrant, SubmissionOrigin, TaskError, TaskScope, TaskStore, _REF, _SHA, _absolute,
+    _directory, _existing, _regular, _fields, _matches, _overlaps, _read_file, _require, _save, _sha, _strict_json,
     _time, canonical_json,
 )
-from message_bus import EndpointCredential, MailboxError, MessageBus
+from codex_session_adapter import CodexSessionAdapter
+from message_bus import ConflictError, EndpointCredential, IdentityError, MailboxError, MessageBus
 
 _CREDENTIAL = re.compile(r"credential-[0-9a-f]{32}")
 _SESSION = re.compile(r"agentref-[0-9a-f]{32}")
@@ -169,7 +173,19 @@ class Host:
     def authorize_submit(self, spec, locator, binding):
         actor = self.store._principal(locator)
         grant = self.initial(spec, actor)
-        return grant if grant.binding == binding else None
+        if grant.binding != binding:
+            return None
+        if actor is self._local_owner:
+            adapter = CodexSessionAdapter()
+            if session_id := adapter.current_locator():
+                with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
+                    project = adapter.session_project(session_id)
+                native_home = str(self.store.native_home)
+                origin = SubmissionOrigin(native_home, session_id, project)
+                if not origin.valid():
+                    origin = SubmissionOrigin(native_home, None, None)
+                grant = replace(grant, origin=origin)
+        return grant
 
     def can_observe(self, actor, scope):
         local = None
@@ -338,21 +354,71 @@ class Host:
             return MailboxRoute(*credentials, source["source_ref"])
         return None
 
-    def acceptance_notifications(self):
-        row = self.record(ACCEPTANCE_NOTIFICATIONS)
+    def _acceptance_record(self, name, *, legacy=False):
+        row = self.record(name)
         if row is None:
             return None
-        _fields(row, ("version", "native_home", "source_ref", "sender", "target", "repositories"))
+        fields = ("version", "native_home", "source_ref", "sender", "target")
+        _fields(row, fields + (("repositories",) if legacy else ()))
         _require(type(row["version"]) is int and row["version"] == 1
-                 and _absolute(row["native_home"]) and _matches(_REF, row["source_ref"])
-                 and isinstance(row["repositories"], dict)
-                 and all(_absolute(key) and _time(since) for key, since in row["repositories"].items()))
+                 and _absolute(row["native_home"]) and _matches(_REF, row["source_ref"]))
+        if legacy:
+            _require(isinstance(row["repositories"], dict)
+                     and all(_absolute(key) and _time(since) for key, since in row["repositories"].items()))
         for key in ("sender", "target"):
             endpoint = row[key]
             _fields(endpoint, ("endpoint_id", "session_id", "project", "token"))
             _require(all(isinstance(value, str) and value for value in endpoint.values())
                      and _absolute(endpoint["project"]))
         _require(row["sender"]["endpoint_id"] != row["target"]["endpoint_id"])
+        return row
+
+    def acceptance_notifications(self):
+        return self._acceptance_record(ACCEPTANCE_NOTIFICATIONS, legacy=True)
+
+    @staticmethod
+    def _acceptance_origin_name(origin):
+        return "acceptance-origin-" + _sha(canonical_json([origin.native_home, origin.session_id]))
+
+    @staticmethod
+    def _matches_acceptance_origin(row, origin):
+        return bool(row and (row["native_home"], row["target"]["session_id"], row["target"]["project"])
+                    == (origin.native_home, origin.session_id, origin.project))
+
+    def register_acceptance_route(self, bus, origin, source, *, repo_key=None):
+        """Enroll one native session or opt a repository into the legacy route."""
+        _require(origin.valid() and origin.session_id and origin.native_home == str(self.store.native_home),
+                 "FORBIDDEN")
+        name = self._acceptance_origin_name(origin)
+        with self.store._private(self.folder, create=True) as fd:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise TaskError("BUSY") from None
+            legacy = self.acceptance_notifications()
+            if repo_key is not None and legacy is not None:
+                _require(self._matches_acceptance_origin(legacy, origin), "DECISION_CONFLICT")
+            row = self._acceptance_record(name)
+            if row is not None:
+                _require(self._matches_acceptance_origin(row, origin), "BINDING_CHANGED")
+            elif self._matches_acceptance_origin(legacy, origin):
+                row = {key: value for key, value in legacy.items() if key != "repositories"}
+            with bus._transaction() as connection:
+                if not _registered_acceptance_endpoints(bus, connection, row):
+                    registrar = _EndpointRegistration(connection, bus.clock)
+                    source_ref = row["source_ref"] if row else "ato-acceptance-" + secrets.token_hex(16)
+                    sender = registrar.register_endpoint(source_ref + "-sender", kind="local_cli",
+                        session_id=source_ref, project=origin.project, source=source)
+                    target = registrar.register_endpoint(source_ref + "-target", kind="codex",
+                        session_id=origin.session_id, project=origin.project, source=source)
+                    row = dict(version=1, native_home=origin.native_home, source_ref=source_ref,
+                               sender=asdict(sender), target=asdict(target))
+                if repo_key is None:
+                    _save(fd, name + ".json", row)
+                else:
+                    repositories = legacy["repositories"] if legacy else {}
+                    repositories.setdefault(repo_key, bus.clock())
+                    _save(fd, ACCEPTANCE_NOTIFICATIONS + ".json", dict(row, repositories=repositories))
         return row
 
     def acceptance_queue_binary(self):
@@ -373,11 +439,7 @@ class Host:
                 or (binding["controller_ref"], binding["interaction_ref"])
                 != (local.controller_ref, local.interaction_ref)):
             return None
-        row = self.acceptance_notifications()
-        if row is None or row["native_home"] != str(self.store.native_home):
-            return None
-        since = row["repositories"].get(scope.repo_key)
-        if since is None or item["created_at"] < since or not self.acceptance_queue_binary():
+        if not self.acceptance_queue_binary():
             return None
         observer = self.record("observation", {})
         if observer.get("enabled") is not True:
@@ -385,6 +447,38 @@ class Host:
         bus = self.mailbox()
         if bus is None:
             return None
+        origin = self.store.submission_origin(scope.task_id)
+        if origin is not None:
+            return self._origin_acceptance_route(bus, origin)
+        row = self.acceptance_notifications()
+        if row is None or row["native_home"] != str(self.store.native_home):
+            return None
+        since = row["repositories"].get(scope.repo_key)
+        if since is None or item["created_at"] < since:
+            return None
+        return self._acceptance_mailbox_route(bus, row)
+
+    def _origin_acceptance_route(self, bus, origin):
+        if origin.session_id is None or origin.native_home != str(self.store.native_home):
+            return None
+        with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
+            if CodexSessionAdapter().session_project(origin.session_id) != origin.project:
+                return None
+        row = self._acceptance_record(self._acceptance_origin_name(origin))
+        if row is not None:
+            _require(self._matches_acceptance_origin(row, origin), "BINDING_CHANGED")
+            if route := self._acceptance_mailbox_route(bus, row):
+                return route
+        if self.read_only:
+            return None
+        try:
+            row = self.register_acceptance_route(bus, origin, "verified ATO submission session")
+        except ConflictError:
+            return None  # A separately enrolled native endpoint belongs to its current owner.
+        return self._acceptance_mailbox_route(bus, row)
+
+    @staticmethod
+    def _acceptance_mailbox_route(bus, row):
         sender = EndpointCredential(**row["sender"])
         target = EndpointCredential(**row["target"])
         try:
@@ -441,3 +535,33 @@ class _ExistingMailbox(MessageBus):
         with mailbox_copy(self.path) as copy, closing(sqlite3.connect(copy)) as con:
             con.row_factory = sqlite3.Row
             yield con
+
+
+class _EndpointRegistration(MessageBus):
+    """Register both mailbox endpoints in the caller's transaction."""
+
+    def __init__(self, connection, clock):
+        self.connection = connection
+        self.clock = clock
+
+    @contextmanager
+    def _transaction(self):
+        yield self.connection
+
+
+def _registered_acceptance_endpoints(bus, connection, row):
+    if row is None:
+        return False
+    found = []
+    for key in ("sender", "target"):
+        credential = EndpointCredential(**row[key])
+        try:
+            bus._endpoint(connection, credential.endpoint_id)
+        except IdentityError:
+            continue
+        found.append(bus._authenticate(connection, credential))
+    if not found:
+        # The private record can outlive an interrupted SQLite commit.
+        return False
+    _require([(ep["kind"], ep["state"]) for ep in found] == [("local_cli", "active"), ("codex", "active")])
+    return True

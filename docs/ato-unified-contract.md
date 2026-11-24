@@ -215,6 +215,13 @@ local controller identity. Each Task records the submitting local account,
 canonical repository and frozen spec digest. A caller with an explicit
 `ATO_ACTOR_FILE` uses that actor's scope.
 
+For local submissions, the host can record the submitting Codex session
+after checking its exact native index entry and session header. This private
+record selects the original conversation for manual acceptance reminders.
+The session working directory and the submitted repository are independent.
+This routing metadata grants no actor authority and changes no controller
+or acceptance binding. See [host setup](ato-host-setup.md#acceptance-reminders-for-local-tasks).
+
 An authenticated actor is a verified local CLI or trusted adapter principal.
 For scoped operations, the CLI selects a private actor file through
 `ATO_ACTOR_FILE` or receives proof directly from the trusted host integration.
