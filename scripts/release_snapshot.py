@@ -639,8 +639,8 @@ def _no_live_lock(path):
         os.close(fd)
 
 
-def active_tasks(paths, system, sources, *, departing_seal=None):
-    """Conservative checks over both ledgers and the exact selected process commands."""
+def active_tasks(paths, system, sources):
+    """Fence unresolved execution while retaining idle tasks and their sealed source."""
     from ato_host import Host
     from ato_task_store import TaskStore
 
@@ -656,9 +656,6 @@ def active_tasks(paths, system, sources, *, departing_seal=None):
         if not re.fullmatch(r'task-[0-9a-f]{32}', directory.name):
             continue
         task, status, _ = store._read_projection(directory.name)
-        if (departing_seal is not None and task['creation']['runtime_seal'] == departing_seal
-                and status['status'] != 'completed' and not task['worktree_removed']):
-            blockers.append('unfinished Task requires its selected release: ' + directory.name)
         if (task['creation']['phase'] != 'ready' or status['execution']['state'] != 'idle'
                 or not status['execution']['verified'] or status['status'] == 'delivery_unknown'):
             blockers.append('unified Task execution or provisioning is unresolved')
@@ -778,12 +775,6 @@ def policy_identity(paths):
     return result
 
 
-def departing_seal(previous, target):
-    if previous and previous.get('surface') == SURFACE and previous['seal'] != (target or {}).get('seal'):
-        return previous['seal']
-    return None
-
-
 def inspect(paths, system, target=None):
     entries = entrypoints(paths['bin_dir'])
     sources = launcher_sources(entries)
@@ -812,9 +803,7 @@ def inspect(paths, system, target=None):
         require(cfg.get('enabled') is True and cfg.get('hub_thread') == hub.get('thread_id'),
                 'legacy observer policy or binding is inconsistent')
     mailboxes = {key: mailbox(paths[key]) for key in ('legacy_state', 'unified_state')}
-    departure = departing_seal(sources.get(PUBLIC), target) if target else None
-    blockers = active_tasks(paths, system, sources | ({'target': target} if target else {}),
-                            departing_seal=departure)
+    blockers = active_tasks(paths, system, sources | ({'target': target} if target else {}))
     selected = sources.get(PUBLIC)
     if (target and selected and not mixed
             and all(selected[key] == target[key] for key in ('root', 'python', 'seal'))):
@@ -863,11 +852,10 @@ def _matches_entries(paths, journal):
                 'entrypoint changed outside this transaction: ' + name)
 
 
-def _quiescent(paths, system, journal, *, departure=None):
+def _quiescent(paths, system, journal):
     _matches_entries(paths, journal)
     require(policy_identity(paths) == journal['before']['policies'], 'release policies changed')
-    blockers = active_tasks(paths, system, journal['before']['sources'] | {'target': journal['target']},
-                            departing_seal=departure)
+    blockers = active_tasks(paths, system, journal['before']['sources'] | {'target': journal['target']})
     require(not blockers, 'task activity at the release boundary: ' + '; '.join(blockers))
     require(all(mailbox(paths[key])['idle'] for key in ('legacy_state', 'unified_state')),
             'mailbox is busy; release does not drain or replay it')
@@ -938,10 +926,7 @@ def restore(path, journal, paths, system):
     for source in journal['before']['sources'].values():
         verify_source(source)
     verify_source(journal['target'])
-    current = entrypoints(paths['bin_dir'])[PUBLIC]
-    old_source = journal['before']['sources'].get(PUBLIC)
-    departure = departing_seal(journal['target'], old_source) if current == journal['after_entries'][PUBLIC] else None
-    _quiescent(paths, system, journal, departure=departure)
+    _quiescent(paths, system, journal)
     observer = _observers(paths, journal, system)
     old = journal['before']['observer']
     restored = journal.get('rollback_observer')
@@ -958,8 +943,7 @@ def restore(path, journal, paths, system):
         require((current is None and not keep) or (keep and current and same_observer(current, observer)),
                 'observer changed at rollback boundary')
         require(policy_identity(paths) == journal['before']['policies'], 'release policies changed')
-        require(not active_tasks(paths, system, journal['before']['sources'] | {'target': journal['target']},
-                                 departing_seal=departure),
+        require(not active_tasks(paths, system, journal['before']['sources'] | {'target': journal['target']}),
                 'task activity at rollback boundary')
         _write_entries(path, journal, paths, journal['before']['entries'])
         journal['state'] = 'entries_restored'
@@ -989,8 +973,7 @@ def activate(root, commit, paths, transaction, system=None, *, converge_mixed=Fa
                        after_entries=entry_set(target), target=target)
         save(path, journal)
         try:
-            departure = departing_seal(before['sources'].get(PUBLIC), target)
-            _quiescent(paths, system, journal, departure=departure)
+            _quiescent(paths, system, journal)
             require(entrypoints(paths['bin_dir']) == before['entries'], 'entrypoints changed during preparation')
             observed = _observers(paths, journal, system)
             same = observed is None if before['observer'] is None else same_observer(observed or {}, before['observer'])
@@ -1005,8 +988,7 @@ def activate(root, commit, paths, transaction, system=None, *, converge_mixed=Fa
                 for source in before['sources'].values():
                     verify_source(source)
                 require(policy_identity(paths) == before['policies'], 'release policies changed')
-                require(not active_tasks(paths, system, before['sources'] | {'target': target},
-                                         departing_seal=departure),
+                require(not active_tasks(paths, system, before['sources'] | {'target': target}),
                         'task activity at cutover boundary')
                 _write_entries(path, journal, paths, journal['after_entries'])
             journal['state'] = 'entries_switched'

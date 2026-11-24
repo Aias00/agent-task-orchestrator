@@ -84,9 +84,15 @@ changed source, ambiguous PID, or busy mailbox records `recovery_required`
 for inspection. Retain the journal and the sealed snapshots for recovery.
 
 Task and Run ledgers, STOP, attempt histories, worktrees and delivery claims
-remain available in their original namespaces. Before switching away from a
-unified release in either direction, complete or clean up its unfinished Tasks,
-including those awaiting acceptance. If a different release is already selected,
-`ato status` reports `RUNTIME_MISMATCH` and `SELECT_TASK_RUNTIME` for the
-unfinished Task. Fixture qualification and source installation leave real
-activation and provider verification pending.
+remain available in their original namespaces. Verified idle Tasks can stay
+on their original sealed release during activation or rollback, including
+Tasks awaiting acceptance. Active commands, unsettled execution or provisioning,
+and busy mailbox or turn slots still require a safe boundary.
+
+`ato status` reports `RUNTIME_MISMATCH` and `SELECT_TASK_RUNTIME` for an
+unfinished Task pinned to a different release. Retain the older sealed
+snapshot and transaction journal. The journal identifies the release and
+interpreter selected before the switch. Use that exact interpreter and
+`ato.py` with the same recorded ATO and Codex homes for the Task's commands.
+Fixture qualification and source installation leave real activation and
+provider verification pending.

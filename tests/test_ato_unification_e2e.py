@@ -739,10 +739,15 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(recorded["target"], dict(source, python_sha256=release.sha(self.python)))
         replacement = snapshot(self.root / "next source", executable=True, commit="d" * 40)
         self.addCleanup(unseal, replacement)
-        with self.assertRaisesRegex(release.Refused, "unfinished Task requires its selected release"):
-            release.activate(replacement, "d" * 40, paths, self.root / "refused switch")
-        with self.assertRaisesRegex(release.Refused, "unfinished Task requires its selected release"):
-            release.rollback(journal, paths)
+        newer_journal = self.root / "retained idle task switch"
+        switched = release.activate(replacement, "d" * 40, paths, newer_journal)
+        self.assertEqual(switched["state"], "activated")
+        retained = self.cli("status", delivered["task_id"], actor=origin)
+        self.assertEqual(retained["status"], "needs_acceptance")
+        self.assertEqual(retained["next_step"], "SELECT_TASK_RUNTIME")
+        self.assertEqual(self.store.load_task(delivered["task_id"]), task)
+        self.assertEqual(artifact.read_text(), "fixture output\n")
+        self.assertEqual(release.rollback(newer_journal, paths)["state"], "rolled_back")
         self.assertEqual(self.launcher.read_bytes(), release.launcher_bytes(self.source, self.python, source["seal"]))
         user = self.scoped(delivered["task_id"], "3", "user", agent_ref("2"), 1, "observe", "read", "accept")
         evidence = self.acceptance(delivered, "accept before rolling back")
