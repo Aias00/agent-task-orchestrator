@@ -57,7 +57,7 @@ class Application:
             principal = host.store._principal(proof)
             _, task, _, _ = api._locate(principal, args.request_id)
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
-        elif operation in {"stop", "resume"} or subcommand in {"cleanup", "handoff", "reviewer", "recheck", "ask"}:
+        elif operation == "resume" or subcommand in {"handoff", "reviewer", "recheck", "ask"}:
             principal = host.store._principal(proof)
             _require(host.store._visible_scope(args.task_id, principal) is not None, "NOT_FOUND")
             task = host.store.load_task(args.task_id)
@@ -70,6 +70,7 @@ class Application:
             status = api.task_status(proof, args.task_id)
             task = host.store.load_task(args.task_id)
             if (host.store.runtime_seal is not None and status["status"] != "completed"
+                    and not task["worktree_removed"]
                     and task["creation"]["runtime_seal"] != host.store.runtime_seal):
                 status.update(reason="RUNTIME_MISMATCH", next_step="SELECT_TASK_RUNTIME")
             return status
@@ -140,6 +141,8 @@ class Application:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 status = self.host.execution.task_status(proof, task_id)
+                if status["status"] == "completed":
+                    return self.host.interaction.task_status(proof, task_id)
                 if status["status"] == "stopped":
                     raise TaskError("STOPPED", task_id) from None
                 if status["status"] == "cleanup_blocked":
@@ -224,7 +227,6 @@ def cleanup(host, proof, task_id):
     if task["worktree_removed"]:
         return host.interaction.task_status(proof, task_id)
     _require(task["creation"]["phase"] == "ready", "CLEANUP_BLOCKED")
-    _require(task["creation"]["runtime_seal"] == store.runtime_seal, "RUNTIME_MISMATCH")
     with _repo_gate(store, task):
         task, _, binding = execution._actor(proof, task_id, "cleanup")
         if task["worktree_removed"]:
@@ -243,6 +245,10 @@ def cleanup(host, proof, task_id):
                      and path not in _git_worktrees(worktree["repo"])
                      and _git_text(worktree["repo"], "rev-parse", "--verify", branch) == intent["head"],
                      "CLEANUP_BLOCKED")
+            if task["creation"]["runtime_seal"] != store.runtime_seal:
+                status, _ = store._project(dict(task, worktree_removed=True), store.load_spec(task_id))
+                _require(status["status"] in {"completed", "stopped"} and status["execution"]["verified"]
+                         and status["execution"]["state"] == "idle", "RUNTIME_MISMATCH")
         else:
             with _worker_lock(task):
                 store._verify_worktree(task)
@@ -252,7 +258,7 @@ def cleanup(host, proof, task_id):
                 head = _git_text(path, "rev-parse", "--verify", "HEAD")
                 if status["status"] == "completed":
                     manifest = ato_product.measure(task)
-                    _require(status["product"]["product_id"] == "product-" + ato_product._sha(
+                    _require(status["product"] and status["product"]["product_id"] == "product-" + ato_product._sha(
                         ato_product.canonical_json(manifest)), "PRODUCT_CHANGED")
                 expected = dict(path=str(path), head=head, run_id=task["run_id"])
 

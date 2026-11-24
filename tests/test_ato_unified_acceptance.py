@@ -5,12 +5,13 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import agent_registry
 import ato_config
@@ -305,6 +306,9 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         def retain_and_stop(task_id, kind, **fields):
             receipt = retain(task_id, kind, **fields)
             if kind == "acceptance":
+                # STOP must still fence a stale acceptance after the checked
+                # product changes. A valid completed Task now makes STOP idle.
+                (Path(qualified["product"]["worktree"]) / "delivery.txt").write_text("changed after evidence")
                 self.execution.request_stop(origin, task_id)
             return receipt
 
@@ -315,6 +319,50 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         self.assertEqual(status["status"], "stopped")
         self.assertIsNone(status["acceptance"]["receipt_id"])
         self.assertEqual(self.interaction.inbox(user), {"items": []})
+
+    def test_batch0_completed_status_exposes_uncertain_answer_and_keeps_recheck_fenced(self):
+        task = self.create()
+        self.qualify(task)
+        origin, user = self.proof(task, "origin"), self.proof(task, "user")
+        request = self.ask(task)
+        bus = self.mailbox()
+        outgoing = bus.register_endpoint("batch0-origin", kind="fake", session_id="origin",
+                                         project=str(self.repo), source="fixture")
+        interaction = bus.register_endpoint("batch0-interaction", kind="fake", session_id="interaction",
+                                            project=str(self.repo), source="fixture")
+        lease = bus.acquire_endpoint(outgoing, owner="fixture")
+        adapter = Mock()
+        adapter.capabilities = ()
+        adapter.send.return_value = DeliveryResult("delivery_unknown")
+        self.interaction.route = lambda *args: MailboxRoute(interaction, outgoing, "fixture-route", lease,
+                                                           {"fake": adapter})
+        with patch.object(notification_state, "status", return_value={"hub_thread": _INTERACTION, "mode": "all"}):
+            self.interaction.record_answer(user, request, "yes", self.event(user, "answer", request, "yes"))
+            self.assertEqual(self.interaction.dispatch_delivery(task, request, "answer"), "delivery_unknown")
+        status = self.interaction.task_status(origin, task)
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["next_step"], "RECONCILE_DECISION")
+        self.assertIn(dict(request_id=request, phase="answer", state="delivery_unknown"), status["delivery"])
+        self.assert_code("DELIVERY_UNKNOWN", self.execution.recheck, origin, task, foreground=True)
+
+    def test_batch0_observer_recovers_from_transient_sqlite_failure_and_persists_exit(self):
+        stop = Event()
+        host = Mock()
+        config = {"enabled": True}
+        host.record.return_value = config
+        rows = []
+
+        def save(fd, name, row):
+            rows.append(dict(row))
+            if len(rows) == 2:
+                stop.set()
+
+        with patch.object(ato_observer, "_save", side_effect=save), \
+                patch.object(ato_observer, "tick", side_effect=[sqlite3.OperationalError("busy"), {}]), \
+                patch.object(stop, "wait"):
+            ato_observer._watch(host, config, None, "seal", "birth", stop)
+        self.assertEqual([row["state"] for row in rows], ["watching", "watching", "stopped"])
+        self.assertEqual([row["consecutive_failures"] for row in rows], [1, 0, 0])
 
     def test_continuation_claim_is_bound_to_exact_run_and_live_kernel_owner(self):
         task = self.create()
@@ -475,7 +523,8 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         self.interaction.dispatch_envelope = self.interaction.observe_envelope = partial(ato_observer._dispatch, host)
         calls = []
         rollout = self.root / "fixture-rollout.jsonl"
-        rollout.write_text(json.dumps({"payload": {"cwd": str(self.repo)}}) + "\n")
+        rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": "origin",
+                                                                           "cwd": str(self.repo)}}) + "\n")
 
         class Adapter(CodexSessionAdapter):
             capabilities = frozenset({"native_queue_serialization"})

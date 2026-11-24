@@ -299,9 +299,8 @@ class CodexSessionAdapter:
 
     def verify_session(self, native_id, project):
         try:
-            meta = self._session_header(native_id)['payload']
-            return bool(meta.get('cwd') and Path(meta['cwd']).resolve() == Path(project).resolve())
-        except (OSError, ValueError, KeyError, TypeError):
+            return self.session_project(native_id) == str(Path(project).resolve())
+        except (OSError, ValueError, TypeError, RuntimeError):
             return False
 
     def is_actor(self, native_id, project):

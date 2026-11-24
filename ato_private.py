@@ -2,7 +2,7 @@
 import shlex
 
 from ato_config import private_runtime_command
-from ato_task_store import TaskError, _identifier, _require, _sha, canonical_json
+from ato_task_store import DELIVERY_OUTCOMES, TaskError, _identifier, _require, _sha, canonical_json
 
 
 def handoff_id(task, binding, phase, correlation, item, target):
@@ -82,6 +82,17 @@ def delivery_candidates(service, task):
         candidates.append(("question", ref))
         if row["answer"]:
             candidates.append(("answer", ref))
+    if published := service._completion_reservation(task):
+        correlation, _, notice = published
+        message = service._message(task, notice)
+        if message and message["state"] != "queued":
+            if message["state"] in {"dispatching", "delivered", "delivery_unknown", "accepted", "responded"}:
+                candidates.append(("completion", correlation))
+            if notice["run_id"] == task["run_id"]:
+                return candidates
+            _, receipts = service.store._run(task, task["run_id"])
+            if receipts and receipts[-1][1]["outcome"] in DELIVERY_OUTCOMES:
+                return candidates
     status, generation, _ = service._view(task, service.store.load_spec(task["task_id"]))
     if service.render_notice is not None and (failed := service.failure_item(task, status, generation)):
         candidates.append(("failure", failed[0]))

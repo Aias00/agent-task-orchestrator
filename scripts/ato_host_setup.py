@@ -46,7 +46,7 @@ def bind_acceptance(host, args):
     _require(bus is not None, "UNSUPPORTED_CAPABILITY")
     origin = SubmissionOrigin(str(host.store.native_home), args.session_id, str(project))
     host.register_acceptance_route(bus, origin, args.source, repo_key=repository.key)
-    return dict(configured=True, repo=repository.root, notify="manual_acceptance")
+    return dict(configured=True, repo=repository.root, notify="completion")
 
 
 def proof_directory(host, requested):

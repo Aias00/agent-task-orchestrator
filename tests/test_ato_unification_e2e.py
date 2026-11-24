@@ -19,6 +19,7 @@ from uuid import uuid4
 import agent_registry
 import ato_observer
 import ato_process
+import ato_product
 from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
 from ato_task_store import TaskStore, normalize_repository
 from message_bus import IdentityError, MessageBus
@@ -51,11 +52,12 @@ assert any(s.startswith('permissions.ato-host=') and 'network={enabled=false}' i
 assert "ATO_ACTOR_FILE" not in os.environ and "OPENAI_API_KEY" not in os.environ
 assert sys.stdin.read()
 native = Path(os.environ["CODEX_HOME"])
+mode = (native / "mode").read_text()
 target = Path("delivery.txt")
-target.write_text((target.read_text() if target.exists() else "") + "fixture output\n")
+if mode != "clean":
+    target.write_text((target.read_text() if target.exists() else "") + "fixture output\n")
 with (native / "attempts").open("a") as log:
     log.write(str(Path.cwd()) + "\n")
-mode = (native / "mode").read_text()
 if mode == "unknown":
     sys.exit(17)
 if mode == "hold":
@@ -426,6 +428,113 @@ class InstalledATO(unittest.TestCase):
             pass
         return sessions, binary, MessageBus(mailbox)
 
+    def test_batch0_completed_stop_and_cross_release_cleanup_keep_terminal_state(self):
+        self.install()
+        self.profile(mode="clean", via_setup=True)
+        repo, spec, _ = self.task_spec("completed stop and cleanup")
+        before = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        task_id = before["task_id"]
+        task_dir = self.store._task_dir(task_id)
+        self.assertEqual(before["status"], "completed")
+        self.assertEqual(self.cli("stop", task_id), before)
+        evidence = write(self.root, "explicit evidence", "original")
+        accepted = self.cli("accept", task_id, "--evidence", evidence)
+        self.assertEqual(self.cli("stop", task_id), accepted)
+        self.assertEqual(self.cli("accept", task_id, "--evidence", evidence)["acceptance"], accepted["acceptance"])
+        evidence.write_text("changed")
+        self.cli("accept", task_id, "--evidence", evidence, error=(4, "DECISION_CONFLICT"))
+
+        replacement = snapshot(self.root / "next cleanup release", executable=True, commit="d" * 40)
+        self.addCleanup(unseal, replacement)
+        paths = release.scoped_paths(self.bin, self.store.home, self.store.native_home)
+        release.activate(replacement, "d" * 40, paths, self.root / "cleanup cutover")
+        cleaned = self.cli("project", "cleanup", task_id, "--confirm")
+        self.assertEqual((cleaned["status"], cleaned["worktree_state"]), ("completed", "removed"))
+        self.assertEqual(cleaned["product"], before["product"])
+        self.assertEqual(self.cli("stop", task_id), cleaned)
+        self.assertEqual(self.cli("status", task_id), cleaned)
+        self.assertFalse((task_dir / "STOP.json").exists())
+
+    def test_batch0_local_annotation_does_not_hide_product_invalidation(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("local product integrity")
+        finished = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        task_id = finished["task_id"]
+        self.assertEqual(self.cli("accept", task_id)["acceptance"]["method"], "local_owner")
+        (Path(finished["product"]["worktree"]) / "delivery.txt").write_text("changed")
+        status = self.cli("status", task_id)
+        self.assertEqual((status["status"], status["reason"], status["acceptance"]["disposition"]),
+                         ("blocked", "PRODUCT_CHANGED", "invalidated"))
+
+    def test_batch0_origin_eligibility_is_read_only_and_revocation_survives_observation(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("closed completion endpoint")
+        (session_id,), _, bus = self.acceptance_mailbox(repo)
+        self.env["CODEX_THREAD_ID"] = session_id
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        service = self.host.interaction
+        task, frozen, binding = service._task(result["task_id"])
+        status, generation, _ = service._view(task, frozen)
+        _, item = service.completion_item(task, status, generation)
+        self.assertTrue(service._notification_eligible(task, binding, "completion", item))
+        self.assertEqual(list(self.host.folder.glob("acceptance-origin-*.json")), [])
+        with bus._transaction() as connection:
+            self.assertEqual(connection.execute("select count(*) from endpoints").fetchone()[0], 0)
+        route = self.host.local_completion_route(service._scope_record(task), binding, item)
+        bus.set_endpoint_state(route.target, "closed", source="fixture operator")
+        with patch.object(self.host, "register_acceptance_route") as register:
+            self.assertEqual(ato_observer.tick(self.host), {})
+            register.assert_not_called()
+        self.assertEqual(bus.endpoint(route.target.endpoint_id)["state"], "closed")
+        self.assertEqual(self.cli("status", result["task_id"])["delivery"], [])
+
+    def test_batch0_recheck_keeps_observing_the_original_completion(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("completion observation across Runs")
+        (session_id,), _, bus = self.acceptance_mailbox(repo)
+        self.env["CODEX_THREAD_ID"] = session_id
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        attempts = []
+        events_available = False
+
+        class Adapter:
+            capabilities = {"native_queue_serialization"}
+
+            def session_cursor(self, native_id, project):
+                return {"offset": 0}
+
+            def send(self, endpoint, message):
+                attempts.append(message)
+                return DeliveryResult("delivered", str(uuid4()))
+
+            def observe_session_v2(self, identity, correlation, generation, cursor):
+                if not events_available:
+                    return [], cursor
+                events = [agent_registry.SessionEvent("fixture-" + kind, identity, correlation,
+                    generation, kind, "offline fixture", time.time(),
+                    turn_id="fixture-turn", message_id=correlation)
+                    for kind in ("message_received", "turn_completed")]
+                return events, {"offset": 1}
+
+        self.host = Host(store=self.store).compose(render_notice=ato_observer.render_notice)
+        self.host.interaction.dispatch_envelope = partial(ato_observer._dispatch, self.host)
+        self.host.interaction.observe_envelope = partial(ato_observer._dispatch, self.host, observe_only=True)
+        with patch.object(ato_observer, "CodexSessionAdapter", return_value=Adapter()):
+            self.assertEqual(ato_observer.tick(self.host), {})
+            message, = attempts
+            self.assertEqual(bus.message(message["id"])["state"], "delivered")
+            rechecked = self.cli("project", "recheck", result["task_id"], "--checks-only")
+            self.assertNotEqual(rechecked["execution"]["run_id"], result["execution"]["run_id"])
+            events_available = True
+            with patch.object(ato_product, "measure", side_effect=AssertionError("observation must not remeasure")):
+                self.assertEqual(ato_observer.tick(self.host), {})
+                self.assertEqual(ato_observer.tick(self.host), {})
+        self.assertEqual(bus.message(message["id"])["state"], "turn_completed")
+        self.assertEqual(len(attempts), 1)
+
     def test_configured_local_completion_notifies_once_without_an_acceptance_record(self):
         self.install()
         self.profile(via_setup=True)
@@ -455,7 +564,7 @@ class InstalledATO(unittest.TestCase):
         interrupted = self.host.acceptance_notifications()
         with self.assertRaises(IdentityError):
             bus.endpoint(interrupted["target"]["endpoint_id"])
-        self.assertTrue(self.host_setup(*args)["configured"])
+        self.assertEqual(self.host_setup(*args)["notify"], "completion")
         bound = self.host.acceptance_notifications()
         self.assertTrue(self.host_setup(*args)["configured"])
         self.assertEqual(self.host.acceptance_notifications(), bound)

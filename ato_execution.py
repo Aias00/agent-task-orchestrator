@@ -423,7 +423,9 @@ class ExecutionService:
         self._project_execution(task, spec, history, generation, status)
         local = self.hooks.local_acceptance(task)
         if local is not None:
-            status["acceptance"], historical_close = local
+            acceptance, historical_close = local
+            if historical_close or status["acceptance"]["disposition"] not in {"recorded", "invalidated"}:
+                status["acceptance"] = acceptance
             execution = status["execution"]
             if historical_close and execution["state"] == "idle" and execution["verified"]:
                 status.update(status="completed", reason=None, next_step=None)
@@ -511,23 +513,21 @@ class ExecutionService:
     @_state_errors
     def request_stop(self, actor, task_id):
         for _ in range(30):
-            task, spec, binding = self._actor(actor, task_id, "stop")
-            _require(task["creation"]["phase"] == "ready", "NOT_RESUMABLE")
-            local = self.hooks.local_acceptance(task)
-            if local is not None and local[1]:
-                status = self.store.task_status(actor, task_id)
-                if status["status"] == "completed":
-                    return status
-            _, receipts = _current(self.store, task)
-            if receipts and receipts[-1][1]["outcome"] in DELIVERY_OUTCOMES:
-                product = _evidence(self.store, task_id, receipts[-1][1]).get("product")
-                if product and self.hooks.acceptance(task, product):
-                    status = self.store.task_status(actor, task_id)
-                    if status["status"] == "completed" and status["acceptance"]["disposition"] == "recorded":
-                        return status
             try:
-                with self.store._mutation(task_id, task["revision"]) as (fd, latest, _):
+                task, spec, binding = self._actor(actor, task_id, "stop")
+                _require(task["creation"]["phase"] == "ready", "NOT_RESUMABLE")
+                status = self.store.task_status(actor, task_id)
+                if task["worktree_removed"] or status["status"] == "completed":
+                    return status
+                _require(task["creation"]["runtime_seal"] == self.store.runtime_seal, "RUNTIME_MISMATCH")
+                with self.store._mutation(task_id, task["revision"]) as (fd, latest, frozen):
                     _require(_binding(self.hooks, latest, spec) == binding, "BINDING_CHANGED")
+                    if latest["worktree_removed"]:
+                        break
+                    if latest["run_heads"].get(latest["run_id"]) != task["run_heads"].get(task["run_id"]):
+                        status, _ = self.store._project(latest, frozen)
+                        if status["status"] == "completed":
+                            break
                     current = _raw_stop(fd, latest)
                     if current and current["run_id"] == latest["run_id"] and current["epoch"] > latest.get("stop_retired_epoch", 0):
                         record = current
@@ -548,7 +548,9 @@ class ExecutionService:
                 if exc.code != "BUSY":
                     raise
                 time.sleep(.01)
-        raise TaskError("BUSY", task_id)
+        else:
+            raise TaskError("BUSY", task_id)
+        return self.store.task_status(actor, task_id)
 
     def _prior_admission(self, task, spec, binding, kind, state, kernel_stop, history):
         local = self.hooks.local_acceptance(task)

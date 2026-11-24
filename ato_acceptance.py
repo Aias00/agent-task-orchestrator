@@ -32,6 +32,7 @@ _PRODUCT = re.compile(r"product-[0-9a-f]{64}")
 _MAILBOX_ID = re.compile(r"msg-[0-9a-f]{32}")
 _MANUAL = "manual_acceptance"
 _LOCAL_ACCEPTANCE = "local-acceptance.json"
+_OBSERVABLE_DELIVERY = {"dispatching", "delivered", "delivery_unknown", "accepted", "responded"}
 _ASK_KINDS = {"decision", "missing_information", "handler_assignment", "permission", "host_handoff"}
 _GRANT_KINDS = {"permission", "host_handoff"}
 _ROLES = agent_registry.ActorRole
@@ -128,7 +129,8 @@ class InteractionService:
 
     def __init__(self, store, execution, *, authorize=None, verify_event=None,
                  verify_continuation=None, route=None, mailbox=None, render_notice=None,
-                 local_completion_route=None, authorize_local_acceptance=None, clock=time.time):
+                 local_completion_route=None, authorize_local_acceptance=None, owns_local_binding=None,
+                 clock=time.time):
         self.store = store
         self.execution = execution
         self.authorize = authorize
@@ -137,6 +139,7 @@ class InteractionService:
         self.route = route
         self.local_completion_route = local_completion_route
         self.authorize_local_acceptance = authorize_local_acceptance
+        self.owns_local_binding = owns_local_binding
         self.mailbox = mailbox
         self.render_notice = render_notice
         self.dispatch_envelope = None
@@ -595,8 +598,7 @@ class InteractionService:
     def _manual_criteria(spec):
         return sorted(row["id"] for row in spec["worker_contract"]["acceptance"] if row["kind"] == "manual")
 
-    def local_acceptance(self, task):
-        """Project the local owner's explicit decision independently of machine checks."""
+    def _local_acceptance_record(self, task):
         with self._records(task["task_id"]) as fd:
             if fd is None or _existing(fd, _LOCAL_ACCEPTANCE) is None:
                 return None
@@ -613,26 +615,45 @@ class InteractionService:
                  and all(_matches(_ID, criterion) for criterion in record["criteria"])
                  and (record["attachment_sha256"] is None or _matches(_SHA, record["attachment_sha256"]))
                  and record.get("annotation_only", True) is True)
+        return ref, record
+
+    def local_acceptance(self, task):
+        """Project the local owner's explicit decision independently of machine checks."""
+        retained = self._local_acceptance_record(task)
+        if retained is None:
+            return None
+        ref, record = retained
+        historical_close = "annotation_only" not in record
+        if not historical_close and self.owns_local_binding is not None:
+            binding = _binding(self.execution.hooks, task, self.store.load_spec(task["task_id"]))
+            if not self.owns_local_binding(self._scope_record(task), binding):
+                return None
         summary = dict(disposition="recorded", criteria=record["criteria"], receipt_id=ref, method="local_owner")
-        return summary, "annotation_only" not in record
+        return summary, historical_close
 
     def _accept_local(self, actor, principal, scope, task, spec, evidence):
         task_id = task["task_id"]
-        if self.local_acceptance(task) is None:
-            attachment = None
-            if evidence is not None:
-                _, data = read_input_file(evidence, code="INVALID_EVIDENCE")
-                attachment = self.store.put_evidence(task_id, data)
-            ref = self._retain(task_id, "local_acceptance", actor_ref=scope.authorization_ref,
-                               spec_sha256=scope.spec_sha256, criteria=self._manual_criteria(spec),
-                               attachment_sha256=attachment, annotation_only=True)
+        _require(task["creation"]["phase"] == "ready", "NOT_RESUMABLE")
+        data = read_input_file(evidence, code="INVALID_EVIDENCE")[1] if evidence is not None else None
+        retained = self._local_acceptance_record(task)
+        if retained is not None:
+            _require(data is None or _sha(data) == retained[1]["attachment_sha256"], "DECISION_CONFLICT")
+        else:
             with self.store._mutation(task_id, task["revision"]) as (task_fd, latest, frozen):
                 binding = _binding(self.execution.hooks, latest, frozen)
                 _require(self.authorize_local_acceptance(principal, scope, binding), "FORBIDDEN")
                 with self._records(task_id, create=True, task_fd=task_fd) as fd:
                     if _existing(fd, _LOCAL_ACCEPTANCE) is None:
+                        attachment = self.store.put_evidence(task_id, data) if data is not None else None
+                        ref = self._retain(task_id, "local_acceptance", actor_ref=scope.authorization_ref,
+                                           spec_sha256=scope.spec_sha256, criteria=self._manual_criteria(spec),
+                                           attachment_sha256=attachment, annotation_only=True)
                         _save(fd, _LOCAL_ACCEPTANCE, dict(receipt_id=ref), exclusive=True)
                         self.store._advance(task_fd, latest)
+                    else:
+                        retained = self._local_acceptance_record(latest)
+                        _require(data is None or _sha(data) == retained[1]["attachment_sha256"],
+                                 "DECISION_CONFLICT")
         return self.task_status(actor, task_id)
 
     @_state_errors
@@ -730,6 +751,15 @@ class InteractionService:
                     for phase, notice in row["outbox"].items():
                         status["delivery"].append(dict(request_id=request["request_id"], phase=phase,
                                                       state=self._delivery(task, notice)[0]))
+        if status["status"] == "completed":
+            for row in self._rows(task):
+                notice = row["outbox"].get("answer")
+                state, barrier = self._delivery(task, notice)
+                if barrier == "delivery_unknown":
+                    summary = dict(request_id=row["request"]["request_id"], phase="answer", state=state)
+                    if summary not in status["delivery"]:
+                        status["delivery"].append(summary)
+                    status["next_step"] = "RECONCILE_DECISION"
         if manual:
             request_id = manual["request_id"]
             notice = self._notice(task, request_id, "question")
@@ -1012,15 +1042,17 @@ class InteractionService:
             return state, "waiting"
         return state, None
 
-    def _local_completion_route(self, task, binding, phase, item):
+    def _local_completion_route(self, task, binding, phase, item, *, create=True):
         if self.local_completion_route is not None and phase == "completion":
-            return self.local_completion_route(self._scope_record(task), deepcopy(binding), item)
+            return self.local_completion_route(self._scope_record(task), deepcopy(binding), item, create=create)
         return None
 
-    def _delivery_route(self, task, binding, phase, from_ref, to_ref, item):
+    def _delivery_route(self, task, binding, phase, from_ref, to_ref, item, *, create=True):
         if self._bus() is None:
             return None
-        route = self._local_completion_route(task, binding, phase, item)
+        route = self._local_completion_route(task, binding, phase, item, create=create)
+        if route is True:
+            return None
         if route is None and self.route is not None:
             route = self.route(self._scope_record(task), deepcopy(binding), phase, from_ref, to_ref)
         if route is not None:
@@ -1062,7 +1094,7 @@ class InteractionService:
             if any(Path(rule["repo"]).resolve() == Path(task["repo"]["root"])
                    for rule in notification_state.project_mutes()):
                 return False
-        if self._local_completion_route(task, binding, phase, item) is not None:
+        if self._local_completion_route(task, binding, phase, item, create=False) is not None:
             return True
         if policy.get("hub_thread") != binding["interaction_ref"]:
             return False
@@ -1114,6 +1146,48 @@ class InteractionService:
         receipt = task["run_heads"][task["run_id"]][-1]
         return receipt, dict(task_id=task["task_id"], request_id=None, generation=generation,
                              kind="completion", created_at=first["settled_at"])
+
+    def _completion_reservation(self, task):
+        for run, receipts in self.store._history(task):
+            if receipts:
+                ref, last = receipts[-1]
+                if last["phase"] == "settled" and last["outcome"] in DELIVERY_OUTCOMES:
+                    notice = self._notice(task, ref, "completion")
+                    if notice:
+                        _require((notice["correlation_id"], notice["run_id"], notice["generation"]) ==
+                                 (ref, run["run_id"], last["generation"]))
+                        item = dict(task_id=task["task_id"], request_id=None, generation=last["generation"],
+                                    kind="completion", created_at=last["recorded_at"])
+                        return ref, item, notice
+                    break
+        return None
+
+    def _observe_completed(self, task, binding, item, notice, message):
+        """Continue observing a committed delivery at its original Run fence."""
+        if self.observe_envelope is None or message["state"] not in _OBSERVABLE_DELIVERY:
+            return self._delivery(task, notice)[0]
+        _require(not notice["superseded"] and binding["revision"] == notice["binding_revision"], "STALE_REQUEST")
+        route = self._delivery_route(task, binding, "completion", notice["from_ref"], notice["to_ref"],
+                                     item, create=False)
+        if route is None:
+            return self._delivery(task, notice)[0]
+        _require((route.sender.endpoint_id, route.target.endpoint_id, route.source_ref, route.local_completion)
+                 == (notice["sender"], notice["target"], notice["source_ref"], notice.get("local_completion", False)),
+                 "STALE_REQUEST")
+
+        def guard():
+            latest, _, current = self._task(task["task_id"])
+            saved = self._completion_reservation(latest)
+            _require(current["revision"] == notice["binding_revision"] and saved and saved[2] == notice,
+                     "STALE_REQUEST")
+            observed = self._message(latest, notice)
+            _require(observed and observed["id"] == message["id"]
+                     and observed["attempt_id"] == message["attempt_id"], "STALE_REQUEST")
+
+        bus = self._bus()
+        _require(bus is not None, "STALE_REQUEST")
+        self.observe_envelope(bus, route, message["id"], guard)
+        return self._delivery(task, notice)[0]
 
     @staticmethod
     def failure_item(task, status, generation):
@@ -1191,6 +1265,10 @@ class InteractionService:
         """
         self._delivery_id(task_id, correlation, phase)
         task, spec, binding = self._task(task_id)
+        if phase == "completion" and (published := self._completion_reservation(task)):
+            ref, item, saved = published
+            if ref == correlation and (message := self._message(task, saved)) and message["state"] != "queued":
+                return self._observe_completed(task, binding, item, saved, message)
         row, item, notice = self._delivery_item(task, spec, correlation, phase)
         prior = notice if (notice and notice["superseded"] and self.render_notice is not None
                            and phase == "question") else None
@@ -1215,8 +1293,7 @@ class InteractionService:
         bus.recover()
         message = self._message(task, notice)
         if message is not None and message["state"] != "queued" and (
-                self.observe_envelope is None or message["state"] not in {
-                    "dispatching", "delivered", "delivery_unknown", "accepted", "responded"}):
+                self.observe_envelope is None or message["state"] not in _OBSERVABLE_DELIVERY):
             return self._delivery(task, notice)[0]
 
         route = self._delivery_route(task, binding, phase, notice["from_ref"], notice["to_ref"], item)
@@ -1236,7 +1313,7 @@ class InteractionService:
                 _require(not (current_row and current_row["presentation"])
                          and self._notification_eligible(latest, current, phase, current_item), "STALE_REQUEST")
             if route.local_completion:
-                _require(self._local_completion_route(latest, current, phase, current_item) == route,
+                _require(self._local_completion_route(latest, current, phase, current_item, create=False) == route,
                          "STALE_REQUEST")
 
         guard()

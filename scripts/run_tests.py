@@ -39,7 +39,7 @@ def main():
         # Do not inherit the operator's advisory/enforced policy, hub or queues.
         os.environ['CODEX_HOME'] = str(Path(folder)/'config')
         os.environ['ATO_HOME'] = str(Path(folder)/'ato')
-        for key in ('CODEX_THREAD_ID', 'CTASK_SESSION_REF', 'CTASK_SESSION_TOKEN', 'CTASK_ENDPOINT_TOKEN',
+        for key in ('CODEX_THREAD_ID', 'ATO_ACTOR_FILE', 'CTASK_SESSION_REF', 'CTASK_SESSION_TOKEN', 'CTASK_ENDPOINT_TOKEN',
                     'CTASK_HANDOFF_READER'):
             os.environ.pop(key, None)
         suite = unittest.TestLoader().discover(str(ROOT/'tests'), pattern='test_*.py')

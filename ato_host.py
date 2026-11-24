@@ -441,7 +441,8 @@ class Host:
             return str(executable)
         return None
 
-    def local_completion_route(self, scope, binding, item):
+    def local_completion_route(self, scope, binding, item, *, create=True):
+        """Resolve a route, or return True during preflight if enrollment is possible."""
         if binding["revision"] != 1 or not self._owns_local_binding(scope, binding):
             return None
         if not self.acceptance_queue_binary():
@@ -454,7 +455,7 @@ class Host:
             return None
         origin = self.store.submission_origin(scope.task_id)
         if origin is not None:
-            return self._origin_acceptance_route(bus, origin)
+            return self._origin_acceptance_route(bus, origin, create=create)
         row = self.acceptance_notifications()
         if row is None or row["native_home"] != str(self.store.native_home):
             return None
@@ -463,24 +464,54 @@ class Host:
             return None
         return self._acceptance_mailbox_route(bus, row)
 
-    def _origin_acceptance_route(self, bus, origin):
+    def _origin_acceptance_route(self, bus, origin, *, create=True):
         if origin.session_id is None or origin.native_home != str(self.store.native_home):
             return None
         with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
             if CodexSessionAdapter().session_project(origin.session_id) != origin.project:
                 return None
         row = self._acceptance_record(self._acceptance_origin_name(origin))
+        if row is None:
+            legacy = self.acceptance_notifications()
+            if self._matches_acceptance_origin(legacy, origin):
+                row = legacy
         if row is not None:
             _require(self._matches_acceptance_origin(row, origin), "BINDING_CHANGED")
             if route := self._acceptance_mailbox_route(bus, row):
                 return route
+            # An existing (including revoked or partially enrolled) endpoint
+            # must never be reissued automatically.
+            with bus._transaction() as connection:
+                for key in ("sender", "target"):
+                    try:
+                        bus._endpoint(connection, row[key]["endpoint_id"])
+                    except IdentityError:
+                        continue
+                    return None
         if self.read_only:
             return None
+        if not create:
+            return True
         try:
             row = self.register_acceptance_route(bus, origin, "verified ATO submission session")
-        except ConflictError:
-            return None  # A separately enrolled native endpoint belongs to its current owner.
+        except (ConflictError, IdentityError):
+            return None
         return self._acceptance_mailbox_route(bus, row)
+
+    def delivery_sender(self, scope, notice):
+        if notice.get("local_completion") is True:
+            origin = self.store.submission_origin(scope.task_id)
+            records = [] if origin is None else [self._acceptance_record(self._acceptance_origin_name(origin))]
+            records.append(self.acceptance_notifications())
+            for row in records:
+                if row and (row["source_ref"], row["sender"]["endpoint_id"]) == (
+                        notice["source_ref"], notice["sender"]):
+                    return EndpointCredential(**row["sender"])
+            return None
+        mailbox = self.record(notice["from_ref"], {}).get("mailbox")
+        if mailbox:
+            return EndpointCredential(**mailbox)
+        return None
 
     @staticmethod
     def _acceptance_mailbox_route(bus, row):
@@ -515,7 +546,7 @@ class Host:
         self.interaction = InteractionService(self.store, self.execution, authorize=self.authorize_interaction,
             verify_event=self.verify_event, verify_continuation=self.verify_continuation, route=self.route,
             mailbox=self.mailbox, render_notice=render_notice, local_completion_route=self.local_completion_route,
-            authorize_local_acceptance=self.authorize_local_acceptance)
+            authorize_local_acceptance=self.authorize_local_acceptance, owns_local_binding=self._owns_local_binding)
         self.execution.hooks = self.interaction.execution_hooks()
         self.binding = BindingService(self.execution, actor_grant=self.actor_grant,
             endpoint_grant=self.endpoint_grant, verify_decision=self.verify_binding,
@@ -569,5 +600,6 @@ def _registered_acceptance_endpoints(bus, connection, row):
     if not found:
         # The private record can outlive an interrupted SQLite commit.
         return False
-    _require([(ep["kind"], ep["state"]) for ep in found] == [("local_cli", "active"), ("codex", "active")])
+    if [(ep["kind"], ep["state"]) for ep in found] != [("local_cli", "active"), ("codex", "active")]:
+        raise ConflictError("completion endpoints are inactive or incomplete")
     return True

@@ -94,6 +94,16 @@ class CodexSessionAdapterTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)
         self.assertEqual(list(self.home.glob('*journal*')), [])
 
+    def test_batch0_verify_session_requires_native_header_exact_id_and_absolute_project(self):
+        for kind, native_id, cwd in (('other', ORIGIN, str(self.repo)),
+                                     ('session_meta', HUB, str(self.repo)),
+                                     ('session_meta', ORIGIN, '.')):
+            with self.subTest(kind=kind, native_id=native_id, cwd=cwd):
+                self.paths[ORIGIN].write_text(json.dumps(dict(
+                    type=kind, payload=dict(id=native_id, cwd=cwd))) + '\n')
+                self.assertFalse(self.adapter.verify_session(ORIGIN, self.repo))
+                self.assertIsNone(self.adapter.session_project(ORIGIN))
+
     def test_wrong_index_identity_and_unindexed_latest_are_never_used(self):
         missing = str(uuid.uuid4())
         self.index(missing, header_id=HUB)

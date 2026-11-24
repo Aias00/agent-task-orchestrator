@@ -10,8 +10,9 @@ import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import agent_registry
 import ato_config
@@ -35,6 +36,20 @@ INTERACTION = "agentref-" + "2"*32
 
 
 class PublicCLI(unittest.TestCase):
+    def test_batch0_foreground_interrupt_returns_completed_after_worker_finishes(self):
+        complete = {"task_id": "task-" + "a" * 32, "status": "completed"}
+        execution = Mock()
+        execution.task_status.return_value = complete
+        interaction = Mock()
+        interaction.task_status.return_value = complete
+        app = Application(SimpleNamespace(execution=execution, interaction=interaction))
+        proof = object()
+        with patch("ato_application.time.sleep") as sleep:
+            self.assertEqual(app.wait(proof, complete["task_id"], Mock(side_effect=KeyboardInterrupt)),
+                             complete)
+            sleep.assert_not_called()
+        execution.request_stop.assert_called_once_with(proof, complete["task_id"])
+
     def setUp(self):
         self.fixture = Path(self.enterContext(TemporaryDirectory(prefix="ato-cli-"))).resolve()
         self.env = fake_env(self.fixture)
