@@ -519,6 +519,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         self.interaction.render_notice = render_notice
         self.interaction.route = lambda *args: MailboxRoute(sender, recipient, "fixture-route")
         host = SimpleNamespace(store=self.store, folder=self.store.root / "host",
+                               queue_executable=lambda _: sys.executable,
                                record=lambda *_: {"transport_kinds": ["codex"]})
         self.interaction.dispatch_envelope = self.interaction.observe_envelope = partial(ato_observer._dispatch, host)
         calls = []
@@ -538,6 +539,8 @@ class UnifiedAcceptanceTests(unittest.TestCase):
                 return super().session_cursor(native_id, project)
 
             def send(self, endpoint, envelope):
+                self_queue = ato_observer.queue_executable.get()
+                assert self_queue == sys.executable
                 calls.append("send")
                 with rollout.open("a") as stream:
                     for payload in ({"type": "task_started", "turn_id": "fixture-turn"},

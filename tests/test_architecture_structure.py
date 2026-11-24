@@ -20,7 +20,7 @@ PRIMITIVES = ('now', 'read', 'save', 'digest', 'process_identity', 'Halt', 'lock
 
 
 class ArchitectureStructureTests(unittest.TestCase):
-    def test_foundational_modules_import_only_standard_library(self):
+    def test_foundational_modules_import_only_standard_library_and_private_directory_primitive(self):
         for name in ('ato_core', 'ato_config', 'agent_registry'):
             with self.subTest(module=name):
                 tree = ast.parse((ROOT/(name+'.py')).read_text())
@@ -29,10 +29,26 @@ class ArchitectureStructureTests(unittest.TestCase):
                         modules = [alias.name for alias in node.names]
                     elif isinstance(node, ast.ImportFrom):
                         self.assertEqual(node.level, 0)
+                        if (name, node.module) == ('ato_config', 'ato_core'):
+                            self.assertEqual([alias.name for alias in node.names], ['ensure_private_dir'])
+                            continue
                         modules = [node.module]
                     else:
                         continue
                     self.assertTrue(all(module.split('.')[0] in sys.stdlib_module_names for module in modules), modules)
+
+    def test_runtime_never_imports_release_scripts(self):
+        for source in (*ROOT.glob('*.py'), *(ROOT/'ato_cli').glob('*.py')):
+            with self.subTest(source=source.name):
+                tree = ast.parse(source.read_text())
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        names = [alias.name for alias in node.names]
+                    elif isinstance(node, ast.ImportFrom):
+                        names = [node.module or '']
+                    else:
+                        continue
+                    self.assertTrue(all(name.split('.')[0] != 'scripts' for name in names))
 
     def test_mutual_dependencies_include_cli_and_introduce_no_new_pairs(self):
         baseline = json.loads((ROOT/'tests/fixtures/architecture-baseline.json').read_text())

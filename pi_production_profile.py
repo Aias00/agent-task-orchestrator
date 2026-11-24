@@ -138,7 +138,7 @@ class ProductionPiProfile:
         from pi_toolchain import ROOT, prepare_toolchain, write_launch, clean_environment, production_sandbox
         from pi_acp_compat import derive_directory
         from pi_production_egress import EgressProxy
-        from scripts.release_snapshot import verify_snapshot
+        from ato_release_lib import verify_snapshot
         from transport import _private_save
         self.recheck_permit()
         if self._configuration_source and any(Path(self._configuration_source).is_relative_to(Path(p).resolve())

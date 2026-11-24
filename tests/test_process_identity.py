@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import ato_core
+import ato_release_lib
 import hub_sandbox
 import pi_session_coordinator
 import recovery
@@ -126,7 +127,7 @@ class ProcessIdentityTests(unittest.TestCase):
             def identity(self, pid):return 'mocked'
         for mode in ('instance', 'subclass', 'class'):
             with self.subTest(mode=mode), ExitStack() as stack:
-                stack.enter_context(patch.object(release, 'command', side_effect=AssertionError('real ps forbidden')))
+                stack.enter_context(patch.object(ato_release_lib, 'command', side_effect=AssertionError('real ps forbidden')))
                 observer = OfflineObserver() if mode == 'subclass' else release.System()
                 if mode == 'instance':stack.enter_context(patch.object(observer, 'identity', return_value='mocked'))
                 if mode == 'class':stack.enter_context(patch.object(release.System, 'identity', return_value='mocked'))
@@ -145,12 +146,12 @@ class ProcessIdentityTests(unittest.TestCase):
             self.assertIn(env, (UTC_ENV, LOCAL_ENV))
             return (utc if 'TZ' in env else local) if running[0] else ''
         observer = release.System();process = dict(pid=123, command='fixture-controller')
-        with patch.object(release, 'command', side_effect=ps), \
+        with patch.object(ato_release_lib, 'command', side_effect=ps), \
                 patch.object(observer, 'processes', side_effect=[[process], []]), \
                 patch('os.kill', side_effect=lambda *_: running.__setitem__(0, False)) as kill:
             observer.stop(dict(process, pid_identity=legacy))
             kill.assert_called_once_with(123, signal.SIGTERM)
-        with patch.object(release, 'command', side_effect=ps), patch('os.kill') as kill:
+        with patch.object(ato_release_lib, 'command', side_effect=ps), patch('os.kill') as kill:
             with self.assertRaisesRegex(release.Refused, 'identity changed'):
                 observer.stop(dict(process, pid_identity='reused'))
             kill.assert_not_called()

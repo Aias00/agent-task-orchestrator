@@ -27,33 +27,19 @@ import tempfile
 import time
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ato_release_lib import (
+    LEGACY, MANIFEST, PATH, SURFACE, ObserverProbe, Refused, command, file_record, host_tool,
+    inventory, is_legacy_observer, launcher_bytes, mailbox, mailbox_copy, mailbox_counts, mailbox_exists,
+    observer_argv, read, read_private, release_lock, require, safe_record, same_observer,
+    sha, verify_snapshot, verify_tools, with_leases,
+)
+
+
 PUBLIC = 'ato'
-LEGACY = ('ctask', 'ctask-notify', 'ato-read-handoff', 'ato-hub')
 ENTRIES = (PUBLIC, *LEGACY)
-SURFACE = 'ato-v1'
-BUSY = frozenset(('queued', 'claimed', 'dispatching', 'delivery_unknown'))
 POLICIES = ('hub.json', 'notification-policy.json', 'notification-project-mutes.json',
             'time-policy.json', 'failure-alerts.json', 'control/config.json')
-MANIFEST = '.release-manifest.json'
-PATH = os.defpath
-
-
-class Refused(ValueError):
-    pass
-
-
-def require(condition, reason):
-    if not condition:
-        raise Refused(reason)
-
-
-def sha(path):
-    with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-
-def read(path):
-    return json.loads(Path(path).read_text())
 
 
 def save(path, value):
@@ -80,14 +66,11 @@ def sync_directory(path):
         os.close(fd)
 
 
-def command(argv, *, cwd=None, env=None):
-    return subprocess.check_output([str(a) for a in argv], cwd=cwd, env=env, text=True).strip()
-
-
-def environment(ato_home, codex_home):
+def environment(ato_home, codex_home, *, home=None):
     # Never inherit actor/session credentials, Python/Node startup hooks or
     # platform loader settings from the invoking shell.
-    env = dict(PATH=PATH, HOME=str(codex_home.parent), LC_ALL='C', ATO_HOME=str(ato_home),
+    home = Path.home().resolve() if home is None else home
+    env = dict(PATH=PATH, HOME=str(home), LC_ALL='C', ATO_HOME=str(ato_home),
                CODEX_HOME=str(codex_home), PYTHONDONTWRITEBYTECODE='1')
     return env
 
@@ -100,29 +83,6 @@ def context(ato_home, codex_home, legacy=False):
     return ato_home/'ctask-interaction/contexts'/namespace
 
 
-def safe_record(path):
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
-                and info.st_size <= 16 * 1024 * 1024, 'invalid release record: ' + str(path))
-        data = stream.read(info.st_size + 1)
-        last = path.lstat()
-        require(len(data) == info.st_size and (last.st_dev, last.st_ino, last.st_mtime_ns, last.st_ctime_ns) ==
-                (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns),
-                'release record changed during inspection: ' + str(path))
-        return data, info
-
-
-def file_record(path):
-    try:
-        data, info = safe_record(path)
-    except FileNotFoundError:
-        return None
-    mode = stat.S_IMODE(info.st_mode)
-    require(mode & 0o111 and not mode & 0o7022, 'entrypoint is not a trusted executable: ' + str(path))
-    return dict(data=base64.b64encode(data).decode(), mode=mode, sha256=hashlib.sha256(data).hexdigest())
-
-
 def entrypoints(bin_dir):
     if bin_dir.exists() or bin_dir.is_symlink():
         require(bin_dir.is_dir() and not bin_dir.is_symlink() and bin_dir.resolve() == bin_dir,
@@ -130,21 +90,17 @@ def entrypoints(bin_dir):
     return {name: file_record(bin_dir/name) for name in ENTRIES}
 
 
-def launcher_bytes(root, python, digest):
-    return ('#!/bin/sh\nexport ATO_LAUNCH_SEAL=' + digest + '\nexport ATO_LAUNCHER="$0"\nexec ' +
-            shlex.join([str(python), '-IB', str(root/'ato.py')]) + ' "$@"\n').encode()
-
-
-def snapshot_source(root):
+def snapshot_source(root, *, allow_interpreter_change=False):
     data, _ = safe_record(root/MANIFEST)
     doc = json.loads(data)
-    verify_snapshot(root, doc['commit'], legacy=doc.get('surface') != SURFACE)
+    verify_snapshot(root, doc['commit'], legacy=doc.get('surface') != SURFACE,
+                    allow_interpreter_change=allow_interpreter_change)
     return dict(root=str(root), python=str(root/'.venv/bin/python'), seal=hashlib.sha256(data).hexdigest(),
                 surface=doc.get('surface', 'legacy'), commit=doc['commit'])
 
 
 def verify_source(source):
-    actual = snapshot_source(Path(source['root']))
+    actual = snapshot_source(Path(source['root']), allow_interpreter_change=source.get('interpreter_rebound', False))
     require(source['root'] == actual['root'] and source['seal'] == actual['seal']
             and source['surface'] == actual['surface'] and source['commit'] == actual['commit']
             and source['python_sha256'] == sha(source['python']), 'recorded source or interpreter changed')
@@ -153,7 +109,7 @@ def verify_source(source):
     return actual
 
 
-def launcher_sources(entries):
+def launcher_sources(entries, *, allow_interpreter_change=False):
     """Read the exact independently selected source for each present entry."""
     scripts = dict(ato='ato.py', ctask='runner.py', **{
         'ctask-notify': 'runner.py', 'ato-read-handoff': 'coordination.py', 'ato-hub': 'hub_cli.py'})
@@ -173,7 +129,13 @@ def launcher_sources(entries):
                 and root.is_absolute() and root.resolve() == root and script.name == scripts[name]
                 and script.is_file() and not script.is_symlink(), 'unavailable launcher source: ' + name)
         if root not in sources:
-            sources[root] = snapshot_source(root)
+            try:
+                sources[root] = snapshot_source(root)
+            except Refused:
+                if not allow_interpreter_change:
+                    raise
+                rebound = snapshot_source(root, allow_interpreter_change=True)
+                sources[root] = dict(rebound, interpreter_rebound=True)
         source = sources[root]
         require((source['surface'] == SURFACE) == (name == PUBLIC), 'launcher selects a cross-version source')
         if name == PUBLIC:
@@ -183,73 +145,6 @@ def launcher_sources(entries):
             host_tool('prior interpreter', python)
         selected[name] = dict(source, python=str(python), script=str(script), python_sha256=sha(python))
     return selected
-
-
-def mailbox_counts(con):
-    require(con.execute('pragma user_version').fetchone()[0] == 2, 'unsupported mailbox schema')
-    counts = dict(con.execute('select state,count(*) from messages group by state'))
-    busy = {k: v for k, v in counts.items() if k in BUSY}
-    # Delivered/accepted and even cancelled/expired envelopes can retain an
-    # external turn slot. A terminal label alone does not prove quiescence.
-    for state, count in con.execute('select state,count(*) from messages where busy != 0 group by state'):
-        busy[state] = max(busy.get(state, 0), count)
-    slots = dict(con.execute('select busy != 0,count(*) from messages group by busy != 0'))
-    return dict(counts=counts, busy=busy, idle=not busy,
-                turn_slots=dict(idle=slots.get(0, 0), busy=slots.get(1, 0), total=sum(slots.values())))
-
-
-def mailbox_exists(state):
-    path = state/'mailbox/state.sqlite'
-    files = [p for p in (path, path.with_name(path.name + '-wal'),
-                         path.with_name(path.name + '-journal'), path.with_name(path.name + '-shm'))
-             if p.exists() or p.is_symlink()]
-    require(not files or path in files, 'mailbox sidecar exists without its database')
-    require(all(p.is_file() and not p.is_symlink() and p.resolve() == p for p in files),
-            'mailbox contains indirect material')
-    return bool(files)
-
-
-def empty_mailbox():
-    return dict(counts={}, busy={}, idle=True, turn_slots=dict(idle=0, busy=0, total=0))
-
-
-@contextmanager
-def mailbox_copy(path):
-    """Inspect a stable main/WAL copy outside runtime state."""
-
-    require(path.is_file() and path.resolve() == path, 'mailbox database is missing or indirect')
-    require(not path.with_name(path.name+'-journal').exists(), 'mailbox has a rollback journal')
-    paths = [path, path.with_name(path.name+'-wal')]
-    def versions():
-        return [((p.stat().st_dev, p.stat().st_ino, p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns)
-                 if p.exists() else None) for p in paths]
-    before = versions()
-    with tempfile.TemporaryDirectory(prefix='ato-release-mailbox-') as folder:
-        copied = Path(folder)/path.name
-        for p in paths:
-            if p.exists() or p.is_symlink():
-                require(p.is_file() and p.resolve() == p, 'indirect database sidecar')
-                shutil.copyfile(p, Path(folder)/p.name)
-        require(versions() == before, 'mailbox changed during read-only inspection; retry at idle boundary')
-        yield copied
-
-
-def mailbox(state):
-    if not mailbox_exists(state):
-        return empty_mailbox()
-    with mailbox_copy(state/'mailbox/state.sqlite') as copied, closing(sqlite3.connect(copied)) as con:
-        result = mailbox_counts(con)
-        return with_leases(con, result)
-
-
-def with_leases(con, result):
-    names = {row[0] for row in con.execute("select name from sqlite_master where type='table'")}
-    if 'execution_leases' in names:
-        active = con.execute("select count(*) from execution_leases where state='active'").fetchone()[0]
-        if active:
-            result['busy']['execution_leases'] = active
-            result['idle'] = False
-    return result
 
 
 @contextmanager
@@ -269,31 +164,6 @@ def idle_boundary(state):
         con.close()
 
 
-def inventory(root):
-    result = {}
-    for directory, folders, files in os.walk(root, followlinks=False):
-        for name in sorted(folders+files):
-            path = Path(directory)/name
-            relative = path.relative_to(root).as_posix()
-            if relative == MANIFEST:
-                continue
-            mode = stat.S_IMODE(path.lstat().st_mode)
-            if path.is_symlink():
-                target = path.resolve(strict=True)
-                external = not target.is_relative_to(root)
-                require(not external or relative in ('.venv/bin/python', '.venv/bin/python3', '.venv/bin/python3.12'),
-                        'unexpected external symlink: '+relative)
-                require(not external or target.is_file(), 'external interpreter is not a file')
-                result[relative] = dict(kind='link', target=os.readlink(path),
-                    external_sha256=sha(target) if external else None)
-            elif path.is_dir():
-                result[relative] = dict(kind='directory', mode=mode)
-            else:
-                require(path.is_file(), 'non-regular snapshot material: '+relative)
-                result[relative] = dict(kind='file', mode=mode, sha256=sha(path))
-    return result
-
-
 def seal(root):
     # lstat/skip symlinks is essential: never chmod the shared interpreter.
     for directory, folders, files in os.walk(root, topdown=False, followlinks=False):
@@ -306,31 +176,6 @@ def seal(root):
             if not path.is_symlink():
                 path.chmod(0o555)
     root.chmod(0o500)
-
-
-def verify_snapshot(root, commit, *, legacy=False):
-    require(root.is_dir() and not root.is_symlink(), 'snapshot must be a real directory')
-    manifest = json.loads(safe_record(root/MANIFEST)[0])
-    require(manifest.get('version') == 1 and manifest.get('qualified') is True and
-            manifest.get('commit') == commit and manifest.get('root') == str(root),
-            'snapshot is unqualified, relocated or selects another commit')
-    require(root.stat().st_uid == os.getuid() and not root.stat().st_mode & 0o222,
-            'snapshot root is not owned and sealed read-only')
-    require(not (root/MANIFEST).is_symlink() and not (root/MANIFEST).stat().st_mode & 0o222,
-            'snapshot manifest is not sealed')
-    verify_tools(manifest.get('tools', {}))
-    actual = inventory(root)
-    require(actual == manifest['files'], 'snapshot content, links or modes changed')
-    require(all(not row.get('mode', 0) & 0o222 for row in actual.values()), 'snapshot contains writable files')
-    expected = ('runner.py', 'coordination.py') if legacy else (
-        'ato.py', 'ato_runtime.py', 'scripts/install.py', 'skills/ato/SKILL.md')
-    require(legacy or manifest.get('surface') == SURFACE, 'snapshot has a different public interface')
-    for name in (*expected, '.venv/bin/python'):
-        require((root/name).is_file(), 'incomplete snapshot: '+name)
-    require(os.access(root/'.venv/bin/python', os.X_OK), 'snapshot interpreter is not executable')
-    if not legacy:
-        require(not any((root/'bin'/name).exists() for name in LEGACY), 'snapshot has legacy public launchers')
-    return manifest
 
 
 def git_commit(repo, commit):
@@ -348,36 +193,12 @@ def run_logged(argv, root, env, name):
     require(result.returncode == 0, name+' failed; see '+str(logs/(name+'.log')))
 
 
-def host_tool(name, explicit=None, *, forbidden=()):
-    candidate = Path(explicit or shutil.which(name) or '')
-    require(candidate.is_absolute(), 'select an absolute trusted '+name+' executable')
-    resolved = candidate.resolve(strict=True)
-    forbidden = tuple(Path(p).resolve() for p in forbidden)
-    for alias in (candidate, resolved):
-        for part in (alias, *alias.parents):
-            require(not any(part.resolve().is_relative_to(p) for p in forbidden),
-                    name+' executable enters source or snapshot')
-            info = part.lstat()
-            sticky_root = stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_mode & stat.S_ISVTX
-            require(info.st_uid in (0, os.getuid()) and (stat.S_ISLNK(info.st_mode) or
-                    not info.st_mode & 0o022 or sticky_root), 'untrusted '+name+' path ownership/permissions')
-    require(resolved.is_file() and os.access(resolved, os.X_OK), name+' is not executable')
-    return dict(path=str(resolved), sha256=sha(resolved))
-
-
-def verify_tools(tools):
-    for name, row in tools.items():
-        require(name in ('node', 'npm'), 'unknown recorded dependency tool')
-        selected = host_tool(name, row['path'])
-        require(selected == row, 'recorded '+name+' executable changed')
-
-
 def observer_environment(source, env):
     env = dict(env)
     path = Path(source['root'])/MANIFEST
     if path.is_file():
         tools = read(path).get('tools', {})
-        verify_tools(tools)
+        verify_tools({key: value for key, value in tools.items() if key == 'node'})
         node = tools.get('node')
     else:
         node = None
@@ -397,8 +218,11 @@ def install_dependencies(root, env):
     run_logged([root/'.venv/bin/python', '-m', 'pip', 'install', '--no-index', '--no-cache-dir',
                 '--disable-pip-version-check', *links, '-r', root/'requirements-acp.lock'],
                root, env, 'python-dependencies')
-    run_logged([tools['node']['path'], tools['npm']['path'], 'ci', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', root/'integrations/pi-acp'],
-               root, env, 'node-dependencies')
+    npm = Path(tools['npm']['path'])
+    npm_command = [tools['node']['path'], str(npm)] if npm.suffix in {'.js', '.cjs'} else [str(npm)]
+    npm_env = dict(env, PATH=os.pathsep.join((str(Path(tools['node']['path']).parent), env['PATH'])))
+    run_logged([*npm_command, 'ci', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix',
+                root/'integrations/pi-acp'], root, npm_env, 'node-dependencies')
     return tools
 
 
@@ -440,7 +264,7 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         require(command(['git', 'write-tree'], cwd=root) == tree, 'archive tree differs from selected commit')
         source = {p: sha(root/p) for p in command(['git', 'ls-files', '-z'], cwd=root).split('\0') if p and not (root/p).is_symlink()}
         with tempfile.TemporaryDirectory(prefix='ato-release-qualification-') as home:
-            env = environment(Path(home)/'ato', Path(home)/'native')
+            env = environment(Path(home)/'ato', Path(home)/'native', home=Path(home))
             env['npm_config_cache'] = str(npm_cache or Path(home)/'npm-cache')
             if wheelhouse is not None:
                 env['ATO_RELEASE_WHEELHOUSE'] = str(wheelhouse)
@@ -457,7 +281,9 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         seal(root)
         root.chmod(0o700)
         manifest = dict(version=1, surface=SURFACE, qualified=True, root=str(root), commit=commit, tree=tree,
-                        source_files=source, files=inventory(root), tools=tools or {}, created_at=time.time())
+                        source_files=source, files=inventory(root),
+                        tools={k:v for k,v in (tools or {}).items() if k == 'node'},
+                        build_tools=tools or {}, created_at=time.time())
         save(root/MANIFEST, manifest)
         (root/MANIFEST).chmod(0o400)
         root.chmod(0o500)
@@ -471,82 +297,7 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         raise
 
 
-def observer_argv(source):
-    python, root = source['python'], Path(source['root'])
-    return ([python, '-IB', str(root/'ato_runtime.py'), 'observe'] if source.get('surface') == SURFACE
-            else [python, str(root/'runner.py'), '_controller'])
-
-
-class System:
-    """Local process inspection and the only release-owned signaling boundary."""
-
-    def processes(self):
-        rows = command(['/bin/ps', '-axo', 'pid=,command='], env={'PATH': PATH, 'LC_ALL': 'C'})
-        return [dict(pid=int(pid), command=line) for row in rows.splitlines()
-                if len(parts := row.strip().split(None, 1)) == 2 for pid, line in [parts]]
-
-    def identity(self, pid):
-        return self._start_identity(pid, utc=True)
-
-    def _start_identity(self, pid, *, utc):
-        env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
-        if utc:
-            env['TZ'] = 'UTC'
-        try:
-            start = command(['/bin/ps', '-p', str(pid), '-o', 'lstart='], env=env)
-            return hashlib.sha256(start.encode()).hexdigest() if start else None
-        except subprocess.CalledProcessError:
-            return None
-
-    _native_identity = identity
-
-    def matches_identity(self, pid, expected):
-        identity = self.identity
-        return expected is not None and (identity(pid) == expected or (
-            getattr(identity, '__func__', None) is System._native_identity
-            and self._start_identity(pid, utc=False) == expected))
-
-    def matches_observer(self, observer):
-        if observer.get('surface') == SURFACE:
-            import ato_process
-            return ato_process.disposition(observer['pid'], observer['pid_identity']) == 'live'
-        return self.matches_identity(observer['pid'], observer['pid_identity'])
-
-    def observer(self, state, source, *, healthy=True):
-        path = state/'control/process.json'
-        expected = ' '.join(observer_argv(source)) if source else None
-        processes = self.processes()
-        matching = [p for p in processes if p['command'] == expected]
-        try:
-            row = read_private(path)
-        except FileNotFoundError:
-            require(not matching, 'observer has no durable process record')
-            return None
-        # Legacy recovery.watch_ticks clears the PID and birth record on a
-        # graceful exit. A live matching command still requires an identity.
-        if row.get('state') == 'exited' and (source or {}).get('surface') != SURFACE:
-            require('pid' in row and row['pid'] is None and 'pid_identity' in row
-                    and row['pid_identity'] is None and not matching,
-                    'invalid legacy observer exit record')
-            return None
-        pid = row.get('pid')
-        require(type(pid) is int and pid > 0, 'invalid observer process record')
-        occupied = next((p for p in processes if p['pid'] == pid), None)
-        if not occupied:
-            require(not matching, 'observer command exists with a different PID')
-            return None
-        require(len(matching) == 1 and occupied == matching[0],
-                'expected exactly one observer selecting the recorded source')
-        observer = dict(occupied, pid_identity=row.get('pid_identity'), heartbeat=row.get('heartbeat'),
-                        surface=source.get('surface', 'legacy'))
-        require(observer['pid_identity'] is not None and self.matches_observer(observer),
-                'observer pid_identity mismatch (possible PID reuse)')
-        if observer['surface'] == SURFACE:
-            require(row.get('release') == source['seal'], 'observer release does not match the sealed source')
-        require(not healthy or (row.get('state') == 'watching' and row.get('consecutive_failures', 0) == 0
-                and isinstance(row.get('heartbeat'), (int, float)) and 0 <= time.time()-row['heartbeat'] <= 30),
-                'observer is not healthy')
-        return observer
+class System(ObserverProbe):
 
     def stop(self, observer):
         require(self.matches_observer(observer), 'PID identity changed before SIGTERM')
@@ -569,8 +320,13 @@ class System:
         else:
             # The prior release owns its observer bootstrap and original policies.
             code = 'import control; control.start()'
-            subprocess.run([source['python'], '-c', code], cwd=source['root'],
-                           env=observer_environment(source, env), check=True, capture_output=True, timeout=25)
+            env = observer_environment(source, env)
+            try:
+                subprocess.run([source['python'], '-c', code], cwd=source['root'],
+                               env=env, check=True, capture_output=True, timeout=25)
+            except (OSError, subprocess.SubprocessError):
+                self._record_legacy_start(source, record)
+                raise
         deadline = time.monotonic()+30
         previous = None
         while time.monotonic() < deadline:
@@ -585,7 +341,15 @@ class System:
             except (Refused, FileNotFoundError, json.JSONDecodeError):
                 pass
             time.sleep(.2)
+        if not unified and previous is None:
+            self._record_legacy_start(source, record)
         raise Refused('observer did not produce two independently verified healthy heartbeats')
+
+    def _record_legacy_start(self, source, record):
+        expected = ' '.join(observer_argv(source))
+        matching = [row for row in self.processes() if row['command'] == expected]
+        if len(matching) == 1 and (birth := self.identity(matching[0]['pid'])):
+            record(dict(matching[0], pid_identity=birth, surface='legacy'))
 
     def _start_unified(self, source, env, record, intent):
         import ato_process
@@ -595,6 +359,9 @@ class System:
             birth = ato_process.identity(parent)
             require(birth is not None, 'release owner identity is unverifiable')
             argv = observer_argv(source)
+            env = observer_environment(source, env)
+            if override := os.environ.get('CTASK_QUEUE_BIN'):
+                env['CTASK_QUEUE_BIN'] = host_tool('queue', override)['path']
             child = subprocess.Popen(argv, cwd=source['root'], env=dict(env, ATO_OBSERVER_PIPE=str(rd)),
                                      pass_fds=(rd,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True, umask=0o077)
@@ -609,17 +376,6 @@ class System:
             os.close(wr)
 
 
-def same_observer(a, b):
-    return all(a.get(key) == b.get(key) for key in ('pid', 'pid_identity', 'command'))
-
-
-def read_private(path):
-    require(path.resolve() == path, 'indirect runtime record: ' + str(path))
-    data, info = safe_record(path)
-    require(not info.st_mode & 0o022, 'writable runtime record: ' + str(path))
-    return json.loads(data)
-
-
 def _directory_entries(path):
     if not path.exists() and not path.is_symlink():
         return []
@@ -631,63 +387,97 @@ def _no_live_lock(path):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return
+        return True
     try:
         require(stat.S_ISREG(os.fstat(fd).st_mode), 'unsafe legacy lock')
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
     finally:
         os.close(fd)
 
 
 def active_tasks(paths, system, sources):
     """Fence unresolved execution while retaining idle tasks and their sealed source."""
-    from ato_host import Host
-    from ato_task_store import TaskStore
-
     prefixes = [str(Path(row['root'])/name) for row in sources.values()
-                for name in ('runner.py', 'ato_runtime.py', 'hub_cli.py', 'pi_coordinator_exec.py',
-                             'pi_production_exec.py', 'pi_acp_exec.py')]
+                for name in ('runner.py', 'ato.py', 'ato_runtime.py', 'hub_cli.py', 'coordination.py',
+                             'pi_coordinator_exec.py', 'pi_production_exec.py', 'pi_acp_exec.py', 'pi_acp_worker.py')]
     active = [row for row in system.processes() if any(path in row['command'] for path in prefixes)
               and not row['command'].endswith(('runner.py _controller', 'ato_runtime.py observe'))]
     blockers = ['selected runtime has active commands'] if active else []
-    store = TaskStore(paths['ato_home'], native_home=paths['codex_home'])
-    Host(store=store, read_only=True).compose()
-    for directory in _directory_entries(store.tasks):
-        if not re.fullmatch(r'task-[0-9a-f]{32}', directory.name):
-            continue
-        task, status, _ = store._read_projection(directory.name)
-        if (task['creation']['phase'] != 'ready' or status['execution']['state'] != 'idle'
-                or not status['execution']['verified'] or status['status'] == 'delivery_unknown'):
-            blockers.append('unified Task execution or provisioning is unresolved')
-        if any(row['phase'] in ('launching', 'active', 'unknown') for row in status['run_history'][-1:]):
-            blockers.append('unified Run evidence is unsettled')
+    if os.path.lexists(paths['ato_home']/'unified-v1'):
+        blockers.extend(_unified_blockers(paths))
     workflows = set()
     legacy = paths['legacy_state']/'control/state.sqlite'
     if legacy.exists() or legacy.is_symlink():
         with mailbox_copy(legacy) as copied, closing(sqlite3.connect(copied)) as con:
             workflows.update(Path(row[0]) for row in con.execute('select path from workflows'))
     for hub in _directory_entries(paths['legacy_hub_home']/'hubs'):
-        _no_live_lock(hub/'.hub.lock')
+        if not _no_live_lock(hub/'.hub.lock'):
+            blockers.append('legacy H1 lock is busy: ' + str(hub/'.hub.lock'))
         for directory in _directory_entries(hub/'tasks'):
             row = read_private(directory/'state.json')
+            if row.get('status') == 'cleaned':
+                continue
             if (row.get('owner_pid') or row.get('active_process') or
-                    row.get('status') in ('running', 'launching', 'verifying', 'reviewing', 'cleanup_blocked')):
+                    row.get('notice') == 'delivery_unknown' or row.get('status') in (
+                        'running', 'launching', 'verifying', 'reviewing', 'cleanup_blocked', 'running_worker', 'fixing')):
                 blockers.append('legacy H1 task has unresolved activity')
             workflows.update(Path(path) for path in row.get('workflow_history', ()))
             if row.get('active_workflow_dir'):
                 workflows.add(Path(row['active_workflow_dir']))
     for directory in workflows:
         require(directory.is_absolute(), 'unverifiable legacy workflow path')
-        row = read_private(directory/'state.json')
-        _no_live_lock(directory.parent.parent/'.worker.lock')
+        lock = directory.parent.parent/'.worker.lock'
+        if not _no_live_lock(lock):
+            blockers.append('legacy workflow lock is busy: ' + str(lock))
+        try:
+            row = read_private(directory/'state.json')
+        except FileNotFoundError:
+            blockers.append('missing legacy workflow state: ' + str(directory))
+            continue
         if (row.get('owner_pid') or row.get('active_process') or
                 row.get('status') in ('running', 'launching', 'cleanup_blocked', 'delivery_unknown')):
             blockers.append('legacy workflow has unresolved activity')
         if row.get('active_run'):
-            child = read_private(Path(row['active_run'])/'state.json')
+            try:
+                child = read_private(Path(row['active_run'])/'state.json')
+            except FileNotFoundError:
+                blockers.append('missing legacy workflow stage: ' + str(directory))
+                continue
             if child.get('owner_pid') or child.get('active_process'):
                 blockers.append('legacy workflow stage has unresolved activity')
     return sorted(set(blockers))
+
+
+def _unified_blockers(paths):
+    from ato_host import Host
+    from ato_task_store import TaskError, TaskStore
+
+    store = TaskStore(paths['ato_home'], native_home=paths['codex_home'])
+    try:
+        with store._private(store.root):
+            Host(store=store, read_only=True).compose()
+        tasks = _directory_entries(store.tasks)
+    except (TaskError, OSError, ValueError):
+        return ['unified state could not be verified']
+    blockers = []
+    for directory in tasks:
+        if not re.fullmatch(r'task-[0-9a-f]{32}', directory.name):
+            continue
+        try:
+            task, status, _ = store._read_projection(directory.name)
+        except (TaskError, OSError, ValueError):
+            blockers.append('unified Task state could not be verified: ' + directory.name)
+            continue
+        if (task['creation']['phase'] != 'ready' or status['execution']['state'] != 'idle'
+                or not status['execution']['verified'] or status['status'] == 'delivery_unknown'):
+            blockers.append('unified Task execution or provisioning is unresolved')
+        if any(row['phase'] in ('launching', 'active', 'unknown') for row in status['run_history'][-1:]):
+            blockers.append('unified Run evidence is unsettled')
+    return blockers
 
 
 def atomic_entry(path, row):
@@ -713,19 +503,6 @@ def atomic_bytes(path, data, mode):
         sync_directory(path.parent)
     finally:
         temp.unlink(missing_ok=True)
-
-
-@contextmanager
-def release_lock(bin_dir, *, shared=False):
-    require(bin_dir.is_dir() and bin_dir.resolve() == bin_dir, 'bin-dir must be an existing real directory')
-    fd = os.open(bin_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(fd)
-        require(info.st_uid == os.getuid() and not info.st_mode & 0o022, 'invalid release directory')
-        fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
-        yield
-    finally:
-        os.close(fd)
 
 
 def scoped_paths(bin_dir, ato_home, codex_home, *, legacy_home=None, legacy_codex=None,
@@ -775,9 +552,9 @@ def policy_identity(paths):
     return result
 
 
-def inspect(paths, system, target=None):
+def inspect(paths, system, target=None, *, allow_interpreter_change=False):
     entries = entrypoints(paths['bin_dir'])
-    sources = launcher_sources(entries)
+    sources = launcher_sources(entries, allow_interpreter_change=allow_interpreter_change)
     if entries['ato-hub'] is not None:
         require(paths['legacy_hub_explicit'], 'select the exact legacy H1 home with --legacy-hub-home')
     mixed = len({(s['root'], s['python']) for s in sources.values()}) > 1
@@ -793,7 +570,10 @@ def inspect(paths, system, target=None):
             observers.append((source, row))
     commands = {' '.join(observer_argv(row)) for row in (sources.get('ctask-notify'), sources.get(PUBLIC), target)
                 if row}
-    require(len(observers) <= 1 and sum(p['command'] in commands for p in system.processes()) <= len(observers),
+    observed_count = sum(p['command'] in commands or (
+                         'ctask-notify' not in sources and is_legacy_observer(p['command']))
+                         for p in system.processes())
+    require(len(observers) <= 1 and observed_count <= len(observers),
             'more than one or unrecorded observer at the selected boundary')
     source, observer = observers[0] if observers else (None, None)
     policy = policy_identity(paths)
@@ -909,7 +689,7 @@ def _observers(paths, journal, system):
         except Refused:
             # Before its first heartbeat, only a child with this transaction's
             # exact recorded spawn receipt can be stopped.
-            if (not launched or not matching or launched['surface'] != SURFACE
+            if (not launched or not matching
                     or matching[0] != dict(pid=launched['pid'], command=launched['command'])
                     or not system.matches_observer(launched)):
                 raise
@@ -922,19 +702,27 @@ def _observers(paths, journal, system):
     return current[0] if current else None
 
 
-def restore(path, journal, paths, system):
+def _restore_preflight(journal, paths, system):
     for source in journal['before']['sources'].values():
         verify_source(source)
     verify_source(journal['target'])
-    _quiescent(paths, system, journal)
+    if journal['state'] != 'rolled_back':
+        _quiescent(paths, system, journal)
     observer = _observers(paths, journal, system)
     old = journal['before']['observer']
     restored = journal.get('rollback_observer')
     keep = observer is not None and ((old and same_observer(old, observer))
-                                     or (restored and same_observer(restored, observer)))
+                                     or (restored and same_observer(restored, observer)
+                                         and journal.get('observer_starting') != 'rollback_observer'))
     if journal['state'] == 'rolled_back':
         require(entrypoints(paths['bin_dir']) == journal['before']['entries']
                 and (keep if old else observer is None), 'rolled back state changed')
+    return observer, old, keep
+
+
+def restore(path, journal, paths, system, *, preflight=None):
+    observer, old, keep = preflight or _restore_preflight(journal, paths, system)
+    if journal['state'] == 'rolled_back':
         return observer
     if observer and not keep:
         system.stop(observer)
@@ -957,13 +745,14 @@ def restore(path, journal, paths, system):
     return journal['rollback_observer']
 
 
-def activate(root, commit, paths, transaction, system=None, *, converge_mixed=False):
+def activate(root, commit, paths, transaction, system=None, *, converge_mixed=False,
+             allow_interpreter_change=False):
     system = system or System()
     target = snapshot_source(root)
     require(target['surface'] == SURFACE and target['commit'] == commit, 'wrong cutover snapshot')
     target['python_sha256'] = sha(target['python'])
     with release_lock(paths['bin_dir']):
-        before = inspect(paths, system, target)
+        before = inspect(paths, system, target, allow_interpreter_change=allow_interpreter_change)
         require(not before['blockers'], '; '.join(before['blockers']))
         require(not before['mixed_sources'] or converge_mixed, 'mixed entries require explicit convergence')
         transaction.mkdir(mode=0o700, parents=False)
@@ -1020,8 +809,9 @@ def rollback(transaction, paths, system=None):
         journal = read_private(path)
         require(journal.get('version') == 2 and journal.get('paths') == contexts(paths),
                 'rollback context differs from the recorded transaction')
+        preflight = _restore_preflight(journal, paths, system)
         try:
-            observer = restore(path, journal, paths, system)
+            observer = restore(path, journal, paths, system, preflight=preflight)
         except BaseException as exc:
             journal.update(state='recovery_required', recovery_error_type=type(exc).__name__)
             save(path, journal)
@@ -1042,6 +832,7 @@ def main(argv=None):
     parser.add_argument('--commit', help='Full Git commit for stage, diagnosis or activation')
     parser.add_argument('--allow-runtime-change', action='store_true')
     parser.add_argument('--converge-mixed-entrypoints', action='store_true')
+    parser.add_argument('--allow-prior-interpreter-change', action='store_true')
     args = parser.parse_args(argv)
 
     def need(*names):
@@ -1052,6 +843,8 @@ def main(argv=None):
     try:
         if not args.activate and args.converge_mixed_entrypoints:
             parser.error('--converge-mixed-entrypoints requires --activate')
+        if args.allow_prior_interpreter_change and not (args.activate or args.dry_run):
+            parser.error('--allow-prior-interpreter-change requires --activate or --dry-run')
         if not args.rollback:
             need('snapshot', 'commit')
             require(re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', args.commit), 'select a full Git commit')
@@ -1080,7 +873,8 @@ def main(argv=None):
                     require(not args.transaction.is_relative_to(args.snapshot)
                             and not args.snapshot.is_relative_to(args.transaction), 'transaction overlaps snapshot')
                     result = activate(args.snapshot, args.commit, paths, args.transaction,
-                                      converge_mixed=args.converge_mixed_entrypoints)
+                                      converge_mixed=args.converge_mixed_entrypoints,
+                                      allow_interpreter_change=args.allow_prior_interpreter_change)
                 else:
                     result = rollback(args.transaction, paths)
             else:
@@ -1089,7 +883,8 @@ def main(argv=None):
                 if target:
                     require(target['commit'] == commit and target['surface'] == SURFACE
                             and read(args.snapshot/MANIFEST)['tree'] == tree, 'snapshot differs from selected Git tree')
-                result = inspect(paths, System(), target)
+                result = inspect(paths, System(), target,
+                                 allow_interpreter_change=args.allow_prior_interpreter_change)
                 result['entrypoints'] = {name: (dict(present=True, mode=row['mode'], sha256=row['sha256'])
                                                 if row else dict(present=False))
                                          for name, row in result.pop('entries').items()}

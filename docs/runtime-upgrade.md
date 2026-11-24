@@ -54,8 +54,13 @@ python3.12 scripts/release_snapshot.py --activate --allow-runtime-change \
   --ato-home "$ATO_HOME" --codex-home "$CODEX_HOME" --transaction "$JOURNAL"
 ```
 
-Mixed prior sources require explicit `--converge-mixed-entrypoints`. The
-journal records each managed executable's presence, exact bytes and mode, and
+Mixed prior sources require explicit `--converge-mixed-entrypoints`. When
+an external interpreter for a prior entrypoint has been updated in place,
+`--allow-prior-interpreter-change` records its current digest in the
+journal. The interpreter path and link must still match. The target requires
+exact verification.
+
+The journal records each managed executable's presence, exact bytes and mode, and
 the sealed source and interpreter for each present entry. It includes the old
 and new observer identity and both state contexts. A busy or uncertain Task,
 native execution, mailbox delivery or turn slot blocks the change.
@@ -98,3 +103,8 @@ interpreter selected before the switch. Use that exact interpreter and
 `ato.py` with the same recorded ATO and Codex homes for the Task's commands.
 Fixture qualification and source installation leave real activation and
 provider verification pending.
+
+Optional Skill installation is locked separately. Before upgrading a Skill,
+archive the current version outside its destination, then install from the
+selected sealed snapshot. Restore the archived Skill alongside an executable
+rollback when the Skill was changed separately.

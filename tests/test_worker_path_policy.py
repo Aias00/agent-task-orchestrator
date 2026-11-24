@@ -66,7 +66,7 @@ fs.unlinkSync(root+'/.env');fs.symlinkSync(root+'/src/code.py',root+'/.env');
 assert.equal(allowed(root,'.env','read',false),false,'sensitive lexical alias must remain forbidden');
 console.log('all path-policy assertions passed');
 '''
-        result = subprocess.run(['node', '--input-type=module', '-e', script, str(self.repo)],
+        result = subprocess.run([os.environ.get('CTASK_NODE_BIN', 'node'), '--input-type=module', '-e', script, str(self.repo)],
             cwd=ROOT, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -84,7 +84,7 @@ for(const name of ['ls','find','grep']) assert.equal(await call({toolName:name,i
 assert.equal((await call({toolName:'bash',input:{}})).block,true);
 console.log('hook policy passed');
 '''
-        result = subprocess.run(['node', '--input-type=module', '-e', script], cwd=ROOT,
+        result = subprocess.run([os.environ.get('CTASK_NODE_BIN', 'node'), '--input-type=module', '-e', script], cwd=ROOT,
             env=dict(os.environ, CTASK_AGENT_REPO=str(self.repo), CTASK_AGENT_SANDBOX='workspace-write'),
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)

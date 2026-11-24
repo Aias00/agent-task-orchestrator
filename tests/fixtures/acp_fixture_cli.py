@@ -23,7 +23,7 @@ if __name__ == '__main__':
             # deliberately fixture-only and never installed as production agents.
             plan = __import__('json').loads((directory/'plan.json').read_text())
             if plan['agent']['kind'] == 'offline_pi_acp_fixture':
-                command = ['node', os.environ['CTASK_FIXTURE_DERIVED_PI_ACP']]
+                command = [os.environ.get('CTASK_NODE_BIN', 'node'), os.environ['CTASK_FIXTURE_DERIVED_PI_ACP']]
                 environment = {key: os.environ[key] for key in ('CTASK_PI_ACP_STATE_DIR', 'PI_ACP_PI_COMMAND')}
             else:
                 command = [sys.executable, str(Path(__file__).with_name('acp_fixture_agent.py'))]

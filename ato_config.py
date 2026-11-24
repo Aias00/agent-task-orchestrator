@@ -87,7 +87,11 @@ def interaction_directory():
 def ensure_interaction_directory():
     """Create only the existing ATO-owned namespace; no registration or services."""
     path = interaction_directory()
-    path.mkdir(parents=True, exist_ok=True)
+    if selected := _unified_kernel.get():
+        from ato_core import ensure_private_dir
+        ensure_private_dir(path/'mailbox', private_from=selected[0].parent.parent)
+    else:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 

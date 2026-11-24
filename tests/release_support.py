@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from scripts import release_snapshot as release
+from ato_core import ensure_private_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,8 @@ def unseal(root):
 
 def write(root, name, data='offline fixture', mode=0o600):
     path = root/name
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not path.parent.exists():
+        ensure_private_dir(path.parent)
     path.write_text(data)
     path.chmod(mode)
     return path

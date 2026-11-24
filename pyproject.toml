@@ -44,6 +44,7 @@ py-modules = [
   "ato_private",
   "ato_process",
   "ato_product",
+  "ato_release_lib",
   "ato_runtime",
   "ato_seal",
   "ato_task_store",

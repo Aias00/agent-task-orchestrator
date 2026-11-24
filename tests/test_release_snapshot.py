@@ -1,5 +1,6 @@
 """Sealing, read-only diagnostics and journal safeguards with local fixtures."""
 from contextlib import closing, redirect_stdout, redirect_stderr
+import fcntl
 import io
 import json
 import os
@@ -10,9 +11,11 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from release_support import CURRENT, FakeSystem, legacy_entry, seal, snapshot, unseal, write
+from ato_core import ensure_private_dir
+import ato_release_lib
 from scripts import release_snapshot as release
 
 
@@ -33,7 +36,7 @@ class ReleaseTests(unittest.TestCase):
         self.unified_state = self.paths['unified_state']
         for state in (self.legacy_state, self.unified_state):
             db = state/'mailbox/state.sqlite'
-            db.parent.mkdir(parents=True)
+            ensure_private_dir(db.parent)
             with closing(sqlite3.connect(db)) as con:
                 con.executescript("pragma user_version=2;"
                     "create table messages(id text primary key,state text,busy int default 0);"
@@ -224,10 +227,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn(('stop', release.SURFACE, journal['new_observer']['pid']), self.system.calls)
         self.assertEqual(journal['rollback_observer']['surface'], 'legacy')
 
-    def test_changed_old_seal_and_policy_are_recovery_required_without_overwrite(self):
+    def test_changed_old_seal_and_policy_are_refused_without_writing_journal(self):
         self.old_observer()
         self.activate()
         current = release.entrypoints(self.bin)
+        journal = self.transaction/'transaction.json'
+        original = journal.read_bytes()
         self.old.chmod(0o700)
         with self.assertRaisesRegex(release.Refused, 'read-only'):
             self.rollback()
@@ -237,7 +242,31 @@ class ReleaseTests(unittest.TestCase):
             self.rollback()
         self.assertEqual(policy.read_text(), '{"mode":"user_input_only"}')
         self.assertEqual(release.entrypoints(self.bin), current)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'], 'recovery_required')
+        self.assertEqual(journal.read_bytes(), original)
+
+    def test_dry_run_reports_busy_lock_missing_legacy_and_h1_states(self):
+        self.old_observer()
+        flow = self.base/'fixture repo/.codex/tasks/workflows/test'
+        lock = write(flow.parent.parent, '.worker.lock')
+        self.base.joinpath('fixture repo/.codex/tasks/workflows').mkdir()
+        with closing(sqlite3.connect(self.legacy_state/'control/state.sqlite')) as con, con:
+            con.execute('create table workflows(path text)')
+            con.execute('insert into workflows values(?)', (str(flow),))
+        hub = self.paths['legacy_hub_home']/'hubs/hub-fixture/tasks'
+        write(hub/'clean', 'state.json', json.dumps(dict(status='cleaned', workflow_history=[str(flow/'old')])))
+        for status in ('running_worker', 'fixing'):
+            write(hub/status, 'state.json', json.dumps(dict(status=status)))
+        with lock.open() as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(release, 'System', return_value=self.system), \
+                    patch.object(release, 'git_commit', return_value=(CURRENT, 'fixture')), \
+                    redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(release.main(self.args('dry-run')), 0)
+            blockers = json.loads(out.getvalue())['blockers']
+        self.assertIn('legacy H1 task has unresolved activity', blockers)
+        self.assertIn('legacy workflow lock is busy: ' + str(lock), blockers)
+        self.assertIn('missing legacy workflow state: ' + str(flow), blockers)
+        self.assertEqual(len(blockers), 3)
 
     def test_active_selected_process_and_legacy_workflow_block_before_stop(self):
         self.old_observer()
@@ -305,6 +334,43 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(release.Refused, 'changed'):
             release.verify_snapshot(self.snapshot, CURRENT)
 
+    def test_runtime_checks_sealed_source_and_full_check_covers_dependencies_and_interpreter(self):
+        root = self.base/'fast-check'
+        interpreter = write(self.base, 'python3.13', '#!/bin/sh\nexit 0\n', 0o700)
+        build_tool = write(self.base, 'npm', '#!/bin/sh\nexit 0\n', 0o700)
+        source = write(root, 'ato.py')
+        for name in ('ato_runtime.py', 'scripts/install.py', 'skills/ato/SKILL.md'):
+            write(root, name)
+        dependency = write(root, 'integrations/pi-acp/node_modules/fixture/index.js')
+        python = root/'.venv/bin/python'
+        ensure_private_dir(python.parent)
+        python.symlink_to(interpreter)
+        python.with_name('python3.13').symlink_to(interpreter)
+        seal(root, CURRENT, tools={'npm': release.host_tool('npm', build_tool)})
+        self.addCleanup(unseal, root)
+        build_tool.unlink()
+        release.verify_snapshot(root, CURRENT)
+        dependency.chmod(0o600)
+        dependency.write_text('changed')
+        dependency.chmod(0o444)
+        release.verify_snapshot(root, CURRENT, full=False)
+        with self.assertRaisesRegex(release.Refused, 'content'):
+            release.verify_snapshot(root, CURRENT)
+        dependency.chmod(0o600)
+        dependency.write_text('offline fixture')
+        dependency.chmod(0o444)
+        interpreter.write_text('#!/bin/sh\nexit 1\n')
+        with self.assertRaisesRegex(release.Refused, 'content'):
+            release.verify_snapshot(root, CURRENT)
+        release.verify_snapshot(root, CURRENT, allow_interpreter_change=True)
+        with self.assertRaisesRegex(release.Refused, 'interpreter'):
+            release.verify_snapshot(root, CURRENT, full=False)
+        source.chmod(0o600)
+        source.write_text('changed')
+        source.chmod(0o444)
+        with self.assertRaisesRegex(release.Refused, 'source changed'):
+            release.verify_snapshot(root, CURRENT, full=False)
+
     def test_mailbox_inspection_uses_wal_without_changing_original_files(self):
         path = self.unified_state/'mailbox/state.sqlite'
         with closing(sqlite3.connect(path)) as con:
@@ -356,13 +422,13 @@ class ProcessSafetyTests(unittest.TestCase):
         source = dict(root='/fixture', python='/fixture/python')
         row = dict(pid=12345, pid_identity='verified', state='watching', consecutive_failures=0, heartbeat=time.time())
         process = dict(pid=12345, command=' '.join(release.observer_argv(source)))
-        with patch.object(release, 'read_private', return_value=row), \
+        with patch.object(ato_release_lib, 'read_private', return_value=row), \
                 patch.object(system, 'identity', return_value='verified'), \
                 patch.object(system, 'processes', return_value=[process]):
             self.assertEqual(system.observer(Path('/fixture-state'), source)['pid'], 12345)
             for change in (dict(pid_identity='reused'), dict(heartbeat=1),
                            dict(state='launching'), dict(consecutive_failures=1)):
-                with patch.object(release, 'read_private', return_value=dict(row, **change)):
+                with patch.object(ato_release_lib, 'read_private', return_value=dict(row, **change)):
                     with self.assertRaises(release.Refused):
                         system.observer(Path('/fixture-state'), source)
             with patch.object(system, 'processes', return_value=[process, process]), self.assertRaises(release.Refused):
@@ -390,6 +456,50 @@ class ProcessSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(release.Refused, 'invalid legacy observer exit'):
                     system.observer(state, source)
 
+    def test_legacy_exit_rejects_unselected_live_controller(self):
+        system = release.System()
+        source = dict(root='/fixture', python='/fixture/python')
+        row = dict(pid=None, state='exited')
+        with patch.object(ato_release_lib, 'read_private', return_value=row), \
+                patch.object(system, 'processes', return_value=[]):
+            self.assertIsNone(system.observer(Path('/fixture-state'), source))
+            self.assertIsNone(system.observer(Path('/fixture-state'), None))
+            for command in ('/other/python /other/runner.py _controller', 'python runner.py _controller'):
+                with patch.object(system, 'processes', return_value=[dict(pid=77, command=command)]):
+                    with self.assertRaisesRegex(release.Refused, 'invalid legacy observer exit'):
+                        system.observer(Path('/fixture-state'), None)
+            with patch.object(ato_release_lib, 'read_private', return_value=dict(row, pid_identity='unexpected')):
+                with self.assertRaisesRegex(release.Refused, 'invalid legacy observer exit'):
+                    system.observer(Path('/fixture-state'), source)
+
+    def test_stopped_unified_observer_refuses_live_or_unknown_identity(self):
+        system = release.System()
+        source = dict(root='/fixture', python='/fixture/python', surface=release.SURFACE, seal='seal')
+        row = dict(pid=77, pid_identity='original', state='stopped', release='seal')
+        with patch.object(ato_release_lib, 'read_private', return_value=row), \
+                patch.object(system, 'processes', return_value=[dict(pid=77, command='new process')]):
+            for disposition in ('reused', 'absent', 'live', 'unknown'):
+                with patch('ato_process.disposition', return_value=disposition) as identity:
+                    if disposition in ('reused', 'absent'):
+                        self.assertIsNone(system.observer(Path('/fixture-state'), source))
+                    else:
+                        with self.assertRaisesRegex(release.Refused, 'stop is unverified'):
+                            system.observer(Path('/fixture-state'), source)
+                    identity.assert_called_once_with(77, 'original')
+
+    def test_failed_legacy_bootstrap_records_the_only_matching_process(self):
+        system = release.System()
+        source = dict(root='/fixture', python='/fixture/python')
+        process = dict(pid=12345, command=' '.join(release.observer_argv(source)))
+        observed = []
+        with patch.object(system, 'processes', side_effect=[[], [process]]), \
+                patch.object(system, 'identity', return_value='verified'), \
+                patch.object(release, 'observer_environment', return_value={}), \
+                patch.object(release.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 25)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                system.start(source, Path('/fixture-state'), {}, observed.append)
+        self.assertEqual(observed, [dict(process, pid_identity='verified', surface='legacy')])
+
     def test_start_requires_two_advancing_heartbeats_from_same_process(self):
         system = release.System()
         source = dict(root='/fixture-source', python='/fixture-source/python')
@@ -404,6 +514,24 @@ class ProcessSafetyTests(unittest.TestCase):
         self.assertEqual(inspect.call_count, 3)
         self.assertEqual(result['heartbeat'], 3)
         self.assertEqual(run.call_args.args[0][-1], 'import control; control.start()')
+
+    def test_unified_observer_uses_the_pinned_node_and_trusted_queue_override(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder).resolve()
+            node = write(base, 'node', '#!/bin/sh\nexit 0\n', 0o700)
+            queue = write(base, 'queue', '#!/bin/sh\nexit 0\n', 0o700)
+            release.save(base/release.MANIFEST, dict(tools=dict(node=release.host_tool('node', node))))
+            source = dict(root=str(base), python='/fixture/python', surface=release.SURFACE, seal='test-seal')
+            env = release.environment(base/'state', base/'native', home=base/'home')
+            with patch.dict(os.environ, CTASK_QUEUE_BIN=str(queue)), \
+                    patch('ato_process.identity', return_value='birth'), \
+                    patch.object(release.subprocess, 'Popen', return_value=Mock(pid=77)) as launch:
+                release.System()._start_unified(source, env, Mock(), {})
+            child = launch.call_args.kwargs['env']
+            self.assertEqual(child['CTASK_NODE_BIN'], str(node))
+            self.assertEqual(child['CTASK_QUEUE_BIN'], str(queue))
+            self.assertEqual(child['HOME'], str(base/'home'))
+            self.assertNotIn('CTASK_QUEUE_BIN', env)
 
 
 class StageTests(unittest.TestCase):
@@ -491,7 +619,17 @@ class DependencyToolTests(unittest.TestCase):
                 tools=release.install_dependencies(root,env)
             self.assertEqual(env['PATH'],release.PATH)
             self.assertEqual(env['CTASK_NODE_BIN'],str(tool_dir/'node'))
-            self.assertEqual(run.call_args_list[-1].args[0][:3],[str(tool_dir/'node'),str(tool_dir/'npm'),'ci'])
+            argv, _, npm_env, _ = run.call_args_list[-1].args
+            self.assertEqual(argv[:2], [str(tool_dir/'npm'), 'ci'])
+            self.assertEqual(npm_env['PATH'].split(os.pathsep)[0], str(tool_dir))
+            npm_js = tool_dir/'npm-cli.js'
+            npm_js.write_text('#!/usr/bin/env node\n')
+            npm_js.chmod(0o755)
+            js_env = dict(env, ATO_RELEASE_SOURCE=str(base/'source'), ATO_RELEASE_NODE=str(tool_dir/'node'),
+                          ATO_RELEASE_NPM=str(npm_js))
+            with patch.object(release, 'run_logged') as js_run:
+                release.install_dependencies(root, js_env)
+            self.assertEqual(js_run.call_args.args[0][:3], [str(tool_dir/'node'), str(npm_js), 'ci'])
             release.verify_tools(tools)
             release.save(root/release.MANIFEST,dict(tools=tools))
             selected=release.observer_environment(dict(root=str(root)),env)

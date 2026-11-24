@@ -16,6 +16,7 @@ import ato_config
 from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
 from ato_binding import BindingDecision, BindingGrant, BindingService, read_binding
 from ato_execution import ExecutionHooks, ExecutionService, HostProfile
+from ato_release_lib import mailbox_copy
 from ato_task_store import (
     InitialBinding, SubmissionGrant, SubmissionOrigin, TaskError, TaskScope, TaskStore, _REF, _SHA, _absolute,
     _directory, _existing, _regular, _fields, _matches, _overlaps, _read_file, _require, _save, _sha, _strict_json,
@@ -23,6 +24,7 @@ from ato_task_store import (
 )
 from codex_session_adapter import CodexSessionAdapter
 from message_bus import ConflictError, EndpointCredential, IdentityError, MailboxError, MessageBus
+from pi_toolchain import trusted_path
 
 _CREDENTIAL = re.compile(r"credential-[0-9a-f]{32}")
 _SESSION = re.compile(r"agentref-[0-9a-f]{32}")
@@ -100,6 +102,25 @@ class Host:
 
     def authorize_local_acceptance(self, actor, scope, binding):
         return actor is self._local_owner and self._owns_local_binding(scope, binding)
+
+    def queue_executable(self, observation):
+        executable = os.environ.get("CTASK_QUEUE_BIN") or observation.get("queue_executable")
+        if not executable:
+            profile = self.configured_profile()
+            executable = profile.worker_executable if profile else None
+        if executable:
+            try:
+                return str(trusted_path(executable, executable=True,
+                    forbidden=(self.store.home, *self.store.native_homes, Path(__file__).resolve().parent)))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+        return None
+
+    def observer_transport(self):
+        observation = self.record("observation", {})
+        configured = observation.get("enabled") is True and "codex" in observation.get("transport_kinds", ())
+        return dict(codex_queue=("ready" if self.queue_executable(observation) else "executable_unavailable")
+                    if configured else "not_configured")
 
     def actor_file(self):
         raw = os.environ.get("ATO_ACTOR_FILE")
@@ -568,7 +589,6 @@ class _ExistingMailbox(MessageBus):
     """Projection-only connection, without schema setup or a writer lease."""
     @contextmanager
     def _transaction(self):
-        from scripts.release_snapshot import mailbox_copy
         with mailbox_copy(self.path) as copy, closing(sqlite3.connect(copy)) as con:
             con.row_factory = sqlite3.Row
             yield con

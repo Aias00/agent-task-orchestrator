@@ -9,12 +9,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import time
 import uuid
 
 __all__ = ('now', 'read', 'save', 'digest', 'process_identity', 'Halt',
-           'locked', 'alive', 'pid_alive')
+           'locked', 'alive', 'pid_alive', 'private_save', 'ensure_private_dir')
 
 
 def now():
@@ -26,14 +27,63 @@ def read(path):
 
 
 def save(path, data):
-    path = Path(path)
+    _save_json(Path(path), data, indent=2)
+
+
+def _save_json(path, data, *, indent=None, allow_nan=True):
     tmp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
-    with tmp.open('w') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write('\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(data, stream, ensure_ascii=False, indent=indent, allow_nan=allow_nan)
+            if indent is not None:
+                stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def ensure_private_dir(path, *, private_from=None):
+    """Create missing components privately and validate the managed subtree."""
+    path = Path(path).absolute()
+    boundary = path if private_from is None else Path(private_from).absolute()
+    if path == Path('/') or not path.is_relative_to(boundary) or '..' in path.parts:
+        raise ValueError('invalid private directory boundary')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open('/', flags)
+    try:
+        current = Path('/')
+        for part in path.parts[1:]:
+            current /= part
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            else:
+                next_fd = os.open(part, flags, dir_fd=fd)
+                try:
+                    os.fchmod(next_fd, 0o700)
+                    os.fsync(fd)
+                except BaseException:
+                    os.close(next_fd)
+                    raise
+            os.close(fd)
+            fd = next_fd
+            if current.is_relative_to(boundary):
+                info = os.fstat(fd)
+                if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise ValueError('private directory must be owned with mode 0700')
+    finally:
+        os.close(fd)
+    return path
 
 
 def digest(plan):
@@ -113,22 +163,7 @@ def pid_alive(info, *, alive_fn=None, identity_fn=None):
 
 
 def private_save(path, value):
-    import json
-    import os
-    import secrets
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(path.name+'.'+secrets.token_hex(8)+'.tmp')
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        with os.fdopen(fd, 'w') as stream:
-            json.dump(value, stream, ensure_ascii=False, allow_nan=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        temporary.unlink(missing_ok=True)
+    path = Path(path)
+    if not path.parent.exists():
+        ensure_private_dir(path.parent)
+    _save_json(path, value, allow_nan=False)

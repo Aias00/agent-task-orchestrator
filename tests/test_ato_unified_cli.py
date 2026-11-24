@@ -337,6 +337,8 @@ class ReleaseCLI(unittest.TestCase):
 
     def test_rollback_refuses_a_changed_executable_without_overwriting_it(self):
         self.activate()
+        journal = self.transaction/"transaction.json"
+        recorded = journal.read_bytes()
         launcher = self.bin/"ato"
         launcher.chmod(0o711)
         before = launcher.read_bytes()
@@ -344,4 +346,4 @@ class ReleaseCLI(unittest.TestCase):
             release.rollback(self.transaction, self.paths, self.system)
         self.assertEqual(launcher.read_bytes(), before)
         self.assertEqual(launcher.stat().st_mode & 0o777, 0o711)
-        self.assertEqual(release.read(self.transaction/"transaction.json")["state"], "recovery_required")
+        self.assertEqual(journal.read_bytes(), recorded)

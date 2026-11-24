@@ -695,6 +695,15 @@ class InstalledATO(unittest.TestCase):
         self.cli("accept", task, actor=user, error=(2, "USAGE"))
         self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
 
+    def test_observer_diagnostics_report_missing_and_configured_queue_executable(self):
+        self.install()
+        self.registry("observation", dict(enabled=True, transport_kinds=["codex"]))
+        for command in (("system", "status"), ("agent", "doctor")):
+            self.assertEqual(self.cli(*command)["observer"]["codex_queue"], "executable_unavailable")
+        self.profile()
+        for command in (("system", "status"), ("agent", "doctor")):
+            self.assertEqual(self.cli(*command)["observer"]["codex_queue"], "ready")
+
     def test_installed_host_handoff_requires_actual_attestation_and_continues_checks(self):
         self.install()
         self.profile(mode="host", via_setup=True)

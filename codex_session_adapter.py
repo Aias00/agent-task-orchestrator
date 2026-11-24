@@ -3,6 +3,7 @@
 The legacy public module is a forwarding shim. All indexes are read-only,
 all lookups use exact IDs, and native receipt/rollout parsing lives here.
 """
+from contextvars import ContextVar
 import ato_config
 import json
 import os
@@ -15,6 +16,7 @@ import time
 
 MAX_LINE = 8 * 1024 * 1024
 MAX_ACTIVITY_BYTES = 16 * 1024 * 1024
+queue_executable = ContextVar("codex_queue_executable", default=None)
 
 
 def identity(value):
@@ -47,7 +49,8 @@ def session_path(home_dir, thread):
 
 
 def queue(home_dir, thread, text, *, cwd=None):
-    return _queue(home_dir, thread, text, cwd=cwd, binary=os.environ.get('CTASK_QUEUE_BIN', 'codex'))
+    binary = queue_executable.get() or os.environ.get('CTASK_QUEUE_BIN', 'codex')
+    return _queue(home_dir, thread, text, cwd=cwd, binary=binary)
 
 
 def _queue(home_dir, thread, text, *, cwd=None, binary):

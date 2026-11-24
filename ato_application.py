@@ -10,6 +10,7 @@ import ato_product
 from ato_execution import _current, _repo_gate, _worker_lock, _verify_exit, _active_proof
 from ato_host import Host, host_record
 from ato_private import render_notice
+from ato_release_lib import ObserverProbe, Refused, mailbox
 from ato_seal import installed_boundary, runtime_seal
 from ato_task_store import (
     TaskError, _existing, _git_worktrees, _git_text, _read_json, _require, _save,
@@ -173,7 +174,6 @@ def notification_policy(host, repo):
 
 
 def system_status(host):
-    from scripts.release_snapshot import Refused, System, mailbox
     home = host.store.kernel_root / "ctask-interaction"
     mailbox_summary = mailbox(home)
     state = "absent"
@@ -189,11 +189,11 @@ def system_status(host):
             source = dict(root=str(Path(__file__).resolve().parent), python=os.path.abspath(sys.executable),
                           surface="ato-v1", seal=host.store.runtime_seal)
             try:
-                state = "watching" if System().observer(home, source) else "unverified"
+                state = "watching" if ObserverProbe().observer(home, source) else "unverified"
             except (OSError, Refused):
                 state = "unverified"
     return dict(schema_version=1, release=host.store.runtime_seal, namespace="unified-v1",
-                observer=dict(pid=pid, state=state), mailbox=mailbox_summary)
+                observer=dict(pid=pid, state=state, **host.observer_transport()), mailbox=mailbox_summary)
 
 
 def doctor(host):
@@ -217,7 +217,8 @@ def doctor(host):
     sessions = {kind: agents.registry.session_capabilities(kind).to_mapping()
                 for kind in agents.registry.kinds()}
     return dict(worker=worker, reviewers=reviewers, reviewer_kinds=sorted(FACTORIES),
-                session=sessions, qualification="unverified", sandbox_available=sandbox)
+                session=sessions, qualification="unverified", sandbox_available=sandbox,
+                observer=host.observer_transport())
 
 
 def cleanup(host, proof, task_id):

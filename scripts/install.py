@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Install the sealed ato launcher and optionally its Skill."""
 import argparse
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import stat
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ato_core import ensure_private_dir
 
 from release_snapshot import (
     ENTRIES, PUBLIC, SURFACE, Refused, atomic_entry, atomic_bytes, entry_set,
@@ -38,11 +42,16 @@ def install(root, bin_dir, skills_dir=None):
         return current
 
     preflight()
-    bin_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with release_lock(bin_dir):
+    for directory in (bin_dir, skills_dir):
+        if directory is not None and not directory.exists():
+            ensure_private_dir(directory)
+    with ExitStack() as stack:
+        for directory in sorted({p for p in (bin_dir, skills_dir) if p is not None}):
+            stack.enter_context(release_lock(directory))
         current = preflight()
         if skill:
-            skill.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not skill.parent.exists():
+                ensure_private_dir(skill.parent)
             if not skill.exists():
                 atomic_bytes(skill, skill_data, 0o644)
         if current[PUBLIC] is None:

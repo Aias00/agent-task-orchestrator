@@ -11,7 +11,7 @@ import time
 import ato_config
 from agent_registry import SessionEvent, SessionIdentity
 import ato_process
-from codex_session_adapter import CodexSessionAdapter
+from codex_session_adapter import CodexSessionAdapter, queue_executable
 from ato_host import Host
 from ato_private import delivery_candidates, render_notice
 from ato_task_store import TaskError, _directory, _locked_file, _publish, _read_json, _require, _save, _sha, _state_errors
@@ -102,6 +102,7 @@ def _observe(host, bus, route, endpoint, adapter, message, guard):
 def _dispatch(host, bus, route, message_id, guard, *, observe_only=False):
     endpoint = bus.authenticate(route.target)
     kind = endpoint["kind"]
+    override = None
     if route.local_completion:
         binary = host.acceptance_queue_binary()
         if kind != "codex" or binary is None:
@@ -117,14 +118,25 @@ def _dispatch(host, bus, route, message_id, guard, *, observe_only=False):
         message = bus.message(message_id)
         if observe_only and message["state"] == "queued":
             return
-        if _observe(host, bus, route, endpoint, adapter, message, guard) or message["state"] != "queued":
-            return
-        owner = bus.acquire_endpoint(route.target, owner="ato-observer:" + str(os.getpid()), lease_seconds=30)
+        if not route.local_completion and kind == "codex" and message["state"] == "queued":
+            override = host.queue_executable(configured)
+            _require(override is not None, "UNSUPPORTED_CAPABILITY")
+        token = queue_executable.set(override)
         try:
-            transport.dispatch_one(bus, route.target, owner, {kind: adapter},
-                                   message_id=message_id, guard=guard)
+            _dispatch_selected(host, bus, route, endpoint, adapter, message, guard)
         finally:
-            bus.release_endpoint(route.target, owner)
+            queue_executable.reset(token)
+
+
+def _dispatch_selected(host, bus, route, endpoint, adapter, message, guard):
+    if _observe(host, bus, route, endpoint, adapter, message, guard) or message["state"] != "queued":
+        return
+    owner = bus.acquire_endpoint(route.target, owner="ato-observer:" + str(os.getpid()), lease_seconds=30)
+    try:
+        transport.dispatch_one(bus, route.target, owner, {endpoint["kind"]: adapter},
+                               message_id=message["id"], guard=guard)
+    finally:
+        bus.release_endpoint(route.target, owner)
 
 
 @_state_errors
