@@ -194,7 +194,7 @@ class TaskStoreTests(unittest.TestCase):
         value["worker_contract"]["acceptance"][-1]["checks"] = []
         invalid_values.append(value)
         value = self.spec_input()
-        value["worker_contract"]["acceptance"].pop()
+        value["worker_contract"]["acceptance"].pop(0)
         invalid_values.append(value)
         value = self.spec_input()
         value["worker_contract"]["acceptance"][0]["checks"] = [["x\x00"]]
@@ -727,7 +727,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(result["stage"]["attempts"], 3)
         self.assertEqual(result["stage"]["elapsed_seconds"], 17)
         self.assertEqual(result["checks"], [dict(criterion_id="test", state="passed", receipt_id=None)])
-        self.assertEqual(result["acceptance"]["disposition"], "pending")
+        self.assertEqual(result["acceptance"]["disposition"], "not_recorded")
         self.assertIsNone(result["acceptance"]["receipt_id"])
         self.assertEqual(result["status"], "delivery_unknown")
         self.assertNotIn("private-check-log", json.dumps(result))

@@ -15,7 +15,7 @@ import ato_core
 import ato_process
 import ato_product
 from ato_execution_host import CommandHost, HostProfile
-from ato_task_store import (RunIntent, RunReceipt, TaskError, _directory, _existing,
+from ato_task_store import (DELIVERY_OUTCOMES, RunIntent, RunReceipt, TaskError, _directory, _existing,
     _identity, _identifier, _locked_file, _publish, _read_json, _regular, _require, _save,
     _sha, _state_errors, _strict_json, _valid_id, canonical_json, new_id)
 import budget
@@ -407,9 +407,6 @@ class ExecutionService:
             _require(data.get("reason") not in {"REVIEWER_MUTATION_VIOLATION", "review_loop_exhausted",
                                                "repeated_blockers"}, "NOT_RESUMABLE")
             _require(data.get("review_rounds", 0) < spec["reviewer"]["max_review_rounds"], "NOT_RESUMABLE")
-            if last["outcome"] == "needs_acceptance" and data.get("product"):
-                accepted = self.hooks.acceptance(task, data["product"])
-                _require(not accepted or accepted["disposition"] != "recorded", "NOT_RESUMABLE")
 
     @contextmanager
     def product_transaction(self, task_id):
@@ -424,11 +421,11 @@ class ExecutionService:
 
     def _project(self, task, spec, history, generation, status):
         self._project_execution(task, spec, history, generation, status)
-        accepted = self.hooks.local_acceptance(task)
-        if accepted is not None:
-            status["acceptance"] = accepted
+        local = self.hooks.local_acceptance(task)
+        if local is not None:
+            status["acceptance"], historical_close = local
             execution = status["execution"]
-            if execution["state"] == "idle" and execution["verified"]:
+            if historical_close and execution["state"] == "idle" and execution["verified"]:
                 status.update(status="completed", reason=None, next_step=None)
 
     def _project_execution(self, task, spec, history, generation, status):
@@ -480,7 +477,9 @@ class ExecutionService:
             return
         if phase == "settled" and data.get("reason") is not None:
             status["reason"] = data["reason"]
-        decision = self.hooks.decision_status(task, binding) if not execution["stop_requested"] else None
+        delivered = phase == "settled" and last["outcome"] in DELIVERY_OUTCOMES
+        decision = (self.hooks.decision_status(task, binding)
+                    if not delivered and not execution["stop_requested"] else None)
         if decision:
             _require(decision in {"waiting", "needs_input", "delivery_unknown"})
             steps = dict(waiting="REVIEW_PENDING_ACTION", needs_input="AWAIT_USER_INPUT",
@@ -488,7 +487,7 @@ class ExecutionService:
             status.update(status=decision, reason="DELIVERY_UNKNOWN" if decision == "delivery_unknown" else None,
                           next_step=steps[decision])
             return
-        if phase != "settled" or last["outcome"] != "needs_acceptance" or execution["stop_requested"]:
+        if not delivered or execution["stop_requested"]:
             if phase == "settled" and data.get("checks"):
                 status["checks"] = data["checks"]
             if phase == "settled" and data.get("review"):
@@ -504,28 +503,27 @@ class ExecutionService:
             status.update(status="blocked", reason=exc.code, next_step="RECHECK_PRODUCT")
             status["acceptance"]["disposition"] = "invalidated"
             return
-        status.update(status="needs_acceptance", reason=None, next_step="AWAIT_USER_ACCEPTANCE")
+        status.update(status="completed", reason=None, next_step=None)
         acceptance = self.hooks.acceptance(task, status["product"])
         if acceptance:
             status["acceptance"] = dict(acceptance)
-            if acceptance["disposition"] == "recorded":
-                status.update(status="completed", next_step=None)
 
     @_state_errors
     def request_stop(self, actor, task_id):
         for _ in range(30):
             task, spec, binding = self._actor(actor, task_id, "stop")
             _require(task["creation"]["phase"] == "ready", "NOT_RESUMABLE")
-            if self.hooks.local_acceptance(task) is not None:
+            local = self.hooks.local_acceptance(task)
+            if local is not None and local[1]:
                 status = self.store.task_status(actor, task_id)
                 if status["status"] == "completed":
                     return status
             _, receipts = _current(self.store, task)
-            if receipts and receipts[-1][1]["outcome"] == "needs_acceptance":
+            if receipts and receipts[-1][1]["outcome"] in DELIVERY_OUTCOMES:
                 product = _evidence(self.store, task_id, receipts[-1][1]).get("product")
                 if product and self.hooks.acceptance(task, product):
                     status = self.store.task_status(actor, task_id)
-                    if status["status"] == "completed":
+                    if status["status"] == "completed" and status["acceptance"]["disposition"] == "recorded":
                         return status
             try:
                 with self.store._mutation(task_id, task["revision"]) as (fd, latest, _):
@@ -553,7 +551,8 @@ class ExecutionService:
         raise TaskError("BUSY", task_id)
 
     def _prior_admission(self, task, spec, binding, kind, state, kernel_stop, history):
-        _require(self.hooks.local_acceptance(task) is None, "NOT_RESUMABLE")
+        local = self.hooks.local_acceptance(task)
+        _require(local is None or not local[1], "NOT_RESUMABLE")
         run, receipts = history[-1]
         last = receipts[-1][1] if receipts else None
         phase = last["phase"] if last else "reserved"
@@ -606,16 +605,6 @@ class ExecutionService:
                 _require(bool(spec["worker_contract"].get("host_handoff"))
                          and state["status"] == "needs_host", "NOT_RESUMABLE")
                 handoff = _host_handoff(self.hooks, task, binding, run, last["generation"])
-            if last["outcome"] == "needs_acceptance":
-                try:
-                    product, _, _ = ato_product.read_delivery(
-                        self.store, task, run, last["generation"], spec, proof, binding["review_revision"])
-                except TaskError as exc:
-                    if exc.code not in {"PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
-                        raise
-                else:
-                    current = self.hooks.acceptance(task, product) or {}
-                    _require(current.get("disposition") != "recorded", "NOT_RESUMABLE")
         return stop, handoff
 
     @_state_errors
@@ -1205,7 +1194,7 @@ class _RunDriver:
                     self.reason = "CHECKS_REQUIRED"
                     return "blocked"
                 if self.spec["reviewer"] is None:
-                    return "needs_acceptance"
+                    return "completed"
                 if self.launch["checks_only"]:
                     self.reason = "CHECKS_REQUIRED"
                     return "blocked"
@@ -1220,7 +1209,7 @@ class _RunDriver:
                 if verdict is None:
                     return "blocked"
                 if verdict["verdict"] == "approve":
-                    return "needs_acceptance"
+                    return "completed"
                 if verdict["verdict"] == "blocked":
                     self.reason = "REVIEWER_BLOCKED"
                     return "blocked"

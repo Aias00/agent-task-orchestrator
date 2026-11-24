@@ -441,7 +441,7 @@ class Host:
             return str(executable)
         return None
 
-    def local_acceptance_route(self, scope, binding, item):
+    def local_completion_route(self, scope, binding, item):
         if binding["revision"] != 1 or not self._owns_local_binding(scope, binding):
             return None
         if not self.acceptance_queue_binary():
@@ -492,7 +492,7 @@ class Host:
             return None
         if [(ep["kind"], ep["state"]) for ep in endpoints] != [("local_cli", "active"), ("codex", "active")]:
             return None
-        return MailboxRoute(sender, target, row["source_ref"], local_acceptance=True)
+        return MailboxRoute(sender, target, row["source_ref"], local_completion=True)
 
     def mailbox(self):
         path = self.store.kernel_root / "ctask-interaction" / "mailbox" / "state.sqlite"
@@ -514,7 +514,7 @@ class Host:
             hooks=ExecutionHooks(binding=partial(read_binding, self.store)))
         self.interaction = InteractionService(self.store, self.execution, authorize=self.authorize_interaction,
             verify_event=self.verify_event, verify_continuation=self.verify_continuation, route=self.route,
-            mailbox=self.mailbox, render_notice=render_notice, local_acceptance_route=self.local_acceptance_route,
+            mailbox=self.mailbox, render_notice=render_notice, local_completion_route=self.local_completion_route,
             authorize_local_acceptance=self.authorize_local_acceptance)
         self.execution.hooks = self.interaction.execution_hooks()
         self.binding = BindingService(self.execution, actor_grant=self.actor_grant,

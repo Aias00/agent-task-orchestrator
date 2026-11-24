@@ -9,7 +9,8 @@ Use `ato --help` to find the available commands. Use one Task ID for all task
 operations.
 
 1. Generate the task spec from the user's instructions and preview it using
-   `ato project validate --repo PATH --spec FILE`. Use the installed `ato`
+   `ato project validate --repo PATH --spec FILE`. Include the task's command
+   checks. Use the installed `ato`
    under the account that owns the private ATO state. Submit using
    `ato run --repo PATH --spec FILE` and retain the Task ID.
 2. Read `ato status TASK_ID` to check execution, independent checks, pending
@@ -17,10 +18,10 @@ operations.
 3. Use `ato inbox` from the verified interaction endpoint. Relay the actual
    request to the user. The enrolled user records their decision using
    `ato answer REQUEST_ID --answer TEXT`.
-4. Show the available product and check results. After explicit user approval,
-   record acceptance of a local task with `ato accept TASK_ID`. The local
-   state owner can attach an optional `--evidence FILE`. Use exact product
-   evidence with `ato accept TASK_ID --evidence FILE` for a scoped task.
+4. Report completion and the product location once `ato status` shows
+   `completed`. Record optional approval only when the user explicitly wants
+   a receipt. Use `ato accept TASK_ID` for a local task or
+   `ato accept TASK_ID --evidence FILE` for a scoped task.
 5. Use `ato stop TASK_ID` for an authorized STOP. Verify cleanup in status.
    Use `ato resume TASK_ID` only for an explicit authorized continuation.
    An unresolved delivery or execution result requires reconciliation before

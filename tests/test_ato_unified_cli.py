@@ -236,7 +236,7 @@ class PublicCLI(unittest.TestCase):
                                      actor=origin, app=app)
         self.assertEqual(code, 0, launched)
         status = launched["data"]
-        self.assertEqual(status["status"], "needs_acceptance")
+        self.assertEqual(status["status"], "completed")
         task_id = status["task_id"]
         code, listed = self.invoke("list", "--repo", self.repo, actor=origin, app=app)
         self.assertEqual(code, 0, listed)
@@ -248,7 +248,8 @@ class PublicCLI(unittest.TestCase):
             operations=["observe", "read", "answer", "accept"])
         code, inbox = self.invoke("inbox", actor=user, app=app)
         self.assertEqual(code, 0, inbox)
-        self.assertEqual([item["task_id"] for item in inbox["data"]["items"]], [task_id])
+        self.assertEqual(inbox["data"]["items"], [])
+        self.assertIsNone(status["acceptance"]["receipt_id"])
         product = status["product"]
         evidence = write(self.fixture, "accept.json", json.dumps(dict(schema_version=1, task_id=task_id,
             spec_sha256=status["spec_sha256"], product_id=product["product_id"],

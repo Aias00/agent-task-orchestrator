@@ -480,7 +480,7 @@ def _worker(value):
         else:
             _require(kind == "manual" and "checks" not in criterion, code)
             manual.add(key)
-    _require(bool(commands) and bool(manual), code)
+    _require(bool(commands), code)
 
     # Let the existing validators check permission, adapter, budget and limit schemas.
     stages = value.pop("stages", [])
@@ -714,7 +714,8 @@ _PHASES = {
 _CREATION_PHASES = ("reserved", "allocating", "git_pending", "worktree_bound",
                     "workflow_allocating", "workflow_pending", "ready")
 _TERMINAL_RUN = {"settled", "launch_failed"}
-_OUTCOMES = {"completed", "needs_acceptance", "stopped", "cleanup_blocked", "blocked",
+DELIVERY_OUTCOMES = frozenset({"completed", "needs_acceptance"})  # Includes older successful Run receipts.
+_OUTCOMES = DELIVERY_OUTCOMES | {"stopped", "cleanup_blocked", "blocked",
              "waiting", "needs_input", "needs_host", "failed", "interrupted", "launch_failed"}
 _KERNEL_STATUS = {"created", "running", "planning", "verifying", "waiting", "needs_input",
                   "needs_host", "completed", "blocked", "error", "cleanup_blocked", "stopped",
@@ -1774,7 +1775,7 @@ class TaskStore:
                     updated_at=updated, spec_sha256=task["spec_sha256"], execution=execution,
                     run_history=[self._run_summary(run, receipts) for run, receipts in history],
                     stage=stage, checks=checks, review=None, product=None,
-                    acceptance=dict(disposition="pending", criteria=manual, receipt_id=None),
+                    acceptance=dict(disposition="not_recorded", criteria=manual, receipt_id=None),
                     pending=[], delivery=[], worktree_state=worktree_state, next_step=next_step)
         if self.execution_projection is not None:
             self.execution_projection(task, spec, history, generation, projection)

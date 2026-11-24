@@ -86,7 +86,9 @@ for inspection. Retain the journal and the sealed snapshots for recovery.
 Task and Run ledgers, STOP, attempt histories, worktrees and delivery claims
 remain available in their original namespaces. Verified idle Tasks can stay
 on their original sealed release during activation or rollback, including
-Tasks awaiting acceptance. Active commands, unsettled execution or provisioning,
+Tasks with older successful Run receipts. The current CLI projects these
+Tasks as completed once it verifies the stored product and checks. Active
+commands, unsettled execution or provisioning,
 and busy mailbox or turn slots still require a safe boundary.
 
 `ato status` reports `RUNTIME_MISMATCH` and `SELECT_TASK_RUNTIME` for an

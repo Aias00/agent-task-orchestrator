@@ -98,18 +98,18 @@ terminal event closes the mailbox turn. If the lease is lost or the old
 attempt cannot be verified, the observer preserves the existing delivery
 disposition without replaying it.
 
-### Acceptance reminders for local Tasks
+### Completion notices for local Tasks
 
 For a local `ato run` launched from Codex, ATO uses `CODEX_THREAD_ID` to look
 up the exact session in the configured native Codex home. It checks the native
 index and session header and privately records the verified ID and session
 working directory with the Task. The Task's repository still comes from
 `--repo`. Different conversations can submit to the same repository and
-receive their own acceptance reminders.
+receive their own completion notices.
 
 With the Observer, managed mailbox and native standalone Codex available,
-the Observer verifies the saved session and sends a short reminder there
-when the Task first needs human acceptance. An unverified locator or a
+the Observer verifies the saved session and sends a short notice there
+when the Task first completes successfully. An unverified locator or a
 saved session that later becomes unavailable leaves the item recorded in ATO.
 Project mutes apply. This applies to new Tasks captured at submission. ATO
 does not infer earlier origins from repository names or replay reminders.
@@ -132,10 +132,9 @@ mailbox. Repeat with another repository to opt it into the same session.
 The host stores mailbox capabilities privately and provisions them only once.
 
 The opt-in applies when a Task without a recorded submission session first
-needs human acceptance after binding. Tasks already waiting when the
-repository was first bound retain their existing state. Consult
+completes after binding. Earlier completion notices are not replayed. Consult
 `ato status TASK_ID` for the product, checks, and delivery state. An unknown
 delivery keeps the original receipt. Both routes grant delivery only.
-Once the actual user approves, the local state owner can record the decision
+If the user wants to retain an explicit approval, the local state owner can record the decision
 with `ato accept TASK_ID` and optionally attach evidence. A scoped user
 uses the exact product evidence for their acceptance.

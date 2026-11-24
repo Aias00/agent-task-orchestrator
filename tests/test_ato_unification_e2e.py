@@ -328,9 +328,14 @@ class InstalledATO(unittest.TestCase):
         self.install()
         self.profile(via_setup=True)
         repo, spec, _ = self.task_spec("local submission")
+        command_only = json.loads(spec.read_text())
+        command_only["worker_contract"]["acceptance"] = [command_only["worker_contract"]["acceptance"][0]]
+        spec.write_text(json.dumps(command_only))
+        self.assertEqual(self.cli("project", "validate", "--repo", repo, "--spec", spec)["repo"], str(repo))
         result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
         task = result["task_id"]
-        self.assertEqual(result["status"], "needs_acceptance")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["acceptance"], dict(disposition="not_recorded", criteria=[], receipt_id=None))
         self.assertEqual(self.cli("status", task)["product"], result["product"])
         self.assertEqual([row["task_id"] for row in self.cli("list", "--repo", repo)["tasks"]], [task])
         self.assertEqual(self.cli("agent", "binding", task)["revision"], 1)
@@ -346,6 +351,10 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(self.store._read_blob(task, receipt["attachment_sha256"]), evidence.read_bytes())
         self.assertEqual(self.cli("accept", task)["acceptance"], accepted["acceptance"])
         self.cli("resume", task, error=(4, "NOT_RESUMABLE"))
+        rechecked = self.cli("project", "recheck", task, "--checks-only")
+        self.assertEqual(rechecked["status"], "completed")
+        self.assertEqual(rechecked["acceptance"], accepted["acceptance"])
+        self.assertNotEqual(rechecked["product"]["checks_sha256"], result["product"]["checks_sha256"])
         self.assertEqual(self.cli("status", task)["status"], "completed")
         self.assertEqual(list(self.proofs.iterdir()), [])
 
@@ -368,14 +377,14 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(self.cli("status", task)["reason"], "RUNTIME_MISMATCH")
 
         accepted = self.cli("accept", task)
-        self.assertEqual(accepted["status"], "completed")
+        self.assertEqual(accepted["status"], "needs_host")
         self.assertIsNone(accepted["product"])
         self.assertEqual(accepted["acceptance"]["method"], "local_owner")
         self.assertEqual(accepted["checks"], before["checks"])
         self.assertEqual(accepted["execution"], before["execution"])
         self.assertEqual(accepted["run_history"], before["run_history"])
         self.assertEqual(self.cli("status", task)["acceptance"], accepted["acceptance"])
-        self.assertEqual(self.cli("list")["tasks"][0]["status"], "completed")
+        self.assertEqual(self.cli("list")["tasks"][0]["status"], "needs_host")
 
     def test_local_acceptance_keeps_active_execution_visible(self):
         self.install()
@@ -391,7 +400,7 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(accepted["execution"]["state"], "active")
         self.assertEqual(accepted["status"], "running")
         self.cli("stop", task)
-        finished = self.wait_for(lambda: self.cli("status", task), lambda status: status["status"] == "completed")
+        finished = self.wait_for(lambda: self.cli("status", task), lambda status: status["status"] == "stopped")
         self.assertEqual(finished["execution"]["state"], "idle")
         self.assertTrue(finished["execution"]["stop_requested"])
         self.assertEqual(finished["run_history"][-1]["outcome"], "stopped")
@@ -417,12 +426,12 @@ class InstalledATO(unittest.TestCase):
             pass
         return sessions, binary, MessageBus(mailbox)
 
-    def test_configured_local_acceptance_notifies_once_without_granting_acceptance(self):
+    def test_configured_local_completion_notifies_once_without_an_acceptance_record(self):
         self.install()
         self.profile(via_setup=True)
         repo, spec, _ = self.task_spec("local acceptance notifications")
         historical = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
-        self.assertEqual(historical["status"], "needs_acceptance")
+        self.assertEqual(historical["status"], "completed")
         (session_id,), binary, bus = self.acceptance_mailbox(self.root)
 
         args = ("bind-acceptance", "--repo", repo, "--session-id", session_id, "--session-project", self.root)
@@ -480,15 +489,16 @@ class InstalledATO(unittest.TestCase):
         recipient, message = attempts[0]
         self.assertEqual(recipient, session_id)
         self.assertEqual(message["task_id"], current["task_id"])
-        self.assertEqual(message["kind"], "ato_question")
-        self.assertIn("待人工验收", message["body"])
+        self.assertEqual(message["kind"], "ato_completion")
+        self.assertIn("已完成", message["body"])
         for path_or_token in (str(self.root), bound["sender"]["token"], bound["target"]["token"]):
             self.assertNotIn(path_or_token, message["body"])
         self.assertEqual(bus.message(message["id"])["state"], "delivery_unknown")
         observed = self.cli("status", current["task_id"])
-        self.assertEqual(observed["status"], "needs_acceptance")
-        self.assertEqual(observed["acceptance"]["disposition"], "pending")
-        self.assertEqual([row["state"] for row in observed["delivery"]], ["delivery_unknown"])
+        self.assertEqual(observed["status"], "completed")
+        self.assertEqual(observed["acceptance"]["disposition"], "not_recorded")
+        self.assertEqual(observed["delivery"], [
+            dict(request_id=None, phase="completion", state="delivery_unknown")])
         for task in (historical, unrelated):
             self.assertEqual(self.cli("status", task["task_id"])["delivery"], [])
         self.assertTrue((self.store.root / "host" / (ACCEPTANCE_NOTIFICATIONS + ".json")).is_file())
@@ -507,7 +517,7 @@ class InstalledATO(unittest.TestCase):
         for locator, project in zip([*sessions, unverified], [self.root, repo, None], strict=True):
             self.env["CODEX_THREAD_ID"] = locator
             result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
-            self.assertEqual(result["status"], "needs_acceptance")
+            self.assertEqual(result["status"], "completed")
             self.assertNotIn(locator, json.dumps(result))
             task_id = result["task_id"]
             task_ids.append(task_id)
@@ -549,7 +559,7 @@ class InstalledATO(unittest.TestCase):
             self.assertNotIn(expected_session, message["body"])
             self.assertEqual(bus.message(message["id"])["state"], "delivery_unknown")
             result = self.cli("status", task_id)
-            self.assertEqual(result["acceptance"]["disposition"], "pending")
+            self.assertEqual(result["acceptance"]["disposition"], "not_recorded")
             self.assertEqual([row["state"] for row in result["delivery"]], ["delivery_unknown"])
         self.assertEqual(attempts[task_ids[0]][0][1]["target"], legacy["target"]["endpoint_id"])
         self.assertEqual(self.host.acceptance_notifications(), legacy)
@@ -570,7 +580,7 @@ class InstalledATO(unittest.TestCase):
         request = self.cli(*ask, actor=controller)["request_id"]
         self.assertEqual([r["request_id"] for r in self.cli("inbox", actor=user)["items"]], [request])
         self.cli("answer", request, "--answer", "Ready to review", actor=user)
-        self.assertEqual(self.cli("inbox", actor=user)["items"][0]["kind"], "manual_acceptance")
+        self.assertEqual(self.cli("inbox", actor=user)["items"], [])
         evidence = self.acceptance(work, "enrollment acceptance")
         self.cli("accept", task, "--evidence", evidence, error=(3, "NOT_FOUND"))
         self.cli("accept", task, actor=user, error=(2, "USAGE"))
@@ -601,7 +611,7 @@ class InstalledATO(unittest.TestCase):
         self.host_setup("attest", request, "--answer", answer, "--performed", actor=user)
         self.cli("answer", request, "--answer", answer, actor=user)
         delivered = self.cli(*recheck, actor=controller)
-        self.assertEqual(delivered["status"], "needs_acceptance")
+        self.assertEqual(delivered["status"], "completed")
         self.assertEqual([r["kind"] for r in delivered["run_history"]], ["initial", "recheck"])
         self.assertEqual((self.native / "attempts").read_text().splitlines(), [str(path)])
         user = self.host_setup("scope", task_id, "--role", "user")["proof"]
@@ -627,7 +637,7 @@ class InstalledATO(unittest.TestCase):
             self.assertEqual(git(repo, "status", "--porcelain"), "")
         self.cli("status", task_id, actor=other_origin, error=(3, "NOT_FOUND"))
         status = self.cli("status", task_id, actor=origin)
-        self.assertEqual(status["status"], "needs_acceptance")
+        self.assertEqual(status["status"], "completed")
         self.assertEqual(status["review"]["verdict"], "approve")
         self.assertNotEqual(status["acceptance"]["disposition"], "recorded")
         self.assertEqual(status["stage"]["attempts"], 1)
@@ -653,7 +663,7 @@ class InstalledATO(unittest.TestCase):
         question = "May the fixture use option A?"
         request_id = self.ask(task_id, requester, question)["request_id"]
         pending = self.cli("status", task_id, actor=origin)
-        self.assertEqual(pending["status"], "needs_input")
+        self.assertEqual(pending["status"], "completed")
         self.assertEqual(pending["pending"], [])
         items = self.cli("inbox", actor=user)["items"]
         self.assertEqual([(item["task_id"], item["request_id"], item["question"]) for item in items],
@@ -666,8 +676,7 @@ class InstalledATO(unittest.TestCase):
                          (task_id, request_id, "answered"))
         self.assertEqual(decided, self.cli("answer", request_id, "--answer", answer, actor=user))
         self.cli("answer", request_id, "--answer", "Use option B", actor=user, error=(4, "DECISION_CONFLICT"))
-        manual, = self.cli("inbox", actor=user)["items"]
-        self.assertEqual((manual["task_id"], manual["product_id"]), (task_id, status["product"]["product_id"]))
+        self.assertEqual(self.cli("inbox", actor=user)["items"], [])
         evidence = self.acceptance(status, "first evidence")
         self.cli("accept", task_id, "--evidence", evidence, actor=origin, error=(3, "FORBIDDEN"))
         accepted = self.cli("accept", task_id, "--evidence", evidence, actor=user)
@@ -682,7 +691,7 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual((changed["status"], changed["reason"]), ("blocked", "PRODUCT_CHANGED"))
         self.cli("accept", task_id, "--evidence", evidence, actor=user, error=(4, "CHECKS_REQUIRED"))
         rechecked = self.cli("project", "recheck", task_id, actor=origin)
-        self.assertEqual((rechecked["task_id"], rechecked["status"]), (task_id, "needs_acceptance"))
+        self.assertEqual((rechecked["task_id"], rechecked["status"]), (task_id, "completed"))
         self.assertNotEqual(rechecked["product"]["product_id"], status["product"]["product_id"])
         self.assertEqual(rechecked["stage"]["attempts"], 1)
         self.assertEqual(rechecked["acceptance"]["disposition"], "invalidated")
@@ -759,7 +768,7 @@ class InstalledATO(unittest.TestCase):
         resumed = self.cli("resume", task_id, actor=successor)
         self.assertEqual(resumed["task_id"], task_id)
         finished = self.wait_for(lambda: self.cli("status", task_id, actor=successor),
-                                 lambda status: status["status"] == "needs_acceptance",
+                                 lambda status: status["status"] == "completed",
                                  terminal={"blocked", "cleanup_blocked", "delivery_unknown", "stopped"})
         self.running.pop(task_id)
         self.assertFalse(finished["execution"]["stop_requested"])
@@ -799,10 +808,10 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(resumed["task_id"], second)
         self.running[second] = origin
         resumed = self.wait_for(lambda: self.cli("status", second, actor=origin),
-                                lambda status: status["status"] == "needs_acceptance",
+                                lambda status: status["status"] == "completed",
                                 terminal={"blocked", "cleanup_blocked", "delivery_unknown"})
         self.running.pop(second)
-        self.assertEqual((resumed["task_id"], resumed["status"]), (second, "needs_acceptance"))
+        self.assertEqual((resumed["task_id"], resumed["status"]), (second, "completed"))
         self.assertEqual(resumed["execution"]["run_id"], run_id)
         self.assertEqual([row["kind"] for row in resumed["run_history"]], ["initial"])
         self.cli("resume", second, actor=origin, error=(4, "NOT_RESUMABLE"))
@@ -830,6 +839,9 @@ class InstalledATO(unittest.TestCase):
     def test_journaled_cutover_and_repeated_rollback_preserve_namespaces(self):
         old = snapshot(self.root / "legacy source", legacy=True)
         self.addCleanup(unseal, old)
+        self.source = snapshot(self.root / "legacy outcome source", executable=True, legacy_delivery_outcome=True)
+        self.addCleanup(unseal, self.source)
+        self.python = self.source / ".venv/bin/python"
         self.bin.mkdir(mode=0o700)
         for name, mode in (("ctask", 0o710), ("ctask-notify", 0o711), ("ato-read-handoff", 0o750)):
             legacy_entry(self.bin, name, old, mode)
@@ -853,7 +865,8 @@ class InstalledATO(unittest.TestCase):
         self.profile()
         repo, spec_file, origin = self.submission("rollback repo", "1", "2")
         delivered = self.cli("run", "--repo", repo, "--spec", spec_file, "--foreground", actor=origin)
-        self.assertEqual(delivered["status"], "needs_acceptance")
+        self.assertEqual(delivered["status"], "completed")
+        self.assertEqual(delivered["run_history"][-1]["outcome"], "needs_acceptance")
         task = self.store.load_task(delivered["task_id"])
         artifact = Path(task["worktree"]["path"]) / "delivery.txt"
         recorded = release.read(journal / "transaction.json")
@@ -865,8 +878,9 @@ class InstalledATO(unittest.TestCase):
         switched = release.activate(replacement, "d" * 40, paths, newer_journal)
         self.assertEqual(switched["state"], "activated")
         retained = self.cli("status", delivered["task_id"], actor=origin)
-        self.assertEqual(retained["status"], "needs_acceptance")
-        self.assertEqual(retained["next_step"], "SELECT_TASK_RUNTIME")
+        self.assertEqual(retained["status"], "completed")
+        self.assertIsNone(retained["next_step"])
+        self.assertIsNone(retained["acceptance"]["receipt_id"])
         self.assertEqual(self.store.load_task(delivered["task_id"]), task)
         self.assertEqual(artifact.read_text(), "fixture output\n")
         self.assertEqual(release.rollback(newer_journal, paths)["state"], "rolled_back")

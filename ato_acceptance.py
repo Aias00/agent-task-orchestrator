@@ -15,9 +15,9 @@ import agent_registry
 import ato_config
 from ato_execution import HostHandoffProof, _active_proof, _binding, _raw_stop
 import ato_process
-from ato_private import render_local_acceptance
+from ato_private import render_local_completion
 from ato_task_store import (
-    TaskError, _ID, _REF, _SHA, _directory, _existing, _fields, _generation_valid,
+    DELIVERY_OUTCOMES, TaskError, _ID, _REF, _SHA, _directory, _existing, _fields, _generation_valid,
     _identifier, _matches, _positive, _read_json, _regular, _require, _save, _sha,
     _state_errors, _strict_json, _time, _valid_id, canonical_json, new_id, read_input_file,
 )
@@ -64,7 +64,7 @@ def _acceptance_input(data):
              and _matches(_SHA, decision["spec_sha256"])
              and _matches(_PRODUCT, decision["product_id"])
              and _matches(_SHA, decision["checks_sha256"])
-             and isinstance(criteria, list) and bool(criteria)
+             and isinstance(criteria, list)
              and all(_matches(_ID, entry) for entry in criteria) and len(set(criteria)) == len(criteria)
              and decision["decision"] == "accept" and _text(decision["source"]) and _text(decision["note"]),
              "INVALID_EVIDENCE")
@@ -95,7 +95,7 @@ class MailboxRoute:
     source_ref: str
     owner_token: str | None = None
     transports: Mapping[str, transport.ManagedTransport] | None = None
-    local_acceptance: bool = False
+    local_completion: bool = False
 
 
 def _retry_busy(method):
@@ -128,14 +128,14 @@ class InteractionService:
 
     def __init__(self, store, execution, *, authorize=None, verify_event=None,
                  verify_continuation=None, route=None, mailbox=None, render_notice=None,
-                 local_acceptance_route=None, authorize_local_acceptance=None, clock=time.time):
+                 local_completion_route=None, authorize_local_acceptance=None, clock=time.time):
         self.store = store
         self.execution = execution
         self.authorize = authorize
         self.verify_event = verify_event
         self.verify_continuation = verify_continuation
         self.route = route
-        self.local_acceptance_route = local_acceptance_route
+        self.local_completion_route = local_completion_route
         self.authorize_local_acceptance = authorize_local_acceptance
         self.mailbox = mailbox
         self.render_notice = render_notice
@@ -337,7 +337,8 @@ class InteractionService:
             controller_ref=binding["controller_ref"], interaction_ref=binding["interaction_ref"])
         _require(self._allowed(principal, scope, task, binding, "ask", request, generation), "FORBIDDEN")
         status, _, _ = self._view(task, spec)
-        _require(status["status"] != "completed", "STALE_REQUEST")
+        _require(status["status"] != "completed" or (kind == "decision" and continuation is None),
+                 "STALE_REQUEST")
         if kind == "host_handoff":
             _, receipts = self.store._run(task, task["run_id"])
             _require(purpose_ref == self.host_handoff_purpose(spec) and receipts
@@ -367,7 +368,7 @@ class InteractionService:
 
     def _manual(self, task, spec, status):
         product = status["product"]
-        if status["status"] not in ("needs_acceptance", "completed") or product is None:
+        if status["status"] != "completed" or product is None:
             return None
         version = self._version(product)
         request_id = "request-" + _sha(canonical_json([task["task_id"], task["spec_sha256"], version]))[:32]
@@ -391,22 +392,12 @@ class InteractionService:
                     question=request["question"], product_id=None, created_at=request["created_at"],
                     delivery=self._delivery(task, row["outbox"].get("question"))[0])
 
-    def _manual_public(self, task, item):
-        notice = self._notice(task, item["request_id"], "question")
-        return dict(item, delivery=self._delivery(task, notice)[0])
-
-    def _visible_items(self, principal, scope, task, spec, binding, view=None):
+    def _visible_items(self, principal, scope, task, binding):
         generation, open_ = self._kernel(task)
         rows = [row for row in self._rows(task) if not row["answer"]
                 and self._current(row["request"], task, generation, open_)
                 and self._allowed(principal, scope, task, binding, "read", row["request"], generation)]
-        items = [self._public(task, row) for row in rows]
-        if task["run_id"] is not None and (open_ or task["worktree_removed"]):
-            status, product_generation, manual = view or self._view(task, spec)
-            if (manual and status["status"] == "needs_acceptance"
-                    and self._allowed(principal, scope, task, binding, "read", manual, product_generation)):
-                items.append(self._manual_public(task, manual))
-        return items
+        return [self._public(task, row) for row in rows]
 
     @_state_errors
     @_retry_busy
@@ -422,7 +413,7 @@ class InteractionService:
             task, spec, binding = self._task(task_id)
             if principal.session.reference != binding["interaction_ref"]:
                 continue
-            current = self._visible_items(principal, scope, task, spec, binding)
+            current = self._visible_items(principal, scope, task, binding)
             # A handoff committed while reading cannot expose the old route's inbox.
             _require(self.store.load_task(task_id)["revision"] == task["revision"]
                      and _binding(self.execution.hooks, task, spec)["revision"] == binding["revision"], "BUSY")
@@ -435,37 +426,28 @@ class InteractionService:
             scope = self.store._visible_scope(task_id, principal)
             if scope is None:
                 continue
-            task, spec, binding = self._task(task_id)
+            task, _, binding = self._task(task_id)
             with self._records(task_id) as fd:
                 row = self._row(fd, request_id, task)
             if row is not None:
-                return scope, task, binding, row, None
-            if (isinstance(principal, agent_registry.ActorContext)
-                    and principal.session.reference == binding["interaction_ref"] and task["run_id"] is not None):
-                status, generation, manual = self._view(task, spec)
-                if manual and manual["request_id"] == request_id and status["status"] == "needs_acceptance":
-                    return scope, task, binding, None, (generation, manual)
+                return scope, task, binding, row
         raise TaskError("NOT_FOUND")
 
     def _addressed(self, actor, request_id, action):
         principal = self.store._principal(actor)
-        scope, task, binding, row, manual = self._locate(principal, request_id)
+        scope, task, binding, row = self._locate(principal, request_id)
         route = "controller_ref" if action == "read_answer" else "interaction_ref"
         _require(isinstance(principal, agent_registry.ActorContext)
                  and principal.session.reference == binding[route], "NOT_FOUND")
-        if row is not None:
-            generation, open_ = self._kernel(task)
-            item = row["request"]
-        else:
-            generation, item = manual
+        generation, open_ = self._kernel(task)
+        item = row["request"]
         # Check role and scope before exposing whether an old item is stale.
-        if row is not None and item["generation"] != generation:
+        if item["generation"] != generation:
             _require(self._allowed(principal, scope, task, binding, action, item, item["generation"])
                      or self._allowed(principal, scope, task, binding, action, item, generation), "FORBIDDEN")
         else:
             _require(self._allowed(principal, scope, task, binding, action, item, generation), "FORBIDDEN")
-        if row is not None:
-            _require(self._current(item, task, generation, open_), "STALE_REQUEST")
+        _require(self._current(item, task, generation, open_), "STALE_REQUEST")
         latest, _, current_binding = self._task(task["task_id"])
         _require(latest["revision"] == task["revision"] and current_binding == binding, "BUSY")
         return principal, scope, task, binding, row, item
@@ -473,16 +455,16 @@ class InteractionService:
     @_state_errors
     @_retry_busy
     def read(self, actor, request_id):
-        _, _, task, _, row, item = self._addressed(actor, request_id, "read")
-        _require(row is None or row["answer"] is None, "STALE_REQUEST")
-        return self._public(task, row) if row else self._manual_public(task, item)
+        _, _, task, _, row, _ = self._addressed(actor, request_id, "read")
+        _require(row["answer"] is None, "STALE_REQUEST")
+        return self._public(task, row)
 
     @_state_errors
     @_retry_busy
     def read_answer(self, actor, request_id):
         """Addressed private origin read. This does not claim a continuation."""
         _, _, task, binding, row, _ = self._addressed(actor, request_id, "read_answer")
-        _require(row is not None and row["answer"], "STALE_REQUEST")
+        _require(row["answer"], "STALE_REQUEST")
         answer = self._answer_current(task, row, binding)
         _require(answer is not None, "STALE_REQUEST")
         return dict(self._answer_result(task, row, answer), text=answer["text"],
@@ -492,39 +474,21 @@ class InteractionService:
     @_retry_busy
     def record_presentation(self, actor, request_id, source_event):
         principal, scope, task, binding, row, item = self._addressed(actor, request_id, "present")
-        _require(row is None or row["answer"] is None, "STALE_REQUEST")
+        _require(row["answer"] is None, "STALE_REQUEST")
         event = self._event(principal, scope, binding, "present", item, None, source_event)
-        name = "present-" + request_id + ".json"
         task_id = task["task_id"]
-        if row is None:
-            with self.execution.product_transaction(task_id) as snapshot:
-                _require(snapshot["revision"] == task["revision"], "BUSY")
-                _require(snapshot["product"]["product_id"] == item["product_id"]
-                         and snapshot["product"]["checks_sha256"] == item["checks_sha256"], "STALE_REQUEST")
-                return self._present(task, binding, row, item, principal, event, name)
-        return self._present(task, binding, row, item, principal, event, name)
-
-    def _present(self, task, binding, row, item, principal, event, name):
-        task_id, request_id = task["task_id"], item["request_id"]
-        if row is not None and row["presentation"]:
+        if row["presentation"]:
             self._receipt(task_id, row["presentation"], "presentation", request_id)
             return dict(request_id=request_id, receipt_id=row["presentation"])
-        if row is None and (prior := self._notice(task, request_id, "present")):
-            self._receipt(task_id, prior["receipt_id"], "presentation", request_id)
-            return dict(request_id=request_id, receipt_id=prior["receipt_id"])
         receipt = self._retain(task_id, "presentation", request_id=request_id,
             binding_revision=binding["revision"], interaction_ref=binding["interaction_ref"],
             actor_ref=principal.actor_id, event_ref=event.reference)
         with self._mutation(task, binding) as (task_fd, latest, _):
-            if row is not None:
-                generation, open_ = self._kernel(latest)
-                _require(self._current(item, latest, generation, open_), "STALE_REQUEST")
+            generation, open_ = self._kernel(latest)
+            _require(self._current(item, latest, generation, open_), "STALE_REQUEST")
             with self._records(task_id, create=True, task_fd=task_fd) as fd:
-                if row is None:
-                    _save(fd, name, {"receipt_id": receipt}, exclusive=True)
-                else:
-                    _require(self._row(fd, request_id, latest) == row, "BUSY")
-                    _save(fd, request_id + ".json", dict(row, presentation=receipt))
+                _require(self._row(fd, request_id, latest) == row, "BUSY")
+                _save(fd, request_id + ".json", dict(row, presentation=receipt))
         return dict(request_id=request_id, receipt_id=receipt)
 
     def _answer_current(self, task, row, binding):
@@ -550,7 +514,6 @@ class InteractionService:
     def record_answer(self, actor, request_id, text, source_event):
         _require(_text(text), "INVALID_EVIDENCE")
         principal, scope, task, binding, row, item = self._addressed(actor, request_id, "answer")
-        _require(row is not None, "FORBIDDEN")
         task_id = task["task_id"]
         event = self._event(principal, scope, binding, "answer", item, text, source_event)
         _require(event.grant_ref is None or (item["kind"] in _GRANT_KINDS
@@ -614,7 +577,7 @@ class InteractionService:
             ref, record = accepted
             _, receipts = self.store._run(task, task["run_id"])
             last = receipts[-1][1]
-            _require(last["phase"] == "settled" and last["outcome"] == "needs_acceptance")
+            _require(last["phase"] == "settled" and last["outcome"] in DELIVERY_OUTCOMES)
             settlement = _strict_json(self.store._read_blob(task["task_id"], last["evidence_sha256"]),
                                       "STATE_CORRUPT")
             review = settlement["review"]
@@ -642,14 +605,16 @@ class InteractionService:
         ref = pointer["receipt_id"]
         record = self._receipt(task["task_id"], ref, "local_acceptance")
         _fields(record, ("schema_version", "task_id", "kind", "recorded_at", "actor_ref",
-                         "spec_sha256", "criteria", "attachment_sha256"))
+                         "spec_sha256", "criteria", "attachment_sha256"), ("annotation_only",))
         _require(record["spec_sha256"] == task["spec_sha256"]
                  and record["actor_ref"] == task["authorization_ref"]
                  and re.fullmatch(r"local-owner:[0-9]+", record["actor_ref"])
                  and _time(record["recorded_at"]) and isinstance(record["criteria"], list)
                  and all(_matches(_ID, criterion) for criterion in record["criteria"])
-                 and (record["attachment_sha256"] is None or _matches(_SHA, record["attachment_sha256"])))
-        return dict(disposition="recorded", criteria=record["criteria"], receipt_id=ref, method="local_owner")
+                 and (record["attachment_sha256"] is None or _matches(_SHA, record["attachment_sha256"]))
+                 and record.get("annotation_only", True) is True)
+        summary = dict(disposition="recorded", criteria=record["criteria"], receipt_id=ref, method="local_owner")
+        return summary, "annotation_only" not in record
 
     def _accept_local(self, actor, principal, scope, task, spec, evidence):
         task_id = task["task_id"]
@@ -660,7 +625,7 @@ class InteractionService:
                 attachment = self.store.put_evidence(task_id, data)
             ref = self._retain(task_id, "local_acceptance", actor_ref=scope.authorization_ref,
                                spec_sha256=scope.spec_sha256, criteria=self._manual_criteria(spec),
-                               attachment_sha256=attachment)
+                               attachment_sha256=attachment, annotation_only=True)
             with self.store._mutation(task_id, task["revision"]) as (task_fd, latest, frozen):
                 binding = _binding(self.execution.hooks, latest, frozen)
                 _require(self.authorize_local_acceptance(principal, scope, binding), "FORBIDDEN")
@@ -705,15 +670,13 @@ class InteractionService:
             _require(decision["product_id"] == product["product_id"], "PRODUCT_CHANGED")
             _require(decision["checks_sha256"] == product["checks_sha256"], "CHECKS_REQUIRED")
             status, current_generation, manual = self._view(task, spec)
-            _require(status["status"] in ("needs_acceptance", "completed") and manual, "CHECKS_REQUIRED")
+            _require(status["status"] == "completed" and manual, "CHECKS_REQUIRED")
             _require(current_generation == generation, "STALE_REQUEST")
-            _require(not self.decision_status(task, binding), "RUN_UNSETTLED")
             accepted = self._accepted(task, product)
             if accepted is not None:
                 _, record = accepted
                 _require(record["decision"] == decision and record["actor_ref"] == principal.actor_id,
                          "DECISION_CONFLICT")
-                _require(status["status"] == "completed", "CHECKS_REQUIRED")
             else:
                 _require(not task["worktree_removed"], "CHECKS_REQUIRED")
                 review = status["review"]
@@ -757,28 +720,37 @@ class InteractionService:
         status, generation, manual = self._view(task, spec)
         status["pending"] = []
         status["delivery"] = []
-        if (isinstance(principal, agent_registry.ActorContext)
-                and principal.session.reference == binding["interaction_ref"]):
-            status["pending"] = self._visible_items(principal, scope, task, spec, binding,
-                                                      (status, generation, manual))
+        addressed = (isinstance(principal, agent_registry.ActorContext)
+                     and principal.session.reference == binding["interaction_ref"])
+        if addressed:
+            status["pending"] = self._visible_items(principal, scope, task, binding)
             for row in self._rows(task):
                 request = row["request"]
                 if self._allowed(principal, scope, task, binding, "read", request, generation):
                     for phase, notice in row["outbox"].items():
                         status["delivery"].append(dict(request_id=request["request_id"], phase=phase,
                                                       state=self._delivery(task, notice)[0]))
-            if manual and self._allowed(principal, scope, task, binding, "read", manual, generation):
-                ref = status["acceptance"]["receipt_id"]
-                request_id = manual["request_id"]
-                notices = [(request_id, "question"), (ref, "completion")] if ref else [(request_id, "question")]
-                for correlation, phase in notices:
-                    status["delivery"].append(dict(request_id=request_id, phase=phase,
-                        state=self._delivery(task, self._notice(task, correlation, phase))[0]))
-        elif manual:
+        if manual:
             request_id = manual["request_id"]
             notice = self._notice(task, request_id, "question")
-            if notice and notice.get("local_acceptance") is True:
+            if notice and (notice.get("local_acceptance") is True or (
+                    addressed and self._allowed(principal, scope, task, binding, "read", manual, generation))):
                 status["delivery"].append(dict(request_id=request_id, phase="question",
+                                              state=self._delivery(task, notice)[0]))
+            legacy_ref = status["acceptance"]["receipt_id"]
+            if legacy_ref and addressed and self._allowed(principal, scope, task, binding, "read", manual, generation):
+                legacy = self._notice(task, legacy_ref, "completion")
+                if legacy:
+                    status["delivery"].append(dict(request_id=request_id, phase="completion",
+                                                  state=self._delivery(task, legacy)[0]))
+        first = self._first_successful_run(status)
+        if first:
+            correlation = task["run_heads"][first["run_id"]][-1]
+            notice = self._notice(task, correlation, "completion")
+            item = dict(request_id=None, generation=generation)
+            if notice and (notice.get("local_completion") is True or (
+                    addressed and self._allowed(principal, scope, task, binding, "read", item, generation))):
+                status["delivery"].append(dict(request_id=None, phase="completion",
                                               state=self._delivery(task, notice)[0]))
         _require(self.store.load_task(task_id)["revision"] == task["revision"]
                  and _binding(self.execution.hooks, task, spec)["revision"] == binding["revision"], "BUSY")
@@ -983,10 +955,12 @@ class InteractionService:
         _fields(notice, ("correlation_id", "phase", "binding_revision", "generation", "stop_epoch",
                          "run_id", "sender", "target", "source_ref", "mailbox_id", "expires_at",
                          "body", "from_ref", "to_ref", "route_generation", "superseded"),
-                ("supersedes", "local_acceptance"))
+                ("supersedes", "local_acceptance", "local_completion"))
         _require(type(notice["superseded"]) is bool
                  and ("local_acceptance" not in notice or
                       (notice["local_acceptance"] is True and notice["phase"] == "question"))
+                 and ("local_completion" not in notice or
+                      (notice["local_completion"] is True and notice["phase"] == "completion"))
                  and ("supersedes" not in notice or _matches(_SHA, notice["supersedes"])))
         bus = self._bus()
         if bus is None:
@@ -1038,16 +1012,15 @@ class InteractionService:
             return state, "waiting"
         return state, None
 
-    def _local_acceptance_route(self, task, binding, phase, item):
-        if (self.local_acceptance_route is not None and phase == "question"
-                and item.get("kind") == _MANUAL):
-            return self.local_acceptance_route(self._scope_record(task), deepcopy(binding), item)
+    def _local_completion_route(self, task, binding, phase, item):
+        if self.local_completion_route is not None and phase == "completion":
+            return self.local_completion_route(self._scope_record(task), deepcopy(binding), item)
         return None
 
     def _delivery_route(self, task, binding, phase, from_ref, to_ref, item):
         if self._bus() is None:
             return None
-        route = self._local_acceptance_route(task, binding, phase, item)
+        route = self._local_completion_route(task, binding, phase, item)
         if route is None and self.route is not None:
             route = self.route(self._scope_record(task), deepcopy(binding), phase, from_ref, to_ref)
         if route is not None:
@@ -1070,8 +1043,8 @@ class InteractionService:
         # reader, rather than a native message, supplies any decision text.
         body = canonical_json(dict(task_id=task["task_id"], request_id=item["request_id"],
                                    phase=phase, receipt_id=receipt)).decode()
-        if route.local_acceptance:
-            body = render_local_acceptance(task, binding, phase, correlation, item, target)
+        if route.local_completion:
+            body = render_local_completion(task, binding, phase, correlation, item, target)
         elif self.render_notice is not None:
             body = self.render_notice(task, binding, phase, correlation, item, target)
         notice = dict(correlation_id=correlation, phase=phase, binding_revision=binding["revision"],
@@ -1079,8 +1052,8 @@ class InteractionService:
                     sender=route.sender.endpoint_id, target=route.target.endpoint_id,
                     from_ref=source, to_ref=target, source_ref=route.source_ref, mailbox_id=None,
                     route_generation=None, superseded=False, expires_at=item.get("expires_at"), body=body)
-        if route.local_acceptance:
-            notice["local_acceptance"] = True
+        if route.local_completion:
+            notice["local_completion"] = True
         return notice
 
     def _notification_eligible(self, task, binding, phase, item):
@@ -1089,7 +1062,7 @@ class InteractionService:
             if any(Path(rule["repo"]).resolve() == Path(task["repo"]["root"])
                    for rule in notification_state.project_mutes()):
                 return False
-        if self._local_acceptance_route(task, binding, phase, item) is not None:
+        if self._local_completion_route(task, binding, phase, item) is not None:
             return True
         if policy.get("hub_thread") != binding["interaction_ref"]:
             return False
@@ -1117,22 +1090,30 @@ class InteractionService:
                 _require((phase == "answer" and row["answer"] and not row["consumption"])
                          or (phase == "question" and not row["answer"]), "STALE_REQUEST")
                 return row, item, row["outbox"].get(phase)
-        status, product_generation, manual = self._view(task, spec)
+        status, product_generation, _ = self._view(task, spec)
         if phase == "failure":
             failed = self.failure_item(task, status, generation)
             _require(open_ and failed is not None and failed[0] == correlation, "STALE_REQUEST")
             return None, failed[1], self._notice(task, correlation, phase)
-        _require(manual is not None, "STALE_REQUEST")
-        if phase == "question":
-            _require(manual["request_id"] == correlation and status["status"] == "needs_acceptance",
-                     "STALE_REQUEST")
-        else:
-            _require(phase == "completion" and status["status"] == "completed"
-                     and status["acceptance"]["receipt_id"] == correlation, "STALE_REQUEST")
-            record = self._receipt(task["task_id"], correlation, "acceptance")
-            manual["created_at"] = record["recorded_at"]
-        item = dict(manual, generation=product_generation or self._removed_generation(task))
-        return None, item, self._notice(task, correlation, phase)
+        completion = self.completion_item(task, status, product_generation)
+        _require(phase == "completion" and completion and completion[0] == correlation, "STALE_REQUEST")
+        return None, completion[1], self._notice(task, correlation, phase)
+
+    @staticmethod
+    def _first_successful_run(status):
+        return next((run for run in status["run_history"] if run["phase"] == "settled"
+                     and run["outcome"] in DELIVERY_OUTCOMES), None)
+
+    def completion_item(self, task, status, generation):
+        first = self._first_successful_run(status)
+        execution = status["execution"]
+        if (generation is None or first is None or first["run_id"] != task["run_id"]
+                or status["status"] != "completed" or status["product"] is None
+                or execution["state"] != "idle" or not execution["verified"] or execution["stop_requested"]):
+            return None
+        receipt = task["run_heads"][task["run_id"]][-1]
+        return receipt, dict(task_id=task["task_id"], request_id=None, generation=generation,
+                             kind="completion", created_at=first["settled_at"])
 
     @staticmethod
     def failure_item(task, status, generation):
@@ -1214,8 +1195,7 @@ class InteractionService:
         prior = notice if (notice and notice["superseded"] and self.render_notice is not None
                            and phase == "question") else None
         if notice is None or prior is not None:
-            if phase == "answer" or (row and row["presentation"]) or (row is None and phase == "question"
-                    and self._notice(task, correlation, "present")):
+            if phase == "answer" or (row and row["presentation"]):
                 return "recorded_only"
             if not self._notification_eligible(task, binding, phase, item):
                 return "recorded_only"
@@ -1241,8 +1221,8 @@ class InteractionService:
 
         route = self._delivery_route(task, binding, phase, notice["from_ref"], notice["to_ref"], item)
         _require(route and (route.sender.endpoint_id, route.target.endpoint_id, route.source_ref,
-                            route.local_acceptance) == (notice["sender"], notice["target"], notice["source_ref"],
-                                                        notice.get("local_acceptance", False)), "STALE_REQUEST")
+                            route.local_completion) == (notice["sender"], notice["target"], notice["source_ref"],
+                                                        notice.get("local_completion", False)), "STALE_REQUEST")
 
         def guard():
             latest, frozen, current = self._task(task_id)
@@ -1254,11 +1234,9 @@ class InteractionService:
                      "STALE_REQUEST")
             if phase != "answer":
                 _require(not (current_row and current_row["presentation"])
-                         and (current_row is not None or phase != "question"
-                              or not self._notice(latest, correlation, "present"))
                          and self._notification_eligible(latest, current, phase, current_item), "STALE_REQUEST")
-            if route.local_acceptance:
-                _require(self._local_acceptance_route(latest, current, phase, current_item) == route,
+            if route.local_completion:
+                _require(self._local_completion_route(latest, current, phase, current_item) == route,
                          "STALE_REQUEST")
 
         guard()

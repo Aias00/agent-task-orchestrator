@@ -41,8 +41,8 @@ The default unified elapsed time policy is advisory. The first launch pins
 the verified time policy and subsequent Runs reject drift. Individual
 command and review deadlines, stage and attempt limits, STOP and review
 rounds still apply. Tech review uses the H1 tripwire and structured
-verdict. A pass yields `needs_acceptance` with content-addressed check
-receipts and a product manifest. Product and evidence are reverified
+verdict. Successful execution and verification yield `completed` with
+content-addressed check receipts and a product manifest. Product and evidence are reverified
 before use. [Product evidence](../ato_product.py) · [H1 implementation](h1-offline-implementation.md)
 
 ## Shared calls for T4 and T5
@@ -59,7 +59,7 @@ snapshot is detached from stored state.
 | `ExecutionHooks.binding(task, spec)` | T5 returns `{task_id, revision, controller_ref, interaction_ref, reviewer, review_revision}`. The selected agent must match the frozen eligible kinds. Route changes preserve actual Run ownership. |
 | `ExecutionHooks.pending(task, binding)` | T4 returns redacted request summaries already projected for the current binding. The composition layer applies actor-specific presentation and delivery policy. |
 | `ExecutionHooks.decision_status(task, binding)` | T4 returns `waiting`, `needs_input` or `delivery_unknown` for a current material decision barrier, or `None`. An ordinary notification receipt does not block a product. |
-| `ExecutionHooks.acceptance(task, product)` | T4 returns the disposition, criteria and receipt ID of the verified human acceptance for that exact product and check set, or `None`. Only a current recorded disposition projects completion. |
+| `ExecutionHooks.acceptance(task, product)` | T4 returns the disposition, criteria and optional human receipt ID for that exact product and check set, or `None`. Execution completion is based on the verified Run settlement. |
 | `ExecutionHooks.decision_barrier(task, binding, operation)` | T4 revalidates scoped blocking requests and material delivery uncertainty at admission and child startup. Return `None` to allow or a typed service error code for a barrier. |
 | `ExecutionHooks.claim_continuation(task, binding, run, generation)` | The exact admitted resume or host-check child calls this under its kernel lease. T4 records consumption for that Run and returns the immutable evidence hash, or `None` when no decision is required. The driver retains the reference before work. |
 | `ExecutionHooks.host_handoff(task, binding, run, generation)` | For a pending frozen host action, T4 returns a `HostHandoffProof` for the previous Run and generation. Explicit recheck then completes only the original checks and eligible review. The proof records the already performed action. |

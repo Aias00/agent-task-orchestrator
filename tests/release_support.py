@@ -47,13 +47,16 @@ def seal(root, commit, *, legacy=False, tree='fixture', tools=None):
     return doc
 
 
-def snapshot(root, *, legacy=False, executable=False, commit=None):
+def snapshot(root, *, legacy=False, executable=False, commit=None, legacy_delivery_outcome=False):
     if legacy:
         for name in ('runner.py', 'coordination.py', 'hub_cli.py'):
             write(root, name)
     elif executable:
         for source in ROOT.glob('*.py'):
-            write(root, source.name, source.read_text())
+            body = source.read_text()
+            if legacy_delivery_outcome and source.name == 'ato_execution.py':
+                body = body.replace('return "completed"', 'return "needs_acceptance"')
+            write(root, source.name, body)
         for name in ('ato_cli/__init__.py', 'scripts/install.py', 'scripts/release_snapshot.py', 'scripts/ato_host_setup.py',
                      'skills/ato/SKILL.md', 'integrations/pi-acp/compatibility.json'):
             write(root, name, (ROOT/name).read_text())

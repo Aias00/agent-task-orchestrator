@@ -17,12 +17,12 @@ def render_notice(task, binding, phase, correlation, item, target):
     return f"[ato handoff {ref}]\n{command}"
 
 
-def render_local_acceptance(task, binding, phase, correlation, item, target):
+def render_local_completion(task, binding, phase, correlation, item, target):
     ref = handoff_id(task, binding, phase, correlation, item, target)
     task_id = _identifier(task["task_id"], "task")
     return (f"[ato handoff {ref}]\n"
-            f"ATO 任务 {task_id} 待人工验收。请在当前对话简短提醒用户一次，"
-            f"可用 ato status {task_id} 查看。请等待用户决定。")
+            f"ATO 任务 {task_id} 已完成。请在当前对话简短汇报任务结果一次，"
+            f"可用 ato status {task_id} 查看产物和检查结果。")
 
 
 def read_handoff(host, proof, ref):
@@ -57,8 +57,9 @@ def read_handoff(host, proof, ref):
                              "FORBIDDEN")
                     status = service.task_status(proof, task_id)
                     if phase == "completion":
-                        _require(status["acceptance"]["receipt_id"] == correlation, "STALE_REQUEST")
-                        result = dict(task_id=task_id, status="completed", acceptance=status["acceptance"])
+                        completed = service.completion_item(task, status, item["generation"])
+                        _require(completed and completed[0] == correlation, "STALE_REQUEST")
+                        result = {key: status[key] for key in ("task_id", "status", "product", "checks", "review")}
                     else:
                         failure = service.failure_item(task, status, item["generation"])
                         _require(failure and failure[0] == correlation, "STALE_REQUEST")
@@ -81,11 +82,9 @@ def delivery_candidates(service, task):
         candidates.append(("question", ref))
         if row["answer"]:
             candidates.append(("answer", ref))
-    status, generation, manual = service._view(task, service.store.load_spec(task["task_id"]))
+    status, generation, _ = service._view(task, service.store.load_spec(task["task_id"]))
     if service.render_notice is not None and (failed := service.failure_item(task, status, generation)):
         candidates.append(("failure", failed[0]))
-    if manual and status["status"] == "needs_acceptance":
-        candidates.append(("question", manual["request_id"]))
-    if manual and status["status"] == "completed":
-        candidates.append(("completion", status["acceptance"]["receipt_id"]))
+    if completed := service.completion_item(task, status, generation):
+        candidates.append(("completion", completed[0]))
     return candidates

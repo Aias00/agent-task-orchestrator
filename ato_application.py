@@ -55,7 +55,7 @@ class Application:
         proof = host.caller(actor_operation)
         if operation == "answer":
             principal = host.store._principal(proof)
-            _, task, _, _, _ = api._locate(principal, args.request_id)
+            _, task, _, _ = api._locate(principal, args.request_id)
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
         elif operation in {"stop", "resume"} or subcommand in {"cleanup", "handoff", "reviewer", "recheck", "ask"}:
             principal = host.store._principal(proof)
@@ -94,9 +94,6 @@ class Application:
             if subcommand == "cleanup":
                 return cleanup(host, proof, args.task_id)
             host.execution._actor(proof, args.task_id, "recheck")
-            status = api.task_status(proof, args.task_id)
-            if status["status"] == "completed":
-                return status
             return self.wait(proof, args.task_id, lambda: host.execution.recheck(
                 proof, args.task_id, getattr(args, "checks_only", False), foreground=True))
         if subcommand == "binding":
@@ -150,7 +147,7 @@ class Application:
                 time.sleep(.05)
             raise TaskError("CLEANUP_BLOCKED", task_id) from None
         status = self.host.interaction.task_status(proof, task_id)
-        if status["status"] in {"completed", "needs_acceptance"}:
+        if status["status"] == "completed":
             return status
         code = {
             "stopped": "STOPPED",

@@ -145,7 +145,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
 
     def qualify(self, task):
         status = self.execution.start(self.proof(task, "origin"), task, foreground=True)
-        self.assertEqual(status["status"], "needs_acceptance", status)
+        self.assertEqual(status["status"], "completed", status)
         return status
 
     def evidence(self, status, **changes):
@@ -233,16 +233,18 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         qualified = self.qualify(task)
         self.assertEqual(qualified["review"]["verdict"], "approve")
         self.assertEqual(qualified["checks"][0]["state"], "passed")
-        self.assertEqual(qualified["acceptance"]["disposition"], "pending")
+        self.assertEqual(qualified["acceptance"]["disposition"], "not_recorded")
         user, hub = self.proof(task, "user"), self.proof(task, "hub")
-        manual, = self.interaction.inbox(user)["items"]
+        self.assertEqual(self.interaction.inbox(user), {"items": []})
+        stored, spec, _ = self.interaction._task(task)
+        manual = self.interaction._manual(stored, spec, qualified)
         path, normalized = self.evidence(qualified)
         user_event = self.event(user, "accept", task, normalized)
         self.assert_code("FORBIDDEN", self.interaction.accept_product, hub, task, path, source_event=user_event)
         worker = self.proof(task, "worker")
         self.assert_code("FORBIDDEN", self.interaction.accept_product, worker, task, path, source_event=user_event)
         self.assert_code("FORBIDDEN", self.interaction.accept_product, user, task, path, source_event="forged")
-        self.assert_code("FORBIDDEN", self.interaction.record_answer, user, manual["request_id"], "I approve",
+        self.assert_code("NOT_FOUND", self.interaction.record_answer, user, manual["request_id"], "I approve",
                          self.event(user, "answer", manual["request_id"], "I approve"))
         invalid, _ = self.evidence(qualified, criteria=["user-a"])
         self.assert_code("INVALID_EVIDENCE", self.interaction.accept_product, user, task, invalid)
@@ -259,14 +261,14 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         path.write_text(json.dumps(normalized))
         self.assertEqual(self.interaction.accept_product(user, task, path,
             source_event=self.event(user, "accept", task, normalized))["acceptance"]["receipt_id"], ref)
-        self.assert_code("STALE_REQUEST", self.ask, task)
+        self.assert_code("STALE_REQUEST", self.ask, task, continuation="resume")
 
         (Path(qualified["product"]["worktree"]) / "delivery.txt").write_text("updated product\n")
         invalidated = self.interaction.task_status(user, task)
         self.assertEqual((invalidated["status"], invalidated["acceptance"]["disposition"]), ("blocked", "invalidated"))
         self.assert_code("CHECKS_REQUIRED", self.interaction.accept_product, user, task, path, source_event=user_event)
         rechecked = self.execution.recheck(self.proof(task, "origin"), task, foreground=True)
-        self.assertEqual(rechecked["status"], "needs_acceptance", rechecked)
+        self.assertEqual(rechecked["status"], "completed", rechecked)
         self.assertEqual(rechecked["acceptance"]["disposition"], "invalidated")
         user = self.proof(task, "user")
         self.assert_code("PRODUCT_CHANGED", self.interaction.accept_product, user, task, path,
@@ -282,7 +284,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         original = self.qualify(task)
         path, decision = self.evidence(original)
         rechecked = self.execution.recheck(self.proof(task, "origin"), task, foreground=True)
-        self.assertEqual(rechecked["status"], "needs_acceptance")
+        self.assertEqual(rechecked["status"], "completed")
         self.assertEqual(original["product"]["product_id"], rechecked["product"]["product_id"])
         self.assertNotEqual(original["product"]["checks_sha256"], rechecked["product"]["checks_sha256"])
         user = self.proof(task, "user")
@@ -413,7 +415,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         self.assertIsNone(self.interaction.decision_barrier(
             task_record, self.binding(task_record, self.store.load_spec(task)), "initial"))
         self.assertEqual(self.interaction.task_status(self.proof(task, "user"), task)["acceptance"]["disposition"],
-                         "pending")
+                         "not_recorded")
 
     def test_observer_reports_corrupt_task_and_still_dispatches_later_task(self):
         damaged, task = sorted((self.create(), self.create()))
@@ -544,7 +546,10 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         task = self.create()
         qualified = self.qualify(task)
         user = self.proof(task, "user")
-        item, = self.interaction.inbox(user)["items"]
+        record, spec, _ = self.interaction._task(task)
+        _, generation, _ = self.interaction._view(record, spec)
+        correlation, _ = self.interaction.completion_item(record, qualified, generation)
+        self.assertEqual(self.interaction.inbox(user), {"items": []})
         bus = self.mailbox()
         origin = bus.register_endpoint("origin-endpoint", kind="fake", session_id="origin",
                                        project=str(self.repo), source="fixture")
@@ -563,24 +568,17 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         policy = dict(hub_thread=_INTERACTION, mode="user_input_only", completion="once", completion_since=900)
         with patch.object(notification_state, "status", return_value=policy):
             with patch.object(notification_state, "project_mutes", return_value=[{"repo": str(self.repo)}]):
-                self.assertEqual(self.interaction.dispatch_delivery(task, item["request_id"], "question"),
+                self.assertEqual(self.interaction.dispatch_delivery(task, correlation, "completion"),
                                  "recorded_only")
-            self.assertEqual(self.interaction.dispatch_delivery(task, item["request_id"], "question"),
-                             "delivery_unknown")
-            self.assertEqual(self.interaction.inbox(user)["items"][0]["delivery"], "delivery_unknown")
+            self.assertEqual(self.interaction.dispatch_delivery(task, correlation, "completion"), "delivery_unknown")
+            self.assertIsNone(self.interaction.task_status(user, task)["acceptance"]["receipt_id"])
             path, decision = self.evidence(qualified)
             completed = self.interaction.accept_product(user, task, path,
                 source_event=self.event(user, "accept", task, decision))
             receipt_id = completed["acceptance"]["receipt_id"]
             self.assertEqual(completed["status"], "completed")
-            self.assertIn(dict(request_id=item["request_id"], phase="question", state="delivery_unknown"),
+            self.assertIn(dict(request_id=None, phase="completion", state="delivery_unknown"),
                           completed["delivery"])
-            message_id = self.interaction.delivery_reference(task, item["request_id"], "question")["mailbox_id"]
-            message = bus.message(message_id)
-            bus.reconcile_correlated(hub, owner, message_id, source="verified absent synthetic turn",
-                outcome="not_running", generation=json.loads(message["generation"]),
-                endpoint_generation=message["endpoint_generation"])
-            self.assertEqual(self.interaction.dispatch_delivery(task, receipt_id, "completion"), "delivery_unknown")
-            self.assertEqual(self.interaction.dispatch_delivery(task, receipt_id, "completion"), "delivery_unknown")
-        self.assertEqual(calls, ["ato_question", "ato_completion"])
+            self.assertEqual(self.interaction.dispatch_delivery(task, correlation, "completion"), "delivery_unknown")
+        self.assertEqual(calls, ["ato_completion"])
         self.assertEqual(self.interaction.task_status(user, task)["acceptance"]["receipt_id"], receipt_id)

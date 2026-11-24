@@ -189,11 +189,11 @@ class UnifiedExecutionTests(unittest.TestCase):
     def test_green_baseline_still_runs_frozen_first_stage_and_requires_human(self):
         task = self.create(reviewer=dict(agent=dict(kind="codex"), max_review_rounds=2), preset=True)
         status = self.service.start(self.actor, task, foreground=True)
-        self.assertEqual(status["status"], "needs_acceptance", status)
+        self.assertEqual(status["status"], "completed", status)
         self.assertEqual(status["stage"]["stage_id"], "frozen-first")
         self.assertEqual(status["stage"]["attempts"], 1)
         self.assertEqual(status["review"]["verdict"], "approve")
-        self.assertEqual(status["acceptance"]["disposition"], "pending")
+        self.assertEqual(status["acceptance"]["disposition"], "not_recorded")
         self.assertTrue(status["checks"][0]["receipt_id"])
         self.assertTrue(status["product"]["product_id"].startswith("product-"))
         self.assertEqual((Path(status["product"]["worktree"]) / "delivery.txt").read_text(), "implemented\n")
@@ -235,7 +235,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.processes[-1].wait(timeout=5)
         (self.worker_home / "mode").unlink()
         finished = self.service.resume(self.actor, task, foreground=True)
-        self.assertEqual(finished["status"], "needs_acceptance", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(finished["task_id"], task)
         self.assertEqual(finished["stage"]["attempts"], 2)
         self.assertEqual([row["kind"] for row in finished["run_history"]], ["initial", "resume"])
@@ -288,7 +288,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual(failed["run_history"][0]["phase"], "launch_failed")
         self.assertEqual(failed["stage"]["attempts"], 0)
         status = self.service.resume(self.actor, task, foreground=True)
-        self.assertEqual(status["status"], "needs_acceptance", status)
+        self.assertEqual(status["status"], "completed", status)
         self.assertEqual(status["stage"]["attempts"], 1)
 
     def test_stop_wins_before_child_admission_and_first_work_survives_resume(self):
@@ -315,7 +315,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual(stopped["stage"]["attempts"], 0)
         self.service._spawn = spawn
         resumed = self.service.resume(self.actor, task, foreground=True)
-        self.assertEqual(resumed["status"], "needs_acceptance", resumed)
+        self.assertEqual(resumed["status"], "completed", resumed)
         self.assertEqual(resumed["stage"]["attempts"], 1)
 
     def test_startup_without_receipt_is_durable_unknown(self):
@@ -350,7 +350,7 @@ class UnifiedExecutionTests(unittest.TestCase):
 
         with patch.object(self.service, "_await_start", side_effect=wait_during_replacement):
             status = self.service.start(self.actor, task, foreground=True)
-        self.assertEqual(status["status"], "needs_acceptance")
+        self.assertEqual(status["status"], "completed")
         self.assertEqual(status["stage"]["attempts"], 1)
         self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work"])
 
@@ -390,7 +390,7 @@ class UnifiedExecutionTests(unittest.TestCase):
             self.store._advance(fd, ledger)
         self.assertEqual(self.status(task)["status"], "delivery_unknown")
         settled = self.service.reconcile(self.actor, task)
-        self.assertEqual(settled["status"], "needs_acceptance", settled)
+        self.assertEqual(settled["status"], "completed", settled)
         self.assertEqual(settled["product"], finished["product"])
         self.assertEqual(len(settled["run_history"]), 1)
         self.assertEqual(settled["stage"]["attempts"], 1)
@@ -406,12 +406,12 @@ class UnifiedExecutionTests(unittest.TestCase):
     def test_recheck_pins_product_and_does_not_restart_worker(self):
         task = self.create()
         first = self.service.start(self.actor, task, foreground=True)
-        self.assertEqual(first["status"], "needs_acceptance", first)
+        self.assertEqual(first["status"], "completed", first)
         root = Path(first["product"]["worktree"])
         (root / "delivery.txt").write_text("external edit\n")
         self.assertEqual(self.status(task)["reason"], "PRODUCT_CHANGED")
         updated = self.service.recheck(self.actor, task, checks_only=True, foreground=True)
-        self.assertEqual(updated["status"], "needs_acceptance", updated)
+        self.assertEqual(updated["status"], "completed", updated)
         self.assertNotEqual(first["product"]["product_id"], updated["product"]["product_id"])
         self.assertNotEqual(first["product"]["checks_sha256"], updated["product"]["checks_sha256"])
         self.assertEqual(updated["stage"]["attempts"], 1)
@@ -423,7 +423,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         (self.reviewer_home / "mode").write_text("repair")
         task = self.create(reviewer=reviewer)
         status = self.service.start(self.actor, task, foreground=True)
-        self.assertEqual(status["status"], "needs_acceptance", status)
+        self.assertEqual(status["status"], "completed", status)
         self.assertEqual(status["stage"]["attempts"], 2)
         self.assertEqual(status["stage"]["stage_id"], "review-fix-1")
         self.assertEqual(status["review"]["verdict"], "approve")

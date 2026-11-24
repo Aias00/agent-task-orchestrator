@@ -29,7 +29,7 @@ There is no human/JSON mode switch. Shell scripts consume named fields.
 | `ato resume TASK_ID` | Explicitly admits execution under the Task's current controller authority and recovery checks. When repository contention left an untouched initial reservation, resumes the same initial Run. A proved retryable prior execution requires a successor Run. Returns `TaskStatus` with the same background admission and startup proof as run. |
 | `ato inbox` | `{items: [InboxItem]}` containing authorized pending items, in creation order with ID as tie breaker. A read has no presentation or delivery effect. |
 | `ato answer REQUEST_ID --answer TEXT` | Records the actual user's answer to the exact pending request. Returns `{request_id, task_id, state, delivery, recorded_at}`, where `delivery` reports the canonical disposition. The execution owner consumes a valid decision separately. |
-| `ato accept TASK_ID [--evidence FILE]` | Records the local state owner's explicit acceptance of their Task. A scoped actor supplies exact product evidence with `--evidence`. Returns `TaskStatus` with the acceptance receipt reference. |
+| `ato accept TASK_ID [--evidence FILE]` | Optionally records explicit human acceptance separately from task completion. A scoped actor supplies exact product evidence with `--evidence`. Returns `TaskStatus` with the receipt reference. |
 
 The following is the v1 management surface. Maintenance, transport and
 release machinery outside this table is host code.
@@ -47,8 +47,8 @@ satisfies a manual criterion. When a frozen `host_handoff` is pending and
 actual host work is recorded, checks-only may advance its existing technical
 gates under the same lease. Preserve an already-passed review only when its
 product, spec, check set and review revision still match. A changed product
-or Reviewer requires fresh qualifying evidence. Recheck of a current accepted
-product returns its existing status without launching work. Cleanup requires
+or Reviewer requires fresh qualifying evidence. An explicit recheck can refresh
+the checks and review of a completed product. Cleanup requires
 controller or scoped operator authority, proven idle execution and terminal
 completion or STOP. Apply the
 existing H1 checks for branch/common-dir/links and dirty tree. Record removal
@@ -119,7 +119,7 @@ as well.
 
 | Exit | Meaning and v1 error codes |
 | --- | --- |
-| 0 | Operation succeeded or repeated an identical authorized decision. For foreground `run`, settled successfully in `needs_acceptance` or `completed`. A recorded STOP or human answer can return 0 with unresolved cleanup or delivery explicitly represented in its result. |
+| 0 | Operation succeeded or repeated an identical authorized decision. For foreground `run`, settled successfully in `completed`. A recorded STOP or human answer can return 0 with unresolved cleanup or delivery explicitly represented in its result. |
 | 2 | Invalid invocation or data. `USAGE`, `INVALID_ID`, `INVALID_REPO`, `INVALID_JSON`, `UNSUPPORTED_VERSION`, `INVALID_SPEC`, `INVALID_EVIDENCE`, `UNSUPPORTED_CAPABILITY`. |
 | 3 | `AUTH_REQUIRED` for missing/invalid credentials, `NOT_FOUND` for absent or out-of-scope IDs, `FORBIDDEN` for a visible object and an unauthorized action. |
 | 4 | Valid operation cannot proceed or its foreground work reached a non-success boundary. `BUSY`, `NOT_RESUMABLE`, `STOPPED`, `STALE_REQUEST`, `BINDING_CHANGED`, `DECISION_CONFLICT`, `PRODUCT_CHANGED`, `CHECKS_REQUIRED`, `LAUNCH_FAILED`, `CLEANUP_BLOCKED`, `DELIVERY_UNKNOWN`, `RUN_UNSETTLED`. |
@@ -153,8 +153,8 @@ No added parser or schema dependencies.
 | `reviewer` | Omitted or null disables technical review. Otherwise require `agent: {kind, model?, effort?}`. Optional `allowed_kinds` defaults to that kind alone and must include it. `session_mode` accepts `fresh_only` (default), `resume_if_supported` or `require_resume`. `max_review_rounds` defaults to 1 (1–20), `timeout_seconds` to 300 (1–3600), `checklist` and `design_docs` to empty lists (each at most 128). Use H1 agent/model/effort and text validation. Freeze each permitted design-doc path and digest from the base, with no symlink or outside reference. |
 | `worktree` | Optional object with only `shared_env_links` (default empty, unique names). Worktree parent is host-selected, defaulting to the primary repo's parent. A generated branch under `ato/TASK_ID` and the generated external worktree path are reserved for that Task. Callers cannot select a branch, reuse a worktree or choose an executable via the spec. |
 
-`acceptance` requires one or more independent `command` criteria and at
-least one final `manual` criterion. Each uses the existing `id`,
+`acceptance` requires one or more independent `command` criteria. A
+`manual` criterion is optional and describes a possible human check. Each uses the existing `id`,
 `description`, `kind` and (command only) `checks` schema. `checks` is a
 nonempty list of argv arrays. Each array contains nonempty strings, no NUL, at
 most 8 KiB per argument. Preserve order and contents. The host admits the exact
@@ -217,10 +217,10 @@ canonical repository and frozen spec digest. A caller with an explicit
 
 For local submissions, the host can record the submitting Codex session
 after checking its exact native index entry and session header. This private
-record selects the original conversation for manual acceptance reminders.
+record selects the original conversation for completion notices.
 The session working directory and the submitted repository are independent.
 This routing metadata grants no actor authority and changes no controller
-or acceptance binding. See [host setup](ato-host-setup.md#acceptance-reminders-for-local-tasks).
+or acceptance binding. See [host setup](ato-host-setup.md#completion-notices-for-local-tasks).
 
 An authenticated actor is a verified local CLI or trusted adapter principal.
 For scoped operations, the CLI selects a private actor file through
@@ -449,8 +449,7 @@ that Run.
 | `checking` → `reviewing` | Independent checks hold execution ownership. Required review starts only once the checks pass for the same product. Blockers can use bounded repair under the frozen checks and cumulative history. |
 | `waiting` / `needs_input` / `needs_host` | Bounded external wait, an actual pending human request, or an authorized frozen host handoff respectively. Display current Run activity separately. A response, process exit or handoff read does not mean execution resumed. |
 | `blocked` | Verified failure, policy/limit barrier, unavailable required checks/review, or invalidated product/evidence. Keep existing counts and report specific reason. No automatic resume from an unknown state or a Reviewer mutation. |
-| `needs_acceptance` | Current product and independent checks verified, required technical review passed, and execution/cleanup settled. Manual approval is outstanding. An H1 approve or Workflow check pass reaches at most this state. |
-| `completed` | Verified idle execution with a local owner acceptance, or a current product/check identity and matching scoped acceptance receipt. A product mismatch invalidates the scoped completion projection and leaves historical receipts intact. |
+| `completed` | Execution and cleanup settled, current product and independent checks verified, and any required technical review passed. Earlier successful Run receipts labelled `needs_acceptance` use the same projection. An optional human receipt is tracked separately. |
 
 Explicit worktree cleanup is a lifecycle field
 `worktree_state: "present" | "removed"` in status, separate from acceptance
@@ -532,8 +531,8 @@ absent. Expiry, PID reuse, EOF and missing observations are insufficient.
 Use correlated receipts to settle known outcomes. Unknown attempted work,
 unresolved check/Reviewer mutation, material unknown delivery, an unverified
 native owner, missing worktree, an unanswered blocking request or exhausted
-limits refuses admission. A current verified accepted product and
-`needs_acceptance` likewise refuse execution. Revalidating an invalidated
+limits refuses admission. Successful settlement is terminal for Worker resume.
+Revalidating an invalidated
 product uses explicit `project recheck` first. A verified reversible failure
 or completed STOP cleanup can admit a new Run only after the underlying
 barrier is resolved. Retain the same Task ID, prior Run and cumulative
@@ -665,12 +664,14 @@ The local state owner records explicit acceptance with `ato accept TASK_ID`.
 An optional `--evidence FILE` retains the supplied bytes as a private
 attachment. The receipt records `acceptance.method=local_owner` and applies
 to the Task, including one pinned to an earlier runtime. Repeated acceptance
-returns the original receipt. Checks, review, Run history and execution
-state continue to report their measured results. The Task projects as
-`completed` when execution is verified idle.
+returns the original receipt. Checks, review, Run history, execution and
+completion continue to report their measured results. Existing owner receipts
+that explicitly closed historical Tasks retain their effect. Without a human
+receipt, `acceptance.disposition` is `not_recorded`.
 
 Scoped acceptance requires `--evidence FILE` with a strict JSON object
-with exactly the fields below. `criteria` contains all frozen manual criterion IDs, once each.
+with exactly the fields below. `criteria` contains all frozen manual criterion IDs, once each,
+or an empty list for a command-only specification.
 `source` identifies the actual user instruction/event and `note` is
 their decision text. Both are nonblank and bounded to 8 KiB. When a trusted
 event record exists, verify that evidence against it. The user actor must
@@ -690,8 +691,7 @@ authorize the decision independently of the strings in the file.
 }
 ```
 
-Require current scope, settled execution, no live blocking request other
-than manual acceptance, matched product, passed complete independent
+Require current scope, settled execution, matched product, passed complete independent
 checks and any required matching review. Match and pin the review receipt
 when needed. Record source bytes' digest and
 the verified, non-secret actor audit reference. Normalize criterion order
@@ -700,25 +700,22 @@ normalized decision fields and the verified user principal. Repeating the
 same key after revalidation returns the original receipt. On that product
 and check set a different decision conflicts. Commit with a compare-and-swap
 after recomputing product/evidence under the repo admission gate and
-rechecking STOP, binding and Run revisions. The product pointer and manual
-item project that same receipt. A technical approve can create the manual
-request, while a general `answer` to a manual item never creates the
-acceptance receipt. Preserve the underlying Workflow manual criteria and do
-not use the old loose closure override to report successful checks.
+rechecking STOP, binding and Run revisions. The product pointer projects
+that optional receipt.
 
 Inbox queries do not update presentation. A scoped interaction host can
 record that the item was actually displayed, once, separately from user
 receipt or approval. Track notification and decision delivery via the
-one canonical mailbox with stable request or acceptance correlation IDs,
+one canonical mailbox with stable request or Run settlement correlation IDs,
 exact endpoints and generation checks. Commit a dispatch reservation before
 adapter entry and retain `delivery_unknown` for ambiguity. An identical
 record/lookup, restart, new recipient, receipt read or new Run does not
 create another send. Correlated reconciliation may settle the old receipt.
 The default is `recorded_only` without configured eligible transport.
 Use existing project mutes, quiet progress, real user-input notices and
-optional once-only observed total completion policy. Final completion
-notices are keyed to the new valid acceptance receipt, never a stage,
-technical review, or older historical task. Keep unknown notices and
+once-only total completion policy. Final completion notices use the first
+successful verified Run settlement for the Task. Historical tasks keep
+their delivery records without replay. Keep unknown notices and
 all actual delivery evidence. See the [message protocol](message-protocol.md),
 [notification policy](notification-policy.md) and
 [completion policy](completion-notifications.md).
@@ -824,7 +821,7 @@ parser. This is a source and caller migration. There is no data conversion.
 
 For a new submission from a legacy standalone plan, put the step DAG in
 `worker_contract.stages[].plan` and declare the independent command criteria
-and manual delivery gate in `worker_contract.acceptance`. H1 callers map
+in `worker_contract.acceptance`. H1 callers map
 `review_policy` into `reviewer`, using null when disabled, and
 `worktree_policy.shared_env_links` into `worktree.shared_env_links`. The
 trusted host selects any nondefault worktree parent. Keep the original
@@ -852,7 +849,7 @@ on authorized submission in the new namespace.
 | `budget-run` | Internal, narrowed. Frozen host checks and explicitly approved host actions use the existing metered lease path. No arbitrary argv forwarded from the public interface. |
 | `continue-task` | Replaced by `ato resume`. The same Task uses its authenticated stored decision and safe recovery checks. The caller cannot force a specific old answer or continue without admission. |
 | `control` | Split. `status` becomes `ato system status`. The release journal controls trusted `start/stop` functions, and the owned observer runs `tick` privately. `ctask-notify` callers use the new status/notification projections or private observer, depending on function. |
-| `create` | Replaced by `ato run --repo PATH --spec FILE`. A one-stage plan becomes a frozen Workflow with independent final command checks and manual delivery. No standalone stage-directory creation API. |
+| `create` | Replaced by `ato run --repo PATH --spec FILE`. A one-stage plan becomes a frozen Workflow with independent final command checks. No standalone stage-directory creation API. |
 | `delegate` | Retired. Arbitrary business/session delegation and native conversation creation sit outside v1. Submit a bounded local Task or hand off an existing one to a verified already enrolled session. No implicit scheduler or new conversation. |
 | `delegation-accept` | Retired. Old delegated conversation prompts and requests remain historical. Use authenticated `ato agent handoff` for controller transfer of an existing Task. |
 | `delegation-status` | Retired dedicated ledger/status. Observe a new Task with `ato status` or `ato agent binding`. No reassignment of old delegation IDs. |

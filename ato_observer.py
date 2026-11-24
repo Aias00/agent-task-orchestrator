@@ -101,7 +101,7 @@ def _observe(host, bus, route, endpoint, adapter, message, guard):
 def _dispatch(host, bus, route, message_id, guard):
     endpoint = bus.authenticate(route.target)
     kind = endpoint["kind"]
-    if route.local_acceptance:
+    if route.local_completion:
         binary = host.acceptance_queue_binary()
         if kind != "codex" or binary is None:
             return
