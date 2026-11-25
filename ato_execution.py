@@ -19,6 +19,7 @@ from ato_task_store import (DELIVERY_OUTCOMES, RunIntent, RunReceipt, TaskError,
     _identity, _identifier, _locked_file, _publish, _read_file, _read_json, _regular, _require, _retry_busy, _save,
     _sha, _state_errors, _strict_json, _valid_id, canonical_json, new_id)
 import budget
+from codex_session_adapter import worker_config_args
 from hub_contract import HubAgentSpec, HubTurnRequest, blocker_fingerprint, validate_review_verdict
 from hub_loop import GuardedWorkflow
 import hub_sandbox
@@ -133,7 +134,7 @@ def _mirror_stop(task, record):
 
 
 def _gate_name(task):
-    return _sha(task["repo"]["key"].encode()) + ".lock"
+    return _sha(task["worktree"]["path"].encode()) + ".lock"
 
 
 @contextmanager
@@ -205,25 +206,6 @@ def _uncertain(phase, last):
     if phase == "settled" and last["outcome"] == "cleanup_blocked":
         return "CLEANUP_BLOCKED"
     return None
-
-
-def _check_repo_peers(store, task):
-    """A released flock cannot erase outstanding work on sibling worktrees."""
-    with store._private(store.tasks) as fd:
-        references = [name for name in os.listdir(fd) if name != task["task_id"] and _valid_id(name, "task")]
-    for task_id in references:
-        with store._private(store._task_dir(task_id)) as fd:
-            scope = store._scope(fd, task_id)
-        if scope.repo_key != task["repo"]["key"]:
-            continue
-        peer = store.load_task(task_id)
-        if not peer["run_id"]:
-            continue
-        _, receipts = _current(store, peer)
-        if receipts and (code := _uncertain(receipts[-1][1]["phase"], receipts[-1][1])):
-            if _quarantined(store, peer):
-                continue
-            raise TaskError(code, task["task_id"])
 
 
 def _quarantined(store, task):
@@ -396,13 +378,13 @@ class ExecutionService:
         with _repo_gate(self.store, task), _worker_lock(task):
             task, _, _ = self._actor(actor, task_id, "reconcile")
             _require(not _quarantined(self.store, task), "NOT_RESUMABLE")
-            _require(task["creation"]["runtime_seal"] == self.store.runtime_seal, "RUNTIME_MISMATCH")
             run, receipts = _current(self.store, task)
             _require((expected_run is None or run["run_id"] == expected_run) and receipts, "RUN_UNSETTLED")
             last = receipts[-1][1]
             if last["phase"] not in _TERMINAL:
                 owner = _active_proof(self.store, run, receipts)
-                _require(owner is not None and owner["runtime"] == _runtime_identity(), "RUN_UNSETTLED")
+                launch = _evidence(self.store, task_id, receipts[0][1])
+                _require(owner is not None and owner["runtime"] == launch["runtime"], "RUN_UNSETTLED")
                 _verify_exit(owner)
                 state, contract, generation, _ = self.store._kernel_facts(task)
                 _, child_active, _ = self.store._stage_facts(task, contract, state)
@@ -583,7 +565,8 @@ class ExecutionService:
             status.update(status="blocked", reason=exc.code, next_step="RECHECK_PRODUCT")
             status["acceptance"]["disposition"] = "invalidated"
             return
-        status.update(status="completed", reason=None, next_step=None)
+        status.update(status="completed", reason=data.get("reason") if data.get("advisory_checks") else None,
+                      next_step=None)
         acceptance = self.hooks.acceptance(task, status["product"])
         if acceptance:
             status["acceptance"] = dict(acceptance)
@@ -597,7 +580,6 @@ class ExecutionService:
                 status = self.store.task_status(actor, task_id)
                 if task["worktree_removed"] or status["status"] == "completed":
                     return status
-                _require(task["creation"]["runtime_seal"] == self.store.runtime_seal, "RUNTIME_MISMATCH")
                 with self.store._mutation(task_id, task["revision"]) as (fd, latest, frozen):
                     _require(_binding(self.hooks, latest, spec) == binding, "BINDING_CHANGED")
                     if latest["worktree_removed"]:
@@ -663,16 +645,16 @@ class ExecutionService:
         owner = _active_proof(self.store, run, receipts)
         if owner:
             _verify_exit(owner)
-        _require(proof.get("reason") not in {"REVIEWER_MUTATION_VIOLATION", "review_loop_exhausted",
-                                            "repeated_blockers", "PRODUCT_CHANGED_DURING_CHECKS"},
-                 "NOT_RESUMABLE")
         handoff = None
         if kind == "resume":
-            _require(last["outcome"] in _RETRYABLE and proof.get("reason") != "TIME_LIMIT"
-                     and state["status"] not in {
-                "limit", "stage_limit", "planning_limit", "permission_blocked", "contract_changed"},
-                "NOT_RESUMABLE")
-            if state.get("active_run"):
+            retryable = _RETRYABLE if self.profile.fixture else _RETRYABLE | {"needs_host", "needs_input", "waiting"}
+            _require(last["outcome"] in retryable and state["status"] != "contract_changed", "NOT_RESUMABLE")
+            if self.profile.fixture:
+                _require(proof.get("reason") not in {"TIME_LIMIT", "REVIEWER_MUTATION_VIOLATION", "review_loop_exhausted",
+                                                    "repeated_blockers", "PRODUCT_CHANGED_DURING_CHECKS"}
+                         and state["status"] not in {"limit", "stage_limit", "planning_limit", "permission_blocked"},
+                         "NOT_RESUMABLE")
+            if self.profile.fixture and state.get("active_run"):
                 child_dir = Path(state["active_run"])
                 child = ato_core.read(child_dir / "state.json")
                 limits = spec["worker_contract"]["limits"]
@@ -683,9 +665,8 @@ class ExecutionService:
             _require((stop is None or stopped_recheck) and phase == "settled" and bool(state["stages"])
                      and (not state.get("active_run") or last["outcome"] == "needs_host"),
                      "NOT_RESUMABLE")
-            if last["outcome"] == "needs_host":
-                _require(bool(spec["worker_contract"].get("host_handoff"))
-                         and state["status"] == "needs_host", "NOT_RESUMABLE")
+            if last["outcome"] == "needs_host" and (
+                    self.profile.fixture or spec["worker_contract"].get("host_handoff")):
                 handoff = _host_handoff(self.hooks, task, binding, run, last["generation"])
         return stop, handoff
 
@@ -698,11 +679,11 @@ class ExecutionService:
         with _repo_gate(self.store, task) as gate:
             task, spec, binding = self._actor(actor, task_id, kind)
             _require(not _quarantined(self.store, task), "NOT_RESUMABLE")
-            _require(self.store.runtime_seal == task["creation"]["runtime_seal"], "RUNTIME_MISMATCH")
+            if kind == "initial":
+                _require(self.store.runtime_seal == task["creation"]["runtime_seal"], "RUNTIME_MISMATCH")
             _require(expected_run is None or task["run_id"] == expected_run, "RUN_UNSETTLED")
             with self.store._private(self.store._task_dir(task_id)) as fd:
                 _require(_existing(fd, "cleanup.json") is None, "CLEANUP_BLOCKED")
-            _check_repo_peers(self.store, task)
             with _worker_lock(task), ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
                 state, _, generation, kernel_stop = self.store._kernel_facts(task)
                 self.store._stage_facts(task, spec["worker_contract"], state)
@@ -731,15 +712,16 @@ class ExecutionService:
                 stop, handoff = self._prior_admission(task, spec, binding, kind, state, kernel_stop, preceding,
                                                        stopped_recheck=stopped_recheck)
                 self.profile.verify(self.store, task, spec, work=kind != "recheck")
-                if spec["reviewer"] and not checks_only:
+                if self.profile.fixture and spec["reviewer"] and not checks_only:
                     _require(spec["reviewer"]["session_mode"] != "require_resume", "UNSUPPORTED_CAPABILITY")
                     self.profile.reviewer(binding["reviewer"]["kind"])
-                policy = budget.time_policy()
-                _require(not budget.summary(task["workflow"]["directory"], state)["exhausted"], "NOT_RESUMABLE")
-                for prior, receipts in history:
-                    for _, receipt in receipts:
-                        if receipt["phase"] == "launching":
-                            _require(_evidence(self.store, task_id, receipt)["time_policy"] == policy, "NOT_RESUMABLE")
+                policy = self._time_policy()
+                if self.profile.fixture:
+                    _require(not budget.summary(task["workflow"]["directory"], state)["exhausted"], "NOT_RESUMABLE")
+                    for prior, receipts in history:
+                        for _, receipt in receipts:
+                            if receipt["phase"] == "launching":
+                                _require(_evidence(self.store, task_id, receipt)["time_policy"] == policy, "NOT_RESUMABLE")
                 bus = transport.managed_bus()
                 lease = bus.execution_lease(recovery.execution_resource(state["repo"]))
                 if stop:
@@ -758,16 +740,20 @@ class ExecutionService:
                         raise TaskError("RUN_UNSETTLED", task_id) from None
             # Intent creation is fenced against an intervening STOP/handoff.
             reuse_initial = (kind == "resume" and not current_receipts
-                             and current_run["kind"] == "initial" and stop is None)
-            if stopped_recheck:
+                             and current_run["kind"] == "initial" and stop is None
+                             and current_run["runtime_seal"] == self.store.runtime_seal)
+            retired = stopped_recheck or (reserved and current_run["runtime_seal"] != self.store.runtime_seal)
+            if retired:
                 task = _publish_receipt(self.store, current_run, "launch_failed", generation,
-                                        {"cleanup_verified": True, "reason": "STOPPED"}, "launch_failed",
+                                        {"cleanup_verified": True,
+                                         "reason": "STOPPED" if stopped_recheck else "RUNTIME_MISMATCH"}, "launch_failed",
                                         validate=lambda latest: _require(latest["revision"] == task["revision"], "BUSY"))
                 reserved = False
             if kind != "initial" and not reserved and not reuse_initial:
-                if not current_receipts and not stopped_recheck:
+                if not current_receipts and not retired:
                     task = _publish_receipt(self.store, history[-1][0], "launch_failed", generation,
-                                            {"cleanup_verified": True, "reason": "STOPPED"}, "launch_failed",
+                                            {"cleanup_verified": True,
+                                             "reason": "STOPPED" if stop else "RUNTIME_MISMATCH"}, "launch_failed",
                                             validate=lambda latest: _require(latest["revision"] == task["revision"], "BUSY"))
                 intent = RunIntent(new_id("run"), task["run_id"], kind, task["run_count"] + 1,
                                    "explicit_" + kind, self.store.runtime_seal, tuple(generation))
@@ -783,6 +769,10 @@ class ExecutionService:
                           host_handoff=handoff, roots=_roots(self.store),
                           stop_epoch=stop["epoch"] if stop else task["stop_epoch"],
                           stop_run_id=stop["run_id"] if stop else None)
+            if not self.profile.fixture:
+                origin = self.store.submission_origin(task_id)
+                thread = origin.session_id if origin and origin.session_id else os.environ.get("CODEX_THREAD_ID")
+                launch["controller_args"] = worker_config_args(self.store.native_home, thread)
             if reuse_initial:
                 launch["operation"] = "resume"
             def still_current(latest):
@@ -809,6 +799,10 @@ class ExecutionService:
                          validate=validate)
         raise TaskError("LAUNCH_FAILED", run["task_id"]) from None
 
+    def _time_policy(self):
+        return (budget.time_policy() if self.profile.fixture
+                else dict(mode="advisory", source="ATO execution", revision=None))
+
     def _spawn(self, run, gate, nonce, node):
         try:
             return self._spawn_child(run, gate, nonce, node)
@@ -828,9 +822,13 @@ class ExecutionService:
             write_end = None
             command = [runtime["python"], "-IB", runtime["entry"], "run-child", run["task_id"], run["run_id"]]
             tool_env = {"CTASK_NODE_BIN": str(node)} if node else {}
+            tool_env["PATH"] = hub_sandbox.tool_path(self.profile.worker_executable, node, inherit_path=True)
+            environment = {} if self.profile.fixture else dict(os.environ)
+            if self.profile.fixture:
+                environment.update(HOME=self.profile.worker_home, LC_ALL="C")
             return subprocess.Popen(command, cwd=_ENTRY.parent, env={
-                **tool_env, "PATH": hub_sandbox.tool_path(self.profile.worker_executable, node),
-                "HOME": self.profile.worker_home, "LC_ALL": "C",
+                **environment, **tool_env,
+                "CODEX_HOME": str(self.store.native_home),
                 "ATO_PRIVATE_PIPE_FD": str(read_end), "ATO_PRIVATE_ROOTS": canonical_json(_roots(self.store)).decode()},
                 pass_fds=(read_end, gate), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True, umask=0o077)
@@ -897,7 +895,7 @@ class _RunDriver:
         self.task, self.spec = _load_task(store, self.task_id), _load_spec(store, self.task_id)
         self.folder = folder
         self.profile = HostProfile.from_document(launch["profile"])
-        self.host = CommandHost(self, self.profile, folder)
+        self.host = CommandHost(self, self.profile, folder, launch.get("controller_args", ()))
         self.pid = os.getpid()
         self.birth = ato_process.identity(self.pid)
         self.admitted = False
@@ -922,7 +920,7 @@ class _RunDriver:
             previous = _last_settlement(store, self.task, self.previous_run, old_receipts)
             self.review_rounds = previous.get("review_rounds", 0)
             self.fingerprints = previous.get("fingerprints", [])
-            if previous.get("reason") == "REVIEW_CHANGES_REQUIRED":
+            if not self.host.advisory and previous.get("reason") == "REVIEW_CHANGES_REQUIRED":
                 self.retained_review = previous
 
     def _mark(self, state):
@@ -975,7 +973,8 @@ class _RunDriver:
             _require(_host_handoff(self.hooks, current, binding, self.previous_run,
                                    self.previous_receipt["generation"]) == self.launch["host_handoff"],
                      "BINDING_CHANGED")
-        _require(budget.time_policy() == self.launch["time_policy"], "NOT_RESUMABLE")
+        if self.profile.fixture:
+            _require(budget.time_policy() == self.launch["time_policy"], "NOT_RESUMABLE")
         self.profile.verify(self.store, current, self.spec, work=self.run["kind"] != "recheck")
 
     def _prepare_stop(self, current):
@@ -1072,11 +1071,26 @@ class _RunDriver:
 
             def check_total(self):
                 self.guard()
-                before = ato_product.measure(driver.task)
+                if for_work and driver.host.advisory and driver.launch["host_handoff"] is None:
+                    # The final independent pass records the real results after the Worker settles.
+                    raise ato_core.Halt("completed")
+                before = None if driver.host.advisory else ato_product.measure(driver.task)
                 super().check_total()
-                if before != ato_product.measure(driver.task):
+                if before is not None and before != ato_product.measure(driver.task):
                     driver.reason = "PRODUCT_CHANGED_DURING_CHECKS"
                     raise ato_core.Halt("blocked")
+
+            def run_active_stage(self, retry, host_checks=False):
+                if not driver.host.advisory or host_checks:
+                    return super().run_active_stage(retry, host_checks=host_checks)
+                while super().run_active_stage(retry):
+                    done = {row["preset"] for row in self.state["stages"]}
+                    next_stage = next((row for row in self.contract["stages"] if row["id"] not in done), None)
+                    if next_stage is None:
+                        return True
+                    self.stage(next_stage["plan"], next_stage["covers"], next_stage["id"])
+                    retry = False
+                return False
 
         return HostedWorkflow(self.run["workflow_dir"], self.guard)
 
@@ -1085,9 +1099,17 @@ class _RunDriver:
             owner = self._workflow()
             owner.guard()
             if preset is None:
-                if owner.state["stages"]:
-                    return
-                preset = owner.contract["stages"][0]
+                if self.host.advisory:
+                    if owner.state.get("active_run"):
+                        return
+                    done = {row["preset"] for row in owner.state["stages"]}
+                    preset = next((row for row in owner.contract["stages"] if row["id"] not in done), None)
+                    if preset is None:
+                        return
+                else:
+                    if owner.state["stages"]:
+                        return
+                    preset = owner.contract["stages"][0]
             owner.stage(preset["plan"], preset["covers"], preset["id"])
 
     def _work(self, *, retry=False, host_handoff=None):
@@ -1384,6 +1406,14 @@ class _RunDriver:
             with self._owned_host() as (lease, _, _):
                 owner = self._workflow()
                 passed, generation = self._checks(owner, lease)
+                if self.host.advisory:
+                    if recheck and self.previous_receipt["outcome"] not in DELIVERY_OUTCOMES and not all(
+                            stage["status"] == "completed" for stage in owner.state["stages"]):
+                        self.reason = "WORKFLOW_BLOCKED"
+                        return "blocked"
+                    if not passed:
+                        self.reason = "CHECKS_FAILED"
+                    return "completed"
                 if not passed:
                     self.reason = "CHECKS_REQUIRED"
                     return "blocked"
@@ -1476,6 +1506,8 @@ class _RunDriver:
                         review_rounds=self.review_rounds, fingerprints=self.fingerprints,
                         product=self.product, checks=self.checks, review=self.review,
                         owner_pid=self.pid, owner_birth=self.birth, kernel_fence=self.kernel_fence)
+        if self.host.advisory and outcome == "completed":
+            evidence["advisory_checks"] = True
         if evidence["cleanup_verified"]:
             with _worker_lock(task):
                 _require(generation == self.kernel_generation, "RUN_UNSETTLED")

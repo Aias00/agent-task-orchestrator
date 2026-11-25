@@ -204,7 +204,8 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
         truncate=False):
     """Bounded pipes, private bounded stderr, and no adopted process identities."""
     runtime=private_dir(runtime);workspace=canonical(workspace)
-    if type(timeout) not in (int,float) or timeout<=0:raise ValueError('INVALID_TURN_TIMEOUT')
+    if timeout is not None and (type(timeout) not in (int,float) or timeout<=0):
+        raise ValueError('INVALID_TURN_TIMEOUT')
     stdin=runtime/'stdin.txt';error=runtime/'stderr.log'
     for path in (stdin,error):
         fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
@@ -216,7 +217,7 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
     try:
         if stop():return ProcessResult('STOPPED',None)
         with stdin.open('rb') as source,error.open('ab') as log:
-            deadline=time.monotonic()+timeout
+            deadline=float('inf') if timeout is None else time.monotonic()+timeout
             if host is not None:
                 host.before_spawn(runtime)
             try:
@@ -321,13 +322,16 @@ def tool_environment(home, temporary, tool, *, codex=False, proxy=None):
             node = locate('node')
         except (OSError, ValueError):
             pass
-    env['PATH'] = tool_path(tool, node)
+    env['PATH'] = tool_path(tool, node, inherit_path=process_host.get() is not None)
     return env
 
 
-def tool_path(tool, node):
-    paths=[str(Path(tool).parent),'/usr/bin','/bin']
-    if node:paths.insert(1,str(Path(node).resolve().parent))
+def tool_path(tool, node, *, inherit_path=False):
+    paths = [str(Path(tool).parent), '/usr/bin', '/bin']
+    if node:
+        paths.insert(1, str(Path(node).resolve().parent))
+    if inherit_path and 'PATH' in os.environ:
+        paths = os.environ['PATH'].split(os.pathsep) + paths
     return os.pathsep.join(dict.fromkeys(paths))
 
 

@@ -48,6 +48,51 @@ def session_path(home_dir, thread):
     raise ValueError('original session cannot be verified in the configured Codex home')
 
 
+def worker_config_args(home_dir, thread):
+    """Read only the native configuration fields of the last recorded turn."""
+    if not thread:
+        return []
+    try:
+        with Path(session_path(home_dir, thread)).open('rb') as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - MAX_ACTIVITY_BYTES))
+            lines = stream.read(MAX_ACTIVITY_BYTES).splitlines()
+    except (OSError, ValueError, TypeError):
+        return []
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get('type') == 'turn_context':
+            turn = record.get('payload')
+            if isinstance(turn, dict):
+                break
+    else:
+        return []
+    args = []
+    for field, key in (('model', 'model'), ('effort', 'model_reasoning_effort'),
+                       ('approval_policy', 'approval_policy')):
+        value = turn.get(field)
+        if isinstance(value, str) and value and '\0' not in value:
+            args.extend(('-c', key + '=' + json.dumps(value)))
+    sandbox = turn.get('sandbox_policy')
+    if isinstance(sandbox, dict):
+        mode = sandbox.get('type')
+        if mode in ('read-only', 'workspace-write', 'danger-full-access'):
+            args.extend(('--sandbox', mode))
+        if mode == 'workspace-write':
+            for field in ('network_access', 'exclude_tmpdir_env_var', 'exclude_slash_tmp'):
+                value = sandbox.get(field)
+                if type(value) is bool:
+                    args.extend(('-c', 'sandbox_workspace_write.' + field + '=' + json.dumps(value)))
+            roots = sandbox.get('writable_roots')
+            if isinstance(roots, list) and all(isinstance(root, str) and os.path.isabs(root)
+                                               and '\0' not in root for root in roots):
+                args.extend(('-c', 'sandbox_workspace_write.writable_roots=' + json.dumps(roots)))
+    return args
+
+
 def queue(home_dir, thread, text, *, cwd=None):
     binary = queue_executable.get() or os.environ.get('CTASK_QUEUE_BIN', 'codex')
     return _queue(home_dir, thread, text, cwd=cwd, binary=binary)

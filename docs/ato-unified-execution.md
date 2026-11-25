@@ -72,16 +72,14 @@ it outside the public spec and ambient actor environment.
 
 ## Offline scope
 
-The included bounded Worker profile handles Codex in workspace-write or
-read-only mode with one host-selected native permissions profile. The Codex
-frontend starts directly and its command tools use native Seatbelt. The
-profile gives writes only to the selected workspace and per-turn scratch,
-fences Git and Task records, and keeps command-tool network disabled.
-Independent host checks use their own outer Seatbelt. Other Worker protocols and broader grants require their own
-verified write boundary. The H1 reviewer selection uses its existing
-read-only profiles. `resume_if_supported` starts fresh for the supplied
-one-shot reviews. `require_resume` refuses admission because the profile
-does not establish and reconcile a persistent Reviewer session.
+A new Codex Worker uses the controller's Codex account configuration and the
+model, reasoning effort, approval policy and sandbox mode available from the
+verified submitting session. It starts a fresh turn in the Task worktree.
+Independent checks invoke the original commands in that worktree using the
+launcher's host environment. The account's package managers, proxies and
+Docker context are available under ordinary system permissions. Check results
+are recorded after execution, including failures, and ordinary completion has
+no Reviewer gate. H1 retains its separate review workflow.
 
 The targeted tests use temporary repos and local synthetic executables.
 The synthetic profile has a constructor-only test seam, independent

@@ -170,7 +170,7 @@ class ReleaseTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()) as out:
             self.assertEqual(release.main(self.args('dry-run')), 0)
         report = json.loads(out.getvalue())
-        self.assertFalse(report['activation_ready'])
+        self.assertTrue(report['activation_ready'])
         self.assertEqual(report['observer_source']['root'], str(self.old))
         self.assertEqual(report['mailboxes']['unified_state']['busy'], {'delivery_unknown': 1})
         self.assertEqual(report['entrypoints']['ato'], {'present': False})
@@ -189,41 +189,31 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('snapshot must be staged and qualified', json.loads(out.getvalue())['blockers'])
         self.assertFalse(missing.exists())
 
-    def test_active_mailbox_and_turn_slots_refuse_both_directions_before_stop(self):
+    def test_cutover_and_rollback_preserve_busy_mailbox_rows(self):
         self.old_observer()
-        for state in (self.legacy_state, self.unified_state):
-            for status, busy in [('queued', 0), ('claimed', 0), ('dispatching', 0),
-                                 ('delivery_unknown', 0), ('delivered', 1), ('cancelled', 1)]:
-                with self.subTest(state=state, status=status):
-                    self.message(state, status, busy)
-                    with self.assertRaisesRegex(release.Refused, 'mailbox is busy'):
-                        self.activate()
-                    with closing(sqlite3.connect(state/'mailbox/state.sqlite')) as con, con:
-                        con.execute('delete from messages')
-        self.assertEqual(self.system.calls, [])
-        self.activate()
-        self.system.calls.clear()
-        self.message(self.legacy_state, 'delivery_unknown')
-        with self.assertRaisesRegex(release.Refused, 'mailbox is busy'):
-            self.rollback()
-        self.assertEqual(self.system.calls, [])
+        self.message(self.legacy_state, 'claimed')
+        self.message(self.unified_state, 'delivery_unknown')
+        report = release.inspect(self.paths, self.system)
+        self.assertEqual(report['blockers'], [])
+        self.assertFalse(report['mailboxes']['legacy_state']['idle'])
+        self.assertFalse(report['mailboxes']['unified_state']['idle'])
+        self.assertEqual(self.activate()['state'], 'activated')
+        self.assertEqual(self.rollback()['state'], 'rolled_back')
+        self.assertEqual(release.mailbox(self.legacy_state)['busy'], {'claimed': 1})
+        self.assertEqual(release.mailbox(self.unified_state)['busy'], {'delivery_unknown': 1})
 
-    def test_active_execution_lease_is_not_assumed_quiescent_by_time(self):
+    def test_cutover_preserves_active_execution_lease(self):
         db = self.unified_state/'mailbox/state.sqlite'
         with closing(sqlite3.connect(db)) as con, con:
             con.execute("insert into execution_leases values('active')")
-        with self.assertRaisesRegex(release.Refused, 'mailbox is busy'):
-            self.activate()
-        self.assertFalse(self.transaction.exists())
+        self.assertEqual(self.activate()['state'], 'activated')
+        with closing(sqlite3.connect(db)) as con:
+            self.assertEqual(con.execute('select * from execution_leases').fetchall(), [('active',)])
 
-    def test_busy_after_old_observer_stops_preserves_entries_and_records_recovery(self):
+    def test_message_arriving_at_observer_shutdown_is_retained(self):
         self.old_observer()
-        original = release.entrypoints(self.bin)
         self.system.after_stop = lambda: self.message(self.legacy_state, 'delivery_unknown')
-        with self.assertRaisesRegex(release.Refused, 'not idle'):
-            self.activate()
-        self.assertEqual(release.entrypoints(self.bin), original)
-        self.assertEqual(release.read(self.transaction/'transaction.json')['state'], 'recovery_required')
+        self.assertEqual(self.activate()['state'], 'activated')
         self.assertEqual(release.mailbox(self.legacy_state)['busy'], {'delivery_unknown': 1})
 
     def test_cutover_and_repeat_rollback_restore_exact_source_observer_and_original_namespace(self):
@@ -346,26 +336,21 @@ class ReleaseTests(unittest.TestCase):
                     patch.object(release, 'git_commit', return_value=(CURRENT, 'fixture')), \
                     redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(release.main(self.args('dry-run')), 0)
-            blockers = json.loads(out.getvalue())['blockers']
-        self.assertIn('legacy H1 task has unresolved activity', blockers)
-        self.assertIn('legacy workflow lock is busy: ' + str(lock), blockers)
-        self.assertIn('missing legacy workflow state: ' + str(flow), blockers)
-        self.assertEqual(len(blockers), 3)
+            report = json.loads(out.getvalue())
+        self.assertTrue(report['activation_ready'])
+        activity = report['activity']
+        self.assertIn('legacy H1 task has unresolved activity', activity)
+        self.assertIn('legacy workflow lock is busy: ' + str(lock), activity)
+        self.assertIn('missing legacy workflow state: ' + str(flow), activity)
 
-    def test_active_selected_process_and_legacy_workflow_block_before_stop(self):
+    def test_active_selected_process_is_reported_and_left_running(self):
         self.old_observer()
         other = dict(pid=8, command=str(self.old/'runner.py') + ' _worker fixture')
-        with patch.object(self.system, 'processes', return_value=[other]):
-            with self.assertRaisesRegex(release.Refused, 'active commands'):
-                self.activate()
-        flow = self.base/'fixture repo/.codex/tasks/workflows/test'
-        write(flow, 'state.json', '{"status":"running","owner_pid":1234}')
-        with closing(sqlite3.connect(self.legacy_state/'control/state.sqlite')) as con, con:
-            con.execute('create table workflows(path text)')
-            con.execute('insert into workflows values(?)', (str(flow),))
-        with self.assertRaisesRegex(release.Refused, 'workflow has unresolved activity'):
-            self.activate()
-        self.assertEqual(self.system.calls, [])
+        processes = self.system.processes
+        with patch.object(self.system, 'processes', side_effect=lambda: [other, *processes()]):
+            self.assertIn('selected runtime has active commands', release.inspect(self.paths, self.system)['activity'])
+            self.assertEqual(self.activate()['state'], 'activated')
+        self.assertFalse(any(call[0] == 'stop' and call[2] == 8 for call in self.system.calls))
 
     def test_explicit_change_scope_and_cross_version_reference(self):
         with redirect_stderr(io.StringIO()):

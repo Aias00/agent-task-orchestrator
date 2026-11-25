@@ -236,6 +236,7 @@ def read_delivery(store, task, run, generation, spec, evidence, review_revision)
     """Verify content and correlation of the receipts referenced by settlement."""
     task_id = task["task_id"]
     product, checks, review = (evidence[k] for k in ("product", "checks", "review"))
+    advisory = evidence.get("advisory_checks") is True
     ref = product["product_id"].removeprefix("product-")
     manifest = _strict_json(store.read_evidence(task_id, ref), "STATE_CORRUPT")
     _require(product["product_id"] == "product-" + ref
@@ -258,13 +259,17 @@ def read_delivery(store, task, run, generation, spec, evidence, review_revision)
                  and receipt["generation"] == generation and receipt["product_id"] == product["product_id"]
                  and receipt["criterion_id"] == summary["criterion_id"] == criterion["id"]
                  and receipt["argv_sha256"] == _sha(canonical_json(criterion["checks"]))
-                 and receipt["state"] == summary["state"] == "passed"
-                 and len(receipt["invocations"]) == len(criterion["checks"]), "CHECKS_REQUIRED")
-        for argv, invocation in zip(criterion["checks"], receipt["invocations"]):
+                 and receipt["state"] == summary["state"]
+                 and (receipt["state"] == "passed" or advisory and receipt["state"] == "failed")
+                 and 1 <= len(receipt["invocations"]) <= len(criterion["checks"])
+                 and (receipt["state"] != "passed" or len(receipt["invocations"]) == len(criterion["checks"])),
+                 "CHECKS_REQUIRED")
+        for index, (argv, invocation) in enumerate(zip(criterion["checks"], receipt["invocations"])):
+            state = receipt["state"] if index + 1 == len(receipt["invocations"]) else "passed"
             _require(invocation["argv_sha256"] == _sha(canonical_json(argv))
-                     and invocation["state"] == "passed", "CHECKS_REQUIRED")
+                     and invocation["state"] == state, "CHECKS_REQUIRED")
             store.read_evidence(task_id, invocation["log_sha256"])
-    if spec["reviewer"] is not None:
+    if spec["reviewer"] is not None and (not advisory or review is not None):
         _require(review is not None and review["verdict"] == "approve", "CHECKS_REQUIRED")
         verdict = _strict_json(store.read_evidence(task_id, review["receipt_id"]), "STATE_CORRUPT")
         _require(verdict["task_id"] == task_id and verdict["run_id"] == run["run_id"]

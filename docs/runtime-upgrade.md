@@ -62,9 +62,9 @@ exact verification.
 
 The journal records each managed executable's presence, exact bytes and mode, and
 the sealed source and interpreter for each present entry. It includes the old
-and new observer identity and both state contexts. A busy or uncertain Task,
-native execution, mailbox delivery or turn slot blocks the change.
-Quiesce launcher use for cutover. The tool stops the verified observer with
+and new observer identity and both state contexts. Dry-run reports Task and
+mailbox activity. Existing Runs keep their sealed source and mailbox rows
+remain in place. The tool stops the verified observer with
 SIGTERM and holds both mailbox writer boundaries while replacing the launcher
 and removing the recorded retired entries. An already authorized observer
 requires a prepared target observation configuration. The tool verifies its
@@ -90,12 +90,10 @@ records `recovery_required`. Retain the journal and sealed snapshots for
 recovery.
 
 Task and Run ledgers, STOP, attempt histories, worktrees and delivery claims
-remain available in their original namespaces. Verified idle Tasks can stay
-on their original sealed release during activation or rollback, including
-Tasks with older successful Run receipts. The current CLI projects these
-Tasks as completed once it verifies the stored product and checks. Active
-commands, unsettled execution or provisioning, and busy mailbox or turn
-slots still require a safe boundary.
+remain available in their original namespaces. The selected release can
+observe Runs from an earlier release while the original processes continue.
+A later explicit continuation of a settled Run records the newly selected
+release in its next Run receipt.
 
 The selected release can clean up verified idle completed or stopped Tasks
 from an earlier release with `ato project cleanup TASK_ID --confirm`. For
@@ -103,13 +101,9 @@ completed Tasks, it rechecks the retained product and preserves its exact
 contents on the task branch before removing the worktree. A stopped Task
 requires a clean worktree.
 
-`ato status` reports `RUNTIME_MISMATCH` and `SELECT_TASK_RUNTIME` for an
-unfinished Task pinned to a different release. Retain the older sealed
-snapshot and transaction journal. The journal identifies the release and
-interpreter selected before the switch. Use that exact interpreter and
-`ato.py` with the same recorded ATO and Codex homes for operations that require
-the Task's original release, such as resuming work. Fixture qualification and
-source installation leave real activation and provider verification pending.
+Retain older sealed snapshots while their Runs can still be active, and keep
+the transaction journal for rollback. Fixture qualification and source
+installation leave real activation and provider verification pending.
 
 The installer, release script and runtime share snapshot, mailbox and
 launcher verification through `ato_release_lib.py`. See the

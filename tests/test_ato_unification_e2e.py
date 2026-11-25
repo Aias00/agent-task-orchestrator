@@ -54,9 +54,9 @@ if sys.argv[1:] == ["--version"]:
     sys.exit(0)
 assert sys.argv[1] == "exec"
 assert "--sandbox" not in sys.argv
-assert 'default_permissions="ato-host"' in sys.argv
-assert any(s.startswith('permissions.ato-host=') and 'network={enabled=false}' in s for s in sys.argv)
-assert "ATO_ACTOR_FILE" not in os.environ and "OPENAI_API_KEY" not in os.environ
+assert not any('ato-host' in value or '--ignore-user-config' == value for value in sys.argv)
+assert "ATO_ACTOR_FILE" not in os.environ
+assert os.environ.get("OPENAI_API_KEY") == "private-fixture-environment-token"
 assert sys.stdin.read()
 native = Path(os.environ["CODEX_HOME"])
 mode = (native / "mode").read_text()
@@ -82,6 +82,8 @@ result = dict(status="ready_for_checks", summary="fixture done", next_step="", b
 if mode == "host":
     result.update(status="needs_host", summary="fixture needs host action",
                   next_step="Record the authorized fixture action")
+if mode == "blocked":
+    result.update(status="blocked", summary="fixture blocked", blocker="fixture blocker")
 Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps(result))
 '''
 
@@ -171,11 +173,11 @@ class InstalledATO(unittest.TestCase):
 
     def profile(self, mode="normal", *, via_setup=False):
         self.worker_home = self.root / "worker home"
-        self.native = self.worker_home / ".codex"
+        self.native = self.store.native_home
         self.reviewer_home = self.root / "reviewer home"
         self.proofs = self.root / "actors"
         for home in (self.worker_home, self.native, self.reviewer_home, self.proofs):
-            home.mkdir(mode=0o700)
+            home.mkdir(mode=0o700, exist_ok=True)
         write(self.native, "mode", mode)
         worker = self.tool("worker", WORKER)
         reviewer = self.tool("reviewer", REVIEWER)
@@ -384,7 +386,7 @@ class InstalledATO(unittest.TestCase):
         self.addCleanup(unseal, replacement)
         paths = release.scoped_paths(self.bin, self.store.home, self.store.native_home)
         release.activate(replacement, "d" * 40, paths, self.root / "local acceptance cutover")
-        self.assertEqual(self.cli("status", task)["reason"], "RUNTIME_MISMATCH")
+        self.assertEqual(self.cli("status", task)["status"], "needs_host")
 
         accepted = self.cli("accept", task)
         self.assertEqual(accepted["status"], "needs_host")
@@ -1028,7 +1030,7 @@ class InstalledATO(unittest.TestCase):
         self.cli("status", task_id, actor=other_origin, error=(3, "NOT_FOUND"))
         status = self.cli("status", task_id, actor=origin)
         self.assertEqual(status["status"], "completed")
-        self.assertEqual(status["review"]["verdict"], "approve")
+        self.assertIsNone(status["review"])
         self.assertNotEqual(status["acceptance"]["disposition"], "recorded")
         self.assertEqual(status["stage"]["attempts"], 1)
         trace = self.cli("project", "trace", task_id, actor=origin)
@@ -1170,62 +1172,61 @@ class InstalledATO(unittest.TestCase):
         self.assertNotEqual(finished["execution"]["run_id"], first_run)
         self.assertFalse((repo / "delivery.txt").exists())
 
-    def test_busy_repository_can_resume_its_reserved_initial_run_once(self):
+    def test_linked_worktrees_in_the_same_repository_can_execute_independently(self):
         self.install()
         self.profile(mode="hold")
-        repo, spec_file, origin = self.submission("busy repo", "1", "2")
+        repo, spec_file, _ = self.task_spec("parallel worktrees")
         run_args = ("run", "--repo", repo, "--spec", spec_file)
-        first = self.cli(*run_args, actor=origin)["task_id"]
-        self.running[first] = origin
-        self.wait_for(lambda: self.cli("status", first, actor=origin),
+        first = self.cli(*run_args)["task_id"]
+        self.running[first] = None
+        self.wait_for(lambda: self.cli("status", first),
                       lambda _: (self.native / "ready.json").is_file())
-
-        busy = self.cli(*run_args, actor=origin, error=(4, "BUSY"))
-        second = busy["task_id"]
-        self.assertNotEqual(second, first)
-        reserved = self.cli("status", second, actor=origin)
-        self.assertEqual(reserved["next_step"], "ADMIT_INITIAL_RUN")
-        self.assertEqual([row["phase"] for row in reserved["run_history"]], ["reserved"])
-        run_id = reserved["execution"]["run_id"]
-        self.cli("resume", second, actor=origin, error=(4, "BUSY"))
-        stopped_reservation = self.cli(*run_args, actor=origin, error=(4, "BUSY"))["task_id"]
-        self.assertEqual(self.cli("stop", stopped_reservation, actor=origin)["status"], "stopped")
-        self.cli("resume", stopped_reservation, actor=origin, error=(3, "FORBIDDEN"))
-        reservation = self.cli("status", stopped_reservation, actor=origin)
-        self.assertEqual([row["phase"] for row in reservation["run_history"]], ["reserved"])
-        self.assertTrue(reservation["execution"]["stop_requested"])
-        self.assertEqual(len((self.native / "attempts").read_text().splitlines()), 1)
-
-        self.cli("stop", first, actor=origin)
-        stopped = self.wait_for(lambda: self.cli("status", first, actor=origin),
-                                lambda status: status["status"] == "stopped")
+        write(self.native, "mode", "normal")
+        second = self.cli(*run_args, "--foreground")
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(self.cli("status", first)["execution"]["state"], "active")
+        self.assertNotEqual(second["task_id"], first)
+        self.assertEqual((self.native / "attempts").read_text().splitlines(), [
+            self.store.load_task(task_id)["worktree"]["path"] for task_id in (first, second["task_id"])])
+        self.cli("stop", first)
+        stopped = self.wait_for(lambda: self.cli("status", first), lambda status: status["status"] == "stopped")
         self.assertTrue(stopped["execution"]["verified"])
         self.running.pop(first)
+
+    def test_failed_independent_check_is_retained_after_worker_completion(self):
+        self.install()
+        self.profile()
+        repo, spec_file, _ = self.task_spec("advisory checks", reviewer=True, host_handoff=True)
+        delivered = self.cli("run", "--repo", repo, "--spec", spec_file, "--foreground")
+        self.assertEqual((delivered["status"], delivered["reason"]), ("completed", "CHECKS_FAILED"))
+        self.assertEqual([row["state"] for row in delivered["checks"]], ["failed"])
+        self.assertTrue(delivered["checks"][0]["receipt_id"])
+        self.assertIsNone(delivered["review"])
+        self.assertEqual(self.cli("status", delivered["task_id"])["status"], "completed")
+
+    def test_resume_links_a_new_release_after_a_settled_worker_block(self):
+        self.install()
+        self.profile(mode="blocked")
+        repo, spec_file, _ = self.task_spec("cross-release resume")
+        result = self.cli("run", "--repo", repo, "--spec", spec_file, "--foreground", error=(4, "RUN_UNSETTLED"))
+        task_id = result["task_id"]
+        before = self.cli("status", task_id)
+        self.assertEqual(before["status"], "blocked")
+        old_run = before["execution"]["run_id"]
+        replacement = snapshot(self.root / "next source", executable=True, commit="d" * 40)
+        self.addCleanup(unseal, replacement)
+        release.activate(replacement, "d" * 40, release.scoped_paths(self.bin, self.store.home, self.store.native_home),
+                         self.root / "resume cutover")
         write(self.native, "mode", "normal")
-        requester = self.scoped(second, "9", "controller", agent_ref("1"), 1, "observe", "ask")
-        user = self.scoped(second, "a", "user", agent_ref("2"), 1, "observe", "answer")
-        request = self.cli("agent", "ask", second, "--kind", "decision", "--question", "Continue?",
-                           "--reason", "Fixture decision", "--continuation", "resume", actor=requester)["request_id"]
-        self.cli("answer", request, "--answer", "Proceed", actor=user)
-        resumed = self.cli("resume", second, actor=origin)
-        self.assertEqual(resumed["task_id"], second)
-        self.running[second] = origin
-        resumed = self.wait_for(lambda: self.cli("status", second, actor=origin),
-                                lambda status: status["status"] == "completed",
-                                terminal={"blocked", "cleanup_blocked", "delivery_unknown"})
-        self.running.pop(second)
-        self.assertEqual((resumed["task_id"], resumed["status"]), (second, "completed"))
-        self.assertEqual(resumed["execution"]["run_id"], run_id)
-        self.assertEqual([row["kind"] for row in resumed["run_history"]], ["initial"])
-        record = self.store.load_task(second)
-        self.assertTrue(any(row["request"]["request_id"] == request and row["consumption"]
-                            for row in self.host.interaction._rows(record)))
-        self.cli("resume", second, actor=origin, error=(3, "FORBIDDEN"))
-        scoped = self.scoped(second, "8", "controller", agent_ref("1"), 1, "observe", "resume")
-        self.cli("resume", second, actor=scoped, error=(4, "NOT_RESUMABLE"))
-        attempts = (self.native / "attempts").read_text().splitlines()
-        self.assertEqual(attempts, [self.store.load_task(task_id)["worktree"]["path"]
-                                    for task_id in (first, second)])
+        self.cli("resume", task_id)
+        self.running[task_id] = None
+        status = self.wait_for(lambda: self.cli("status", task_id), lambda value: value["status"] == "completed")
+        self.running.pop(task_id)
+        self.assertEqual([row["kind"] for row in status["run_history"]], ["initial", "resume"])
+        task = self.store.load_task(task_id)
+        previous, _ = self.store._run(task, old_run)
+        current, _ = self.store._run(task, task["run_id"])
+        self.assertNotEqual(previous["runtime_seal"], current["runtime_seal"])
 
     def test_unknown_worker_result_fences_explicit_resume_without_replay(self):
         self.install()

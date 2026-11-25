@@ -30,9 +30,9 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ato_release_lib import (
     LEGACY, MANIFEST, PATH, SURFACE, ObserverProbe, Refused, command, file_record, host_tool,
-    inventory, is_legacy_observer, launcher_bytes, mailbox, mailbox_copy, mailbox_counts, mailbox_exists,
+    inventory, is_legacy_observer, launcher_bytes, mailbox, mailbox_copy, mailbox_exists,
     observer_argv, read, read_private, release_lock, require, safe_record, same_observer,
-    sha, verify_snapshot, verify_tools, with_leases,
+    sha, verify_snapshot, verify_tools,
 )
 
 
@@ -148,8 +148,8 @@ def launcher_sources(entries, *, allow_interpreter_change=False):
 
 
 @contextmanager
-def idle_boundary(state):
-    """Reserve writers only after the predecessor has exited; never change rows."""
+def mailbox_writer_boundary(state):
+    """Reserve the SQLite writer while publishing the launcher selection."""
     if not mailbox_exists(state):
         yield
         return
@@ -157,7 +157,6 @@ def idle_boundary(state):
     con = sqlite3.connect(path.as_uri()+'?mode=rw', uri=True, timeout=2)
     try:
         con.execute('begin immediate')
-        require(with_leases(con, mailbox_counts(con))['idle'], 'mailbox is not idle; no replay or queue draining')
         yield
     finally:
         con.rollback()
@@ -583,13 +582,12 @@ def inspect(paths, system, target=None, *, allow_interpreter_change=False):
         require(cfg.get('enabled') is True and cfg.get('hub_thread') == hub.get('thread_id'),
                 'legacy observer policy or binding is inconsistent')
     mailboxes = {key: mailbox(paths[key]) for key in ('legacy_state', 'unified_state')}
-    blockers = active_tasks(paths, system, sources | ({'target': target} if target else {}))
+    activity = active_tasks(paths, system, sources | ({'target': target} if target else {}))
+    blockers = []
     selected = sources.get(PUBLIC)
     if (target and selected and not mixed
             and all(selected[key] == target[key] for key in ('root', 'python', 'seal'))):
         blockers.append('snapshot is already selected')
-    if not all(box['idle'] for box in mailboxes.values()):
-        blockers.append('mailbox is busy; release does not drain or replay it')
     if observer:
         config = paths['ato_home']/'unified-v1/host/observation.json'
         if 'observation' not in policy or read_private(config).get('enabled') is not True:
@@ -597,7 +595,7 @@ def inspect(paths, system, target=None, *, allow_interpreter_change=False):
         elif not mailbox_exists(paths['unified_state']):
             blockers.append('target observer has no selected mailbox')
     return dict(entries=entries, sources=sources, mixed_sources=mixed, observer=observer,
-                observer_source=source, mailboxes=mailboxes, policies=policy, blockers=blockers)
+                observer_source=source, mailboxes=mailboxes, policies=policy, activity=activity, blockers=blockers)
 
 
 def entry_set(source):
@@ -632,20 +630,16 @@ def _matches_entries(paths, journal):
                 'entrypoint changed outside this transaction: ' + name)
 
 
-def _quiescent(paths, system, journal):
+def _verify_cutover(paths, journal):
     _matches_entries(paths, journal)
     require(policy_identity(paths) == journal['before']['policies'], 'release policies changed')
-    blockers = active_tasks(paths, system, journal['before']['sources'] | {'target': journal['target']})
-    require(not blockers, 'task activity at the release boundary: ' + '; '.join(blockers))
-    require(all(mailbox(paths[key])['idle'] for key in ('legacy_state', 'unified_state')),
-            'mailbox is busy; release does not drain or replay it')
 
 
 @contextmanager
 def _writer_boundaries(paths):
     with ExitStack() as stack:
         for key in ('legacy_state', 'unified_state'):
-            stack.enter_context(idle_boundary(paths[key]))
+            stack.enter_context(mailbox_writer_boundary(paths[key]))
         yield
 
 
@@ -707,7 +701,7 @@ def _restore_preflight(journal, paths, system):
         verify_source(source)
     verify_source(journal['target'])
     if journal['state'] != 'rolled_back':
-        _quiescent(paths, system, journal)
+        _verify_cutover(paths, journal)
     observer = _observers(paths, journal, system)
     old = journal['before']['observer']
     restored = journal.get('rollback_observer')
@@ -731,8 +725,6 @@ def restore(path, journal, paths, system, *, preflight=None):
         require((current is None and not keep) or (keep and current and same_observer(current, observer)),
                 'observer changed at rollback boundary')
         require(policy_identity(paths) == journal['before']['policies'], 'release policies changed')
-        require(not active_tasks(paths, system, journal['before']['sources'] | {'target': journal['target']}),
-                'task activity at rollback boundary')
         _write_entries(path, journal, paths, journal['before']['entries'])
         journal['state'] = 'entries_restored'
         save(path, journal)
@@ -762,7 +754,7 @@ def activate(root, commit, paths, transaction, system=None, *, converge_mixed=Fa
                        after_entries=entry_set(target), target=target)
         save(path, journal)
         try:
-            _quiescent(paths, system, journal)
+            _verify_cutover(paths, journal)
             require(entrypoints(paths['bin_dir']) == before['entries'], 'entrypoints changed during preparation')
             observed = _observers(paths, journal, system)
             same = observed is None if before['observer'] is None else same_observer(observed or {}, before['observer'])
@@ -777,8 +769,6 @@ def activate(root, commit, paths, transaction, system=None, *, converge_mixed=Fa
                 for source in before['sources'].values():
                     verify_source(source)
                 require(policy_identity(paths) == before['policies'], 'release policies changed')
-                require(not active_tasks(paths, system, before['sources'] | {'target': target}),
-                        'task activity at cutover boundary')
                 _write_entries(path, journal, paths, journal['after_entries'])
             journal['state'] = 'entries_switched'
             save(path, journal)

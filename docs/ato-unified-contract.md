@@ -149,8 +149,8 @@ No added parser or schema dependencies.
 | `schema_version` | Required integer `1`. |
 | `repo` | Required path, matched by canonical Git identity to `--repo`. Freeze the primary worktree path and Git common directory. |
 | `base_ref` | Required nonblank Git ref/commit selector, at most 255 bytes, without leading option characters, control characters or shell expansion. Resolve locally to exactly one full Git commit at admission. Use the full commit for every later base comparison and worktree creation. |
-| `worker_contract` | Required Workflow object. Required nonblank `objective`, `scope`, `authorization` (bounded to 8 KiB each) and `acceptance`. `authorization` is descriptive. The trusted submission separately binds verified authorization for the proposed operation. Optional `agent`, `sandbox`, `permissions`, `execution_policy`, `host_handoff`, `budget`, `stages`, `limits`, `memory` use the existing schemas. `memory` defaults to false and must be false in the isolated lane. Default Worker is the code-owned Codex adapter. Select the model in `agent.model`. |
-| `reviewer` | Omitted or null disables technical review. Otherwise require `agent: {kind, model?, effort?}`. Optional `allowed_kinds` defaults to that kind alone and must include it. `session_mode` accepts `fresh_only` (default), `resume_if_supported` or `require_resume`. `max_review_rounds` defaults to 1 (1–20), `timeout_seconds` to 300 (1–3600), `checklist` and `design_docs` to empty lists (each at most 128). Use H1 agent/model/effort and text validation. Freeze each permitted design-doc path and digest from the base, with no symlink or outside reference. |
+| `worker_contract` | Required Workflow object. Required nonblank `objective`, `scope`, `authorization` (bounded to 8 KiB each) and `acceptance`. `authorization` is descriptive. The trusted submission separately binds verified authorization for the proposed operation. Optional `agent`, `sandbox`, `permissions`, `execution_policy`, `host_handoff`, `budget`, `stages`, `limits`, `memory` use the existing schemas. `memory` defaults to false and must be false in the isolated lane. The Codex Worker uses the submitting controller configuration. |
+| `reviewer` | Omitted or null disables technical review. Otherwise require `agent: {kind, model?, effort?}`. Optional `allowed_kinds` defaults to that kind alone and must include it. `session_mode` accepts `fresh_only` (default), `resume_if_supported` or `require_resume`. `max_review_rounds` defaults to 1 (1–20), `timeout_seconds` to 300 (1–3600), `checklist` and `design_docs` to empty lists (each at most 128). Use H1 agent/model/effort and text validation. Freeze each permitted design-doc path and digest from the base, with no symlink or outside reference. Ordinary ATO completion does not invoke the Reviewer. |
 | `worktree` | Optional object with only `shared_env_links` (default empty, unique names). Worktree parent is host-selected, defaulting to the primary repo's parent. A generated branch under `ato/TASK_ID` and the generated external worktree path are reserved for that Task. Callers cannot select a branch, reuse a worktree or choose an executable via the spec. |
 
 `acceptance` requires one or more independent `command` criteria. A
@@ -162,14 +162,11 @@ frozen commands as part of task authorization. Generated Worker stages can
 select declared check IDs but cannot invent host commands. For explicit
 `stages`, use Workflow's `{id,covers,plan}` and Runner's step DAG. Stage
 checks must be selected from the command argv in the covered criteria, and
-at least one command criterion is covered per stage. A stage inherits Worker,
-sandbox, memory, actions, grants and ceilings from the task. Reject attempts
-to override them and duplicate/unknown dependencies. Only the first
-implementation stage must run regardless of green baseline checks. As in T0,
-if no stage was supplied, the frozen objective and independent command checks
-generate one initial stage during normalization. Freeze the derived plan,
-its stable ID and check selection. Once the first implementation is recorded,
-the existing Workflow selects subsequent steps and applies cumulative limits.
+at least one command criterion is covered per stage. Reject duplicate and
+unknown dependencies. ATO executes the declared stages and records the final
+independent checks separately. If no stage was supplied, the frozen objective
+and command checks generate one initial stage during normalization. Freeze its
+derived plan, stable ID and check selection.
 
 Example input beside the repository's source files:
 
@@ -207,11 +204,10 @@ metadata only.
 ## Authority, credentials and roles
 
 The owner of the private ATO state can use the sealed local CLI to submit and
-manage local Tasks without a proof file. This applies to `run`, `list`,
+manage Tasks in that state root without a proof file. This applies to `run`, `list`,
 `status`, `stop`, `resume`, `accept`, `project trace`, `project recheck`,
-`project cleanup` and `agent binding`. Local control follows the Task's
-current controller binding. Sessions under the same OS account share this
-local controller identity. Each Task records the submitting local account,
+`project cleanup` and `agent binding`. Sessions under the same OS account
+share the local operator identity. Each Task records the submitting local account,
 canonical repository and frozen spec digest. A caller with an explicit
 `ATO_ACTOR_FILE` uses that actor's scope.
 
@@ -221,8 +217,8 @@ record selects the original conversation for completion notices.
 The session working directory and the submitted repository are independent.
 This routing metadata grants no actor authority and changes no controller
 or acceptance binding. An explicit submission proof can resume an untouched
-initial Run reservation. Subsequent Runs require a current scoped controller
-proof. See [host setup](ato-host-setup.md#completion-notices-for-local-tasks).
+initial Run reservation. Scoped callers use their current controller proof
+for subsequent Runs. The local operator can resume from the sealed local CLI. See [host setup](ato-host-setup.md#completion-notices-for-local-tasks).
 
 An authenticated actor is a verified local CLI or trusted adapter principal.
 For scoped operations, the CLI selects a private actor file through
@@ -275,20 +271,16 @@ Credential files are bounded, owner-checked, regular, single-link, mode
 `0600` in a private `0700` directory, outside every repo/worktree and
 model-readable area. Use the existing verified scoped credential and
 endpoint machinery with hashed stored secrets and no public proof fields.
-Native homes and executables are resolved by code-owned host profiles, with
-absolute checked paths and adapter-specific admission. Start with isolated
-private native homes and a minimal allowlisted environment for Worker,
-Reviewer and checks. Scrub environment proxies, loader and Python import
-paths, inherited actor and session variables, provider keys and runtime
-overrides. No vendor-home inheritance, raw secrets in JSON, keys in argv or
-copying into the worktree. The trusted host alone may supply an explicit
-verified native home or a credential-free numeric-loopback proxy according
-to applicable consent and adapter policy. No remote proxy, userinfo, path
-or query in that proxy location. Home/profile selection must not overlap
-ATO state or any repo or grant cross-role credential access. Review or worker
-qualification and real provider permission remain separate from a binary's
-availability. The offline harness injects fake adapters by trusted code and
-uses temporary ATO and native homes throughout. See the
+Each Worker runs a new Codex turn in its Task worktree. It loads the controller's
+Codex home and applies model, effort, approvals and sandbox settings available in
+its verified native turn. If the turn is unavailable, Codex loads the account
+configuration. Independent check commands start in the Task worktree under the
+launching account's environment and system permissions. They use the account's
+package and Docker configuration, including its selected daemon or context.
+Task actor proofs, private bootstrap variables and the controller thread ID are
+kept out of these subprocesses. Historical H1 Reviewer adapters have their own
+read-only profiles. The offline harness uses temporary ATO and native homes.
+See the
 [H1 offline boundaries](h1-offline-implementation.md),
 [worker grants](worker-permissions-and-handoffs.md),
 [action ownership](worker-action-policy.md) and
@@ -449,10 +441,10 @@ that Run.
 | `stopping` → `stopped` | STOP recorded. Transition only after the owner, workers, reviewer, checks and relevant native children have verified cleanup or absence. A blocked cleanup returns `cleanup_blocked` instead. |
 | `preparing` | A creation intent exists, possibly with partial links. A verified full creation may proceed to launch. Interrupted ambiguous provisioning stays fenced. |
 | `launching` → `running` | Durable launch intent, then exact live owner and startup receipt. A proven pre-effect failure becomes `blocked` with `LAUNCH_FAILED`. An unverified outcome remains fenced. |
-| `checking` → `reviewing` | Independent checks hold execution ownership. Required review starts only once the checks pass for the same product. Blockers can use bounded repair under the frozen checks and cumulative history. |
+| `checking` | Independent checks run after the Worker stages and retain their exit evidence. |
 | `waiting` / `needs_input` / `needs_host` | Bounded external wait, an actual pending human request, or an authorized frozen host handoff respectively. Display current Run activity separately. A response, process exit or handoff read does not mean execution resumed. |
 | `blocked` | Verified failure, policy/limit barrier, unavailable required checks/review, or invalidated product/evidence. Keep existing counts and report specific reason. No automatic resume from an unknown state or a Reviewer mutation. |
-| `completed` | Execution and cleanup settled, current product and independent checks verified, and any required technical review passed. Earlier successful Run receipts labelled `needs_acceptance` use the same projection. An optional human receipt is tracked separately. |
+| `completed` | Worker execution and cleanup settled, and the current product and check receipts are verified. A failed independent check appears separately as `CHECKS_FAILED`. Ordinary completion does not require a Reviewer or human receipt. |
 
 Explicit worktree cleanup is a lifecycle field
 `worktree_state: "present" | "removed"` in status, separate from acceptance
@@ -465,51 +457,20 @@ a user receipt.
 
 ## Execution, STOP and recovery
 
-T3 uses the H1 driver techniques around the original Workflow and Runner. The
-same driver admits initial work, recovery, authorized host checks, review and
-bounded repair. Background and foreground differ only in whether the caller
-waits after admission. Publish an intent and verify an exact startup receipt
-containing Task, Run, source seal, PID with birth identity and generation
-fence. If the child already settled, use its verified terminal receipt for
-that same Run. Acquire the canonical repo gate for orchestration across linked
-worktrees, then the existing worktree flock and durable kernel execution
-lease as appropriate. The outer repo gate is serialization, never a second
-lease. Nested stage workers use their parent's ownership and guard. When
-a lease is released between kernel steps, keep orchestration serialized and
-recheck ownership and activity before the next step. An active or unverified
-native owner bars new execution even when a flock is free.
-[Baseline execution fixes](ato-unified-baseline.md) ·
-[Workflow](../workflow.py) · [H1 execution composition](../hub_loop.py)
+The driver uses the original Workflow and Runner. Background and foreground
+differ only in whether the caller waits after admission. The driver verifies
+an exact startup receipt with Task, Run, source seal, process birth identity
+and generation. Worktree locks and the kernel lease protect the selected
+worktree. Tasks with distinct worktrees in the same repository can run
+concurrently.
 
-Reuse the first-stage preseed discipline, then preserve the existing
-technical acceptance/plan flow. Preflight adapter capability, path and
-authorization limits before starting an attempt. Independent host checks
-and review are admitted under the same repository gate and lease. Original
-check argv, caps and execution policy stay frozen. Review follows successful
-checks only. Reuse the H1 read-only per-adapter profile, bounded structured
-verdict, before/after integrity snapshot and repeat-blocker fingerprint. A
-valid `request_changes` with actionable blockers can trigger only bounded
-repair and rechecking within the same Task. Repeated same-product blockers,
-round exhaustion and reviewer mutation are hard barriers. Use the current
-verified Reviewer binding when the next review starts, then fence it for that
-turn. A captured verdict may be used only with the existing required product
-and review revision. With unknown resume support, `resume_if_supported` starts fresh and
-`require_resume` returns `UNSUPPORTED_CAPABILITY`. Resolve native session IDs
-only through their recorded adapter, role and workspace.
-
-Rechecks, repairs, wait handling and cleanup preserve cumulative time,
-attempts, stages, planning limits, supervision counts and history. In the
-new namespace elapsed time is advisory by default. Pin the verified time
-policy revision at Task admission. The trusted host can select an enforced
-policy with explicit authorization before admission. Refuse policy drift
-that would change the authority or limits of an existing Task. Retain the
-existing per-attempt/check timeouts, bounded waits, resource limits and any explicit
-per-action grants in either mode. A prior Run or Workflow receipt records
-spent attempts/time before another is linked. A repair Workflow must inherit
-remaining authority and limits and link the previous receipts. A new
-directory or Run carries the same history. Adopt the current no-progress and
-repeated-failure protections.
-[Adaptive budgets](adaptive-budgets.md) · [Read-only review boundaries](h1-offline-implementation.md)
+Run each declared stage, then record independent checks against the resulting
+product. Check outcomes and any optional human acceptance remain separate from
+Worker completion. ATO records elapsed time and cumulative attempts without
+using either to halt a new unified Run. Check commands remain reproducible
+from the original spec. A STOP or a real unresolved execution outcome remains
+visible, and the next Run records its own identity and source seal.
+[Baseline execution fixes](ato-unified-baseline.md) · [Workflow](../workflow.py)
 
 STOP is a short Task-level mutation. An already completed Task returns its
 existing status. On other Tasks with an admissible stop transition, it
@@ -960,21 +921,19 @@ existing snapshot stage/dry-run/activate/rollback distinctions. Read-only
 diagnostics create no runtime, lock or policy side effects. Stage and
 qualification use temporary isolated state and existing pinned optional
 dependencies with fake local CLI/backends. Publishing source, stage success
-or installing a launcher cannot activate a runtime. Real cutover needs a
-separate operator instruction and a verified disposition of active work.
+or installing a launcher cannot activate a runtime. Real cutover needs a separate operator instruction.
 
-An authorized cutover checks the selected legacy and unified namespaces
-for active Tasks and native processes, observer identity/heartbeat and
-busy or queued/claimed/dispatching/unknown mailbox work, including live
-turn slots. A busy or unverifiable boundary refuses. No drain, forced
-quiescence or replay. Bind the transaction to the approved bin/state
+An authorized cutover reports active Tasks, native processes, mailbox activity
+and turn slots in its diagnostics. Existing Runs continue under their sealed
+source. The transaction preserves queue rows and checks the selected observer
+identity and heartbeat. Bind the transaction to the approved bin/state
 paths and both exact snapshots/interpreters. Record prior existence,
 bytes, permissions and checksums independently for `ato`, `ctask`,
 `ctask-notify`, `ato-read-handoff` and `ato-hub`, as applicable. For
 mixed selections record each prior source and require explicit
 convergence authorization. Record old/new observer commands with exact
 PID birth identities or verified absence, expected state roots, policy evidence, and durable
-progress through quiescence and entrypoint writes. Stop only the verified
+progress through observer handoff and entrypoint writes. Stop only the verified
 owned old observer gracefully, reserve the mailbox writer boundary and
 recheck. Publish the single new launcher and remove only the recorded
 superseded entries. Atomic single-file replacements and a private,
@@ -984,13 +943,12 @@ exact observer identity and advancing heartbeat when observation was
 authorized, and confirm the policies and namespaces. Never enable a new
 observer or user route as a side effect of installation.
 
-Rollback uses the same transaction and both namespaces. Verify quiescence
-and identities again, reconcile the journal against actual files, restore
+Rollback uses the same transaction and both namespaces. Verify identities
+again, reconcile the journal against actual files, restore
 each recorded original executable's bytes and mode, remove only
 transaction-created entries, and restore the previous authorized observer
 with its recorded original interpreter/source/namespace. Repeat rollback
-idempotently. A replaced file, ambiguous observer, busy mailbox or
-unavailable prior seal leaves a recovery-required receipt instead of
+idempotently. A replaced file, ambiguous observer or unavailable prior seal leaves a recovery-required receipt instead of
 overwriting or signaling an unrelated object. Retain the unified
 Task/Run/evidence data and worktrees as diagnostics. A restored legacy
 observer uses the original state namespace. No rollback replays native

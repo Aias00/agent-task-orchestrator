@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 
@@ -30,7 +31,7 @@ _CREDENTIAL = re.compile(r"credential-[0-9a-f]{32}")
 _SESSION = re.compile(r"agentref-[0-9a-f]{32}")
 _ROLE = {"controller": "origin", "interaction": "hub", "user": "user"}
 _LOCAL_OPERATIONS = frozenset({"initial", "observe", "stop", "resume", "recheck",
-                               "trace", "cleanup", "binding"})
+                               "trace", "cleanup", "binding", "reconcile"})
 _SUBMISSION_OPERATIONS = frozenset({"initial", "observe", "stop", "trace", "cleanup", "binding"})
 ACCEPTANCE_NOTIFICATIONS = "acceptance-notifications"
 
@@ -64,7 +65,8 @@ class Host:
             return self.profile
         row = self.record("profile")
         if row is None:
-            return None
+            worker = shutil.which(os.environ.get("CTASK_CODEX_BIN", "codex"))
+            return HostProfile(str(Path(worker).resolve()), str(self.store.native_home)) if worker else None
         _fields(row, ("worker_executable", "worker_home", "review_tools", "proof_roots"))
         return HostProfile.from_document(dict(row, fixture=False))
 
@@ -228,24 +230,20 @@ class Host:
         return grant
 
     def can_observe(self, actor, scope, *, handoff=False):
-        local = None
         if actor is self._local_owner:
-            local = self._local_scope_binding(scope)
-            if local is None:
-                return False
-        else:
-            row = self._actor_row(actor)
-            if row is None:
-                return False
-            scoped = row.get("scope") is not None
-            if scoped and (row["scope"] != asdict(scope) or "observe" not in row["operations"]):
-                return False
-            if not scoped and self._submitted(row, scope) is None:
-                return False
-            role = "controller" if row["role"] == "controller" else "interaction"
-            if not self.endpoint_grant(row["reference"], scope, role, row.get("binding_revision", 1),
-                                       historical=handoff):
-                return False
+            return True
+        row = self._actor_row(actor)
+        if row is None:
+            return False
+        scoped = row.get("scope") is not None
+        if scoped and (row["scope"] != asdict(scope) or "observe" not in row["operations"]):
+            return False
+        if not scoped and self._submitted(row, scope) is None:
+            return False
+        role = "controller" if row["role"] == "controller" else "interaction"
+        if not self.endpoint_grant(row["reference"], scope, role, row.get("binding_revision", 1),
+                                   historical=handoff):
+            return False
         try:
             task = self.store.load_task(scope.task_id)
             binding = read_binding(self.store, task, self.store.load_spec(scope.task_id))
@@ -253,8 +251,6 @@ class Host:
             # Scope is already verified. The projection reports damaged state
             # without disclosing unrelated scope records.
             return exc.code in {"STATE_CORRUPT", "SPEC_CHANGED"}
-        if local is not None:
-            return binding["controller_ref"] == local.controller_ref
         route = "controller_ref" if row["role"] == "controller" else "interaction_ref"
         # A prospective controller needs observation to record an authorized
         # handoff. Its operation grant remains fenced inside BindingService.
@@ -271,10 +267,7 @@ class Host:
 
     def actor_grant(self, actor, scope, binding, operation):
         if actor is self._local_owner:
-            local = self._local_scope_binding(scope)
-            if local and binding["controller_ref"] == local.controller_ref:
-                return BindingGrant(scope, local.controller_ref, "controller", binding["revision"], _LOCAL_OPERATIONS)
-            return None
+            return BindingGrant(scope, binding["controller_ref"], "controller", binding["revision"], _LOCAL_OPERATIONS)
         row = self._actor_row(actor)
         if row is None:
             return None

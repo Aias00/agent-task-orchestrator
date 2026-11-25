@@ -42,7 +42,9 @@ class Application:
             finally:
                 host.close_mailbox_snapshot()
         with installed_boundary(seal):
-            return Application(host)._dispatch(args)
+            pass
+        # A command that has verified its immutable release can finish after cutover.
+        return Application(host)._dispatch(args)
 
     def _dispatch(self, args):
         operation = args.operation
@@ -64,7 +66,7 @@ class Application:
             principal = host.store._principal(proof)
             _, task, _, _ = api._locate(principal, args.request_id)
             _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
-        elif operation == "resume" or subcommand in {"handoff", "reviewer", "recheck", "ask"}:
+        elif subcommand in {"handoff", "reviewer", "ask"}:
             principal = host.store._principal(proof)
             observe = host.binding.handoff_observe if subcommand == "handoff" else None
             _require(host.store._visible_scope(args.task_id, principal, observe=observe) is not None, "NOT_FOUND")
@@ -75,13 +77,7 @@ class Application:
         if operation == "list":
             return host.store.list_tasks(proof, getattr(args, "repo", None))
         if operation == "status":
-            status = api.task_status(proof, args.task_id)
-            task = host.store.load_task(args.task_id)
-            if (host.store.runtime_seal is not None and status["status"] != "completed"
-                    and not task["worktree_removed"]
-                    and task["creation"]["runtime_seal"] != host.store.runtime_seal):
-                status.update(reason="RUNTIME_MISMATCH", next_step="SELECT_TASK_RUNTIME")
-            return status
+            return api.task_status(proof, args.task_id)
         if operation == "stop":
             result = host.execution.request_stop(proof, args.task_id)
             return api.task_status(proof, result["task_id"])
@@ -265,7 +261,7 @@ def doctor(host, *, probe_versions=False):
             adapter = FACTORIES[kind]
             reviewers[kind] = capability(kind, path, adapter.expected_version)
             reviewers[kind]["capabilities"] = adapter.capabilities().values
-    worker.update(local_ready=worker["available"] and sandbox)
+    worker.update(local_ready=worker["available"])
     sessions = {kind: agents.registry.session_capabilities(kind).to_mapping()
                 for kind in agents.registry.kinds()}
     return dict(worker=worker, reviewers=reviewers, reviewer_kinds=sorted(FACTORIES),

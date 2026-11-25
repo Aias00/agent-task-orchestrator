@@ -3,8 +3,6 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
-import pwd
-from tempfile import TemporaryDirectory
 import uuid
 
 import ato_core
@@ -44,7 +42,6 @@ class HostProfile:
     def proof_directories(self, store):
         roles = (Path(self.worker_home), *(Path(home) for _, _, home in self.review_tools))
         roots = tuple(hub_sandbox.private_dir(Path(path)) for path in self.proof_roots)
-        _require(bool(roots) or self.fixture, "UNSUPPORTED_CAPABILITY")
         _require(len(set(roots)) == len(roots) and not any(
             _overlaps(path, other) for path in roots
             for other in (store.home, *store.native_homes, *roles)
@@ -61,23 +58,23 @@ class HostProfile:
                      Path(task["worktree"]["common_dir"]), Path(__file__).resolve().parent)
         self.verify_configuration(store, protected=protected)
         if work:
-            contract = spec["worker_contract"]
-            _require(contract["agent"]["kind"] == "codex"
-                     and contract["sandbox"] in {"workspace-write", "read-only"}
-                     and not contract.get("permissions"), "UNSUPPORTED_CAPABILITY")
+            _require(spec["worker_contract"]["agent"]["kind"] == "codex", "UNSUPPORTED_CAPABILITY")
 
     def verify_configuration(self, store, *, protected=None):
         protected = protected or (store.home, Path(__file__).resolve().parent)
         _require(type(self.fixture) is bool, "UNSUPPORTED_CAPABILITY")
-        if not self.fixture:
-            _require(Path("/usr/bin/sandbox-exec").is_file(), "UNSUPPORTED_CAPABILITY")
         proof_roots = self.proof_directories(store)
         _require(not any(_overlaps(path, other) for path in proof_roots for other in protected),
                  "UNSUPPORTED_CAPABILITY")
         protected += (*store.native_homes, *proof_roots)
         homes = set()
-        for executable, home in [(self.worker_executable, self.worker_home),
-                                 *((tool, home) for _, tool, home in self.review_tools)]:
+        worker = Path(self.worker_executable)
+        _require(_absolute(self.worker_executable) and worker.is_file() and os.access(worker, os.X_OK),
+                 "UNSUPPORTED_CAPABILITY")
+        tools = [(tool, home) for _, tool, home in self.review_tools]
+        if self.fixture:
+            tools.append((self.worker_executable, self.worker_home))
+        for executable, home in tools:
             _require(_absolute(executable) and _absolute(home), "UNSUPPORTED_CAPABILITY")
             executable, home = Path(executable), Path(home)
             _require(not any(_overlaps(p, q) for p in (executable, home) for q in protected)
@@ -145,10 +142,12 @@ class _FixtureReview:
 class CommandHost:
     """Receipts precede launch and retain identities if cleanup is ambiguous."""
 
-    def __init__(self, driver, profile, folder):
+    def __init__(self, driver, profile, folder, controller_args=()):
         self.driver = driver
         self.profile = profile
         self.folder = folder
+        self.controller_args = tuple(controller_args)
+        self.advisory = not profile.fixture
         self.processes = {}
         self.cleanup_blocked = False
         self.unknown = False
@@ -192,69 +191,15 @@ class CommandHost:
             return True
         return False
 
-    @staticmethod
-    def before_attempt(owner, row):
+    def before_attempt(self, owner, row):
         # Runner retry resets only the local counter. The monotonic sequence
         # remains the upper bound for this step even on explicit recovery.
-        if row.get("attempt_sequence", row["attempts"]) >= owner.plan["limits"]["max_attempts"]:
+        if not self.advisory and row.get("attempt_sequence", row["attempts"]) >= owner.plan["limits"]["max_attempts"]:
             raise ato_core.Halt("limit")
 
     def unconfirmed_attempt(self):
         self.unknown = True
         raise ato_core.Halt("interrupted")
-
-    def _fence(self, argv, runtime, root, *, write):
-        if self.profile.fixture:
-            return argv
-        q = lambda path: json.dumps(str(path))
-        rules = ["(version 1)", "(allow default)", "(deny file-write*)", "(deny network*)",
-                 '(allow network-bind (local ip "localhost:*"))',
-                 '(allow network-inbound (local ip "localhost:*"))',
-                 '(allow network-outbound (remote ip "localhost:*"))',
-                 '(allow file-write* (literal "/dev/null") (subpath ' + q(runtime / "tmp")
-                 + ') (literal ' + q(runtime / "result.json") + ') (literal ' + q(runtime / "output.json") + '))']
-        if write:
-            rules.append("(allow file-write* (require-all (subpath " + q(root)
-                         + ") (require-not (literal " + q(root) + "))))")
-        binding = self.driver.task["worktree"]
-        for path in (root / ".codex", root / ".git", root / ".ato", runtime / "profile.sb",
-                     *(root / name for name in binding["shared_link_identities"]),
-                     *(Path(binding["repo"]) / name for name in binding["shared_link_identities"])):
-            rules.append("(deny file-write* (subpath " + q(path) + "))")
-        credential_paths = (".ssh", ".aws", ".gnupg", ".claude", ".gemini", ".pi",
-                            ".config/gh", ".config/gcloud", "Library/Keychains")
-        homes = {Path(pwd.getpwuid(os.getuid()).pw_dir), Path.home()}
-        rules.extend(hub_sandbox.read_denials(runtime, (
-            *self.profile.protected_reads(self.driver.store), root / ".codex/tasks",
-            *(home / name for home in homes for name in credential_paths))))
-        profile = runtime / "profile.sb"
-        hub_sandbox.write_private(profile, "\n".join(rules))
-        return ["/usr/bin/sandbox-exec", "-f", str(profile), *argv]
-
-    def _invoke(self, args, owner, runtime, environment, prompt, timeout, output, write):
-        def run(command):
-            return hub_sandbox.run(command, workspace=owner.repo, runtime=runtime,
-                environment=environment, prompt=prompt, timeout=timeout,
-                stop=lambda: self._command_stop(owner), truncate=True)
-
-        if self.profile.fixture:
-            return run(args)
-        root = owner.repo
-        if output is None:
-            return run(self._fence(args, runtime, root, write=write))
-        # Codex creates its own Seatbelt for command tools. Its frontend
-        # needs the private output and environment; tool subprocesses
-        # use a separate scratch path outside the protected ATO store.
-        binding = self.driver.task["worktree"]
-        with TemporaryDirectory(prefix="ato-codex-tool-") as scratch:
-            temporary = Path(scratch).resolve()
-            environment["TMPDIR"] = str(temporary)
-            mode = args.index("--sandbox")
-            args[mode:mode + 2] = hub_sandbox.guarded_codex_args(root, temporary,
-                writable=write, denied=(*self.profile.protected_reads(self.driver.store), root / ".codex/tasks"),
-                read_only=(root / ".git", root / ".codex", root / ".ato",
-                           *(root / name for name in binding["shared_link_identities"])))
-            return run(args)
 
     def command(self, owner, argv, name, timeout, input_text, agent_kind):
         owner.guard()
@@ -264,11 +209,16 @@ class CommandHost:
         runtime = self.runtime()
         tmp = runtime / "tmp"
         tmp.mkdir(mode=0o700)
-        home = self.profile.worker_home
-        environment = hub_sandbox.clean_environment(home, tmp, native_home=Path(home) / ".codex")
-        environment["GIT_OPTIONAL_LOCKS"] = "0"
+        if self.profile.fixture:
+            home = self.profile.worker_home
+            environment = hub_sandbox.clean_environment(home, tmp, native_home=Path(home) / ".codex")
+            environment["GIT_OPTIONAL_LOCKS"] = "0"
+        else:
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in {"ATO_ACTOR_FILE", "ATO_LAUNCH_SEAL", "ATO_LAUNCHER", "CODEX_THREAD_ID"}
+                           and not key.startswith("ATO_PRIVATE_")}
+            environment["CODEX_HOME"] = str(self.driver.store.native_home)
         output = None
-        write = True
         if agent_kind is not None:
             _require(agent_kind == "codex" and len(args) > 2 and args[1] == "exec",
                      "UNSUPPORTED_CAPABILITY")
@@ -285,17 +235,19 @@ class CommandHost:
             output = Path(args[destination])
             _require(output.parent == owner.dir / "checkpoints")
             args[destination] = str(runtime / "result.json")
-            write = args[args.index("--sandbox") + 1] == "workspace-write"
+            if not self.profile.fixture:
+                args = [self.profile.worker_executable, "exec", *self.controller_args,
+                        "--json", "--output-schema", str(safe_schema), "-o", str(runtime / "result.json"), "-"]
         executable = args[0]
-        # Resolve frozen relative paths from the actual worktree and use only
-        # the sanitized child PATH for unqualified executable names.
+        # Resolve frozen relative paths from the actual worktree. Bare
+        # command names use the PATH inherited by the Run driver.
         if "/" in executable and not Path(executable).is_absolute():
             args[0] = str(owner.repo / executable)
-        if output is None and not self.profile.fixture:
-            environment = hub_sandbox.clean_environment(tmp, tmp)
-            environment["GIT_OPTIONAL_LOCKS"] = "0"
-        environment["PATH"] = hub_sandbox.tool_path(self.profile.worker_executable, hub_sandbox.trusted_node.get())
-        result = self._invoke(args, owner, runtime, environment, input_text or "", timeout, output, write)
+        environment["PATH"] = hub_sandbox.tool_path(
+            self.profile.worker_executable, hub_sandbox.trusted_node.get(), inherit_path=True)
+        result = hub_sandbox.run(args, workspace=owner.repo, runtime=runtime,
+            environment=environment, prompt=input_text or "", timeout=timeout if self.profile.fixture else None,
+            stop=lambda: self._command_stop(owner), truncate=True)
         with log.open("xb") as stream:
             stream.write(result.stdout)
             stream.write(result.stderr)

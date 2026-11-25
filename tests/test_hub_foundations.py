@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -18,7 +17,7 @@ import hub_ledger as ledger
 import hub_sandbox as sandbox
 import hub_worktree as worktree
 from ato_execution_host import CommandHost, HostProfile
-from pi_toolchain import locate
+from codex_session_adapter import worker_config_args
 from hub_support import git,repository,runtime,spec,verdict
 
 
@@ -288,77 +287,47 @@ class HubFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "UNSAFE_REVIEW_FILE"):
             worktree.diff_bundle(binding)
 
-    def test_fixup_real_node_check_can_use_loopback_but_cannot_read_credentials_or_reach_external_ip(self):
-        node = locate("node")
-        home = self.root / "home"
-        home.mkdir(mode=0o700)
-        secret = home / ".ssh" / "fixture"
-        secret.parent.mkdir(mode=0o700)
-        secret.write_text("synthetic-secret")
-        gh = home / ".config/gh/hosts.yml"
-        gh.parent.mkdir(parents=True, mode=0o700)
-        gh.write_text("synthetic-token")
-        config = home / ".config/application.json"
-        config.write_text("{}")
-        store_home = self.root / "private-store"
-        store_home.mkdir(mode=0o700)
-        rt = store_home / "turn"
-        rt.mkdir(mode=0o700)
-        tmp = rt / "tmp"
-        tmp.mkdir(mode=0o700)
-        proof = self.root / "proof"
-        proof.mkdir(mode=0o700)
-        (rt / "schema.json").write_text("{}")
-        worker_home = self.root / "worker-home"
-        worker_home.mkdir(mode=0o700)
-        profile = HostProfile(str(node), str(worker_home), proof_roots=(str(proof),))
-        store = SimpleNamespace(home=store_home, native_homes=())
-        driver = SimpleNamespace(store=store, task={"worktree": dict(
-            repo=str(self.repo), shared_link_identities={})})
-        host = CommandHost(driver, profile, store_home)
-        js = """
-const fs = require('node:fs'), net = require('node:net');
-const [secret, credential, config, schema, port] = process.argv.slice(1);
-const can = (fn) => { try { fn(); return true; } catch (_) { return false; } };
-const observed = {
-    tmp: fs.realpathSync(process.env.TMPDIR),
-    secret: can(() => fs.readFileSync(secret)),
-    credential: can(() => fs.readFileSync(credential)),
-    config: can(() => fs.readFileSync(config)),
-    schema: can(() => fs.writeFileSync(schema, 'tampered')),
-    scratch: can(() => fs.writeFileSync(process.env.TMPDIR + '/writable', 'ok'))
-};
-const connect = (host, port) => new Promise((resolve) => {
-    const client = net.connect(port, host);
-    client.once('connect', () => { client.end(); resolve('connected'); });
-    client.once('error', (err) => resolve(err.code));
-    client.setTimeout(1000, () => { client.destroy(); resolve('timeout'); });
-});
-const server = net.createServer((client) => client.end());
-server.on('error', (err) => console.log(JSON.stringify({...observed, bind: err.code})));
-server.listen(0, '127.0.0.1', async () => {
-    observed.inbound = await connect('127.0.0.1', server.address().port);
-    observed.loopback = await connect('127.0.0.1', Number(port));
-    observed.external = await connect('192.0.2.1', 443);
-    server.close();
-    console.log(JSON.stringify(observed));
-});
+    def test_worker_config_uses_last_verified_codex_turn(self):
+        rollout = self.root / "rollout.jsonl"
+        rollout.write_text("\n".join(map(json.dumps, [
+            dict(type="turn_context", payload=dict(model="old-model")),
+            dict(type="turn_context", payload=dict(model="fixture-model", effort="high",
+                 approval_policy="never", sandbox_policy={"type": "danger-full-access"})),
+            dict(type="event_msg", payload=dict(model="ignored")),
+        ])))
+        with patch("codex_session_adapter.session_path", return_value=str(rollout)) as verified:
+            self.assertEqual(worker_config_args(self.root, "fixture-session"), [
+                "-c", 'model="fixture-model"', "-c", 'model_reasoning_effort="high"',
+                "-c", 'approval_policy="never"', "--sandbox", "danger-full-access",
+            ])
+            verified.assert_called_once_with(self.root, "fixture-session")
+
+    def test_independent_check_uses_host_environment_and_filesystem(self):
+        home = self.root / "host-home"
+        home.mkdir()
+        check = self.root / "check"
+        (check / "evidence").mkdir(parents=True)
+        folder = self.root / "turns"
+        folder.mkdir(mode=0o700)
+        store = SimpleNamespace(native_home=home / ".codex")
+        profile = HostProfile(sys.executable, str(self.root / "unused-worker-home"))
+        host = CommandHost(SimpleNamespace(store=store), profile, folder)
+        owner = SimpleNamespace(repo=self.repo, dir=check, guard=lambda: None,
+                                event=lambda *_args, **_kwargs: None)
+        code = """import json, os
+from pathlib import Path
+Path.home().joinpath('host-write').write_text('fixture')
+print(json.dumps({key: os.environ.get(key) for key in (
+    'HOME', 'CODEX_HOME', 'HTTP_PROXY', 'DOCKER_HOST', 'ATO_ACTOR_FILE')}))
 """
-        with self.enterContext(socket.socket()) as listener, patch.dict(os.environ, HOME=str(home)):
-            listener.bind(("127.0.0.1", 0))
-            listener.listen()
-            args = [str(node), "-e", js, str(secret), str(gh), str(config),
-                    str(rt / "schema.json"), str(listener.getsockname()[1])]
-            result = sandbox.run(host._fence(args, rt, self.repo, write=False), workspace=self.repo, runtime=rt,
-                environment=sandbox.clean_environment(tmp, tmp), timeout=8)
-        self.assertEqual(result.code, "OK", result.stderr)
-        facts = json.loads(result.stdout)
-        self.assertEqual(facts["tmp"], str(tmp))
-        self.assertTrue(facts["scratch"])
-        self.assertFalse(facts["secret"] or facts["credential"] or facts["schema"])
-        self.assertTrue(facts["config"])
-        self.assertEqual((facts["inbound"], facts["loopback"]), ("connected", "connected"))
-        self.assertEqual(facts["external"], "EPERM")
+        with patch.dict(os.environ, HOME=str(home), ATO_ACTOR_FILE="fixture-proof",
+                        HTTP_PROXY="http://proxy.invalid:8080", DOCKER_HOST="tcp://docker.invalid:2376"):
+            status, log = host.command(owner, [sys.executable, "-c", code], "host-check", 5, None, None)
+        output = Path(log).read_text()
+        self.assertEqual(status, 0, output)
+        self.assertEqual(json.loads(output), dict(HOME=str(home), CODEX_HOME=str(store.native_home),
+            HTTP_PROXY="http://proxy.invalid:8080", DOCKER_HOST="tcp://docker.invalid:2376", ATO_ACTOR_FILE=None))
+        self.assertEqual((home / "host-write").read_text(), "fixture")
 
     def test_O7_private_ledger_switch_rollover_and_immutable_spec(self):
         book=ledger.HubLedger.create(self.repo,contract.HubAgentSpec('agy'),max_turns=1)
