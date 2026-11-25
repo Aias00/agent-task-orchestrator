@@ -655,6 +655,7 @@ class ExecutionService:
         owner = _active_proof(self.store, run, receipts)
         if owner:
             _verify_exit(owner)
+        _require(proof.get("reason") != "REVIEWER_MUTATION_VIOLATION", "NOT_RESUMABLE")
         handoff = None
         if kind == "resume":
             retryable = _RETRYABLE if self.profile.fixture else _RETRYABLE | {"needs_host", "needs_input", "waiting"}

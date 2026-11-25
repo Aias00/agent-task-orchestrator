@@ -834,7 +834,7 @@ class InstalledATO(unittest.TestCase):
         repo, spec, bootstrap = self.submission("enrollment fixture", "1", "2", via_setup=True)
         work = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
         task = work["task_id"]
-        self.cli("status", task, error=(3, "NOT_FOUND"))
+        self.assertEqual(self.cli("status", task)["task_id"], task)
         controller = self.host_setup("scope", task, "--role", "controller")["proof"]
         user = self.host_setup("scope", task, "--role", "user")["proof"]
         ask = ("agent", "ask", task, "--kind", "decision", "--question", "Review this candidate?",
@@ -845,7 +845,7 @@ class InstalledATO(unittest.TestCase):
         self.cli("answer", request, "--answer", "Ready to review", actor=user)
         self.assertEqual(self.cli("inbox", actor=user)["items"], [])
         evidence = self.acceptance(work, "enrollment acceptance")
-        self.cli("accept", task, "--evidence", evidence, error=(3, "NOT_FOUND"))
+        self.cli("accept", task, "--evidence", evidence, error=(3, "FORBIDDEN"))
         self.cli("accept", task, actor=user, error=(2, "USAGE"))
         self.assertEqual(self.cli("accept", task, "--evidence", evidence, actor=user)["status"], "completed")
 
@@ -1198,6 +1198,7 @@ class InstalledATO(unittest.TestCase):
         self.profile()
         repo, spec_file, _ = self.task_spec("advisory checks", reviewer=True, host_handoff=True)
         delivered = self.cli("run", "--repo", repo, "--spec", spec_file, "--foreground")
+        self.assertEqual(len((self.native / "attempts").read_text().splitlines()), 1)
         self.assertEqual((delivered["status"], delivered["reason"]), ("completed", "CHECKS_FAILED"))
         self.assertEqual([row["state"] for row in delivered["checks"]], ["failed"])
         self.assertTrue(delivered["checks"][0]["receipt_id"])

@@ -258,14 +258,14 @@ class UnifiedExecutionTests(unittest.TestCase):
         unknown = self.service.start(self.actor, task, foreground=True)
         self.assertEqual(unknown["status"], "delivery_unknown")
         peer = self.create()
-        self.assert_error("RUN_UNSETTLED", self.service.start, self.actor, peer)
+        (self.worker_home / "mode").unlink()
+        self.assertEqual(self.service.start(self.actor, peer, foreground=True)["status"], "completed")
         self.assertEqual(execution.quarantine_task(self.store, task, "independent fixture check")["state"],
                          "quarantined")
         self.assertEqual(self.status(task)["reason"], "RUN_QUARANTINED")
         self.assert_error("NOT_RESUMABLE", self.service.resume, self.actor, task)
         self.assert_error("NOT_RESUMABLE", self.service.reconcile, self.actor, task)
-        (self.worker_home / "mode").unlink()
-        self.assertEqual(self.service.start(self.actor, peer, foreground=True)["status"], "completed")
+        self.assertEqual(self.status(peer)["status"], "completed")
 
     def test_batch2_failed_launch_preserves_previous_review_round_accounting(self):
         task = self.create(reviewer=dict(agent=dict(kind="codex"), max_review_rounds=1))
@@ -331,7 +331,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         (self.worker_home / "mode").unlink()
         self.assertEqual(self.service.resume(self.actor, task, foreground=True)["status"], "completed")
 
-    def test_two_simultaneous_launches_share_the_repository_gate(self):
+    def test_independent_worktrees_run_concurrently_but_each_task_has_one_driver(self):
         first, second = self.create(), self.create()
         (self.worker_home / "mode").write_text("linger")
         barrier = Barrier(2)
@@ -343,11 +343,11 @@ class UnifiedExecutionTests(unittest.TestCase):
                 return task, exc.code
         with ThreadPoolExecutor(2) as pool:
             results = list(pool.map(launch, (first, second)))
-        self.assertEqual(sorted(state for _, state in results), ["BUSY", "running"])
-        task = next(task for task, state in results if state == "running")
-        self.assert_error("BUSY", self.service.start, self.actor, task)
-        self.service.request_stop(self.actor, task)
-        self.wait_for(lambda: self.status(task), lambda status: status["status"] == "stopped")
+        self.assertEqual(results, [(first, "running"), (second, "running")])
+        for task in (first, second):
+            self.assert_error("BUSY", self.service.start, self.actor, task)
+            self.service.request_stop(self.actor, task)
+            self.wait_for(lambda: self.status(task), lambda status: status["status"] == "stopped")
 
     def test_stop_cleans_group_and_resume_preserves_identity_and_attempts(self):
         task = self.create()
@@ -394,8 +394,10 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.processes[-1].wait(timeout=5)
         self.assertEqual(self.status(task)["status"], "delivery_unknown")
         self.assert_error("RUN_UNSETTLED", self.service.resume, self.actor, task)
-        self.assert_error("RUN_UNSETTLED", self.service.start, self.actor, sibling)
         self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work"])
+        (self.worker_home / "mode").unlink()
+        self.assertEqual(self.service.start(self.actor, sibling, foreground=True)["status"], "completed")
+        self.assertEqual(self.status(task)["status"], "delivery_unknown")
 
     def test_unknown_worker_outcome_does_not_trigger_kernel_retry(self):
         task = self.create()
