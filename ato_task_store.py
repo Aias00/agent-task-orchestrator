@@ -366,6 +366,9 @@ def _retry_busy(method):
             except TaskError as exc:
                 if exc.code != "BUSY" or delay is None:
                     raise
+                refresh = getattr(args[0], "_refresh_read_snapshot", None)
+                if refresh is not None:
+                    refresh()
                 time.sleep(delay)
     return call
 

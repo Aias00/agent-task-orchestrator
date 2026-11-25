@@ -142,6 +142,31 @@ def _dispatch_selected(host, bus, route, endpoint, adapter, message, guard):
         bus.release_endpoint(route.target, owner)
 
 
+def _remove_terminal_cursor(host, message):
+    if message is None or message["state"] not in TERMINAL or message["busy"]:
+        return
+    key = "message-" + _sha(message["id"].encode()) + ".json"
+    try:
+        with host.store._private(host.folder / "observer-ledger") as fd:
+            os.unlink(key, dir_fd=fd)
+    except FileNotFoundError:
+        pass
+
+
+def _cancel_stale(host, service, task, phase, correlation):
+    _, notice = service._reservation(task, correlation, phase)
+    if notice is None:
+        return True
+    sender = host.delivery_sender(service._scope_record(task), notice)
+    if sender:
+        service.cancel_unsent(task, notice, sender)
+    message = service._message(task, notice)
+    _remove_terminal_cursor(host, message)
+    if message is None:
+        return notice["mailbox_id"] is None
+    return not message["busy"] and message["state"] not in {"queued", "claimed", "dispatching"}
+
+
 @_state_errors
 def _tick_task(host, service, task_id, cache=None):
     task, _, binding = service._task(task_id)
@@ -153,37 +178,33 @@ def _tick_task(host, service, task_id, cache=None):
     for phase, correlation in delivery_candidates(service, task):
         try:
             _, notice = service._reservation(task, correlation, phase)
-            if notice and (message := service._message(task, notice)) and message["state"] in TERMINAL:
-                if not message["busy"]:
-                    key = "message-" + _sha(message["id"].encode()) + ".json"
-                    try:
-                        with host.store._private(host.folder / "observer-ledger") as fd:
-                            os.unlink(key, dir_fd=fd)
-                    except FileNotFoundError:
-                        pass
             if notice and notice["binding_revision"] != binding["revision"]:
-                # A displaced reservation can be cancelled only by its
-                # original enrolled sender and before a possible native effect.
+                # Only the original enrolled sender can cancel a displaced reservation.
                 if not notice["superseded"] and (sender := host.delivery_sender(service._scope_record(task), notice)):
                     service.supersede_unsubmitted(task_id, correlation, phase, sender)
                 if phase != "question":
+                    settled &= _cancel_stale(host, service, task, phase, correlation)
                     continue
             result = service.dispatch_delivery(task_id, correlation, phase)
-            settled &= result in TERMINAL or result == "recorded_only"
+            if result in TERMINAL:
+                _, notice = service._reservation(task, correlation, phase)
+                if notice:
+                    message = service._message(task, notice)
+                    _remove_terminal_cursor(host, message)
+                    settled &= bool(message and not message["busy"])
+            else:
+                settled &= result == "recorded_only"
         except TaskError as exc:
-            settled = False
             if exc.code in {"STALE_REQUEST", "BINDING_CHANGED"}:
                 try:
-                    _, stale = service._reservation(task, correlation, phase)
-                    if stale:
-                        sender = host.delivery_sender(service._scope_record(task), stale)
-                        if sender:
-                            service.cancel_unsent(task, stale, sender)
+                    settled &= _cancel_stale(host, service, task, phase, correlation)
                 except (TaskError, MailboxError) as cleanup_error:
+                    settled = False
                     failure = failure or TaskError(getattr(cleanup_error, "code", "DELIVERY_UNKNOWN"))
-            if exc.code not in {"BUSY", "STALE_REQUEST", "BINDING_CHANGED",
-                                "PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
-                failure = failure or exc
+            else:
+                settled = False
+                if exc.code not in {"BUSY", "PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
+                    failure = failure or exc
     if failure:
         raise failure
     if settled and cache is not None:

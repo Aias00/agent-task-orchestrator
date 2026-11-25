@@ -16,6 +16,8 @@ from unittest.mock import Mock, patch
 from release_support import CURRENT, FakeSystem, legacy_entry, seal, snapshot, unseal, write
 from ato_core import ensure_private_dir
 import ato_release_lib
+import ato_seal
+from ato_task_store import TaskError
 from scripts import release_snapshot as release
 
 
@@ -42,6 +44,88 @@ class ReleaseTests(unittest.TestCase):
                     "create table messages(id text primary key,state text,busy int default 0);"
                     "create table execution_leases(state text);")
             db.chmod(0o600)
+
+    def test_fixup_installed_boundary_preserves_body_errors_and_fences_entry(self):
+        script = write(self.bin, 'ato', 'synthetic launcher', 0o700)
+        payload = script.read_bytes()
+        with patch.dict(os.environ, ATO_LAUNCHER=str(script)), \
+                patch.object(ato_seal, 'launcher_bytes', return_value=payload):
+            for error in (OSError('body'), RuntimeError('body'), BlockingIOError('body'), release.Refused('body')):
+                with self.subTest(error=type(error)), self.assertRaises(type(error)) as caught:
+                    with ato_seal.installed_boundary('fixture'):
+                        raise error
+                self.assertIs(caught.exception, error)
+            with release.release_lock(self.bin), self.assertRaises(TaskError) as caught:
+                with ato_seal.installed_boundary('fixture'):
+                    self.fail('locked boundary entered')
+            self.assertEqual(caught.exception.code, 'BUSY')
+            script.write_bytes(b'changed')
+            with self.assertRaises(TaskError) as caught:
+                with ato_seal.installed_boundary('fixture'):
+                    self.fail('changed launcher entered')
+            self.assertEqual(caught.exception.code, 'RUNTIME_MISMATCH')
+
+    def test_fixup_fast_snapshot_validates_venv_interpreters_and_config(self):
+        root = self.snapshot
+        unseal(root)
+        binary = root/'.venv/bin/python'
+        binary.chmod(0o700)
+        alias = binary.with_name('python3')
+        alias.symlink_to('python')
+        config = write(root, '.venv/pyvenv.cfg', 'synthetic config')
+        seal(root, CURRENT)
+        release.verify_snapshot(root, CURRENT, full=False)
+        for directory in (root/'.venv', binary.parent):
+            with self.subTest(directory=directory), self.assertRaisesRegex(release.Refused, 'interpreter directory'):
+                directory.chmod(0o755)
+                try:
+                    release.verify_snapshot(root, CURRENT, full=False)
+                finally:
+                    directory.chmod(0o555)
+            parent = directory.parent
+            relocated = directory.with_name(directory.name + '-relocated')
+            parent_mode = parent.stat().st_mode & 0o777
+            parent.chmod(0o700)
+            directory.rename(relocated)
+            directory.symlink_to(relocated.name, target_is_directory=True)
+            parent.chmod(parent_mode)
+            try:
+                with self.subTest(link=directory), self.assertRaisesRegex(release.Refused, 'interpreter directory'):
+                    release.verify_snapshot(root, CURRENT, full=False)
+            finally:
+                parent.chmod(0o700)
+                directory.unlink()
+                relocated.rename(directory)
+                parent.chmod(parent_mode)
+        binary.parent.chmod(0o700)
+        alias.unlink()
+        alias.write_bytes(binary.read_bytes())
+        alias.chmod(0o555)
+        binary.parent.chmod(0o555)
+        with self.assertRaisesRegex(release.Refused, 'interpreter link'):
+            release.verify_snapshot(root, CURRENT, full=False)
+        binary.parent.chmod(0o700)
+        alias.unlink()
+        alias.symlink_to('python')
+        binary.parent.chmod(0o555)
+        for file in (binary, config):
+            original = file.read_bytes()
+            mode = file.stat().st_mode & 0o777
+            with self.subTest(file=file), self.assertRaisesRegex(release.Refused, 'interpreter file'):
+                file.chmod(mode | 0o200)
+                try:
+                    release.verify_snapshot(root, CURRENT, full=False)
+                finally:
+                    file.write_bytes(original + b'tampered')
+                    file.chmod(mode)
+            with self.subTest(content=file), self.assertRaisesRegex(release.Refused, 'interpreter file'):
+                try:
+                    release.verify_snapshot(root, CURRENT, full=False)
+                finally:
+                    file.chmod(mode | 0o200)
+                    file.write_bytes(original)
+                    file.chmod(mode)
+        release.verify_snapshot(root, CURRENT, full=False)
 
     def message(self, state, status, busy=0):
         with closing(sqlite3.connect(state/'mailbox/state.sqlite')) as con, con:

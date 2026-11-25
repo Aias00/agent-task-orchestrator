@@ -82,11 +82,23 @@ def read_handoff(host, proof, ref):
 def delivery_candidates(service, task):
     if task["creation"]["phase"] != "ready":
         return []
+    candidates = _current_delivery_candidates(service, task)
+    selected = set(candidates)
+    for phase, correlation, notice in service._notice_files(task):
+        if phase in {"completion", "failure"} and (phase, correlation) not in selected:
+            message = service._message(task, notice)
+            if message and message["state"] == "queued":
+                candidates.append((phase, correlation))
+    return candidates
+
+
+def _current_delivery_candidates(service, task):
     candidates = []
     for row in service._rows(task):
         ref = row["request"]["request_id"]
-        candidates.append(("question", ref))
-        if row["answer"]:
+        if not row["answer"] or "question" in row["outbox"]:
+            candidates.append(("question", ref))
+        if row["answer"] and (not row["consumption"] or "answer" in row["outbox"]):
             candidates.append(("answer", ref))
     if published := service._completion_reservation(task):
         correlation, _, notice = published

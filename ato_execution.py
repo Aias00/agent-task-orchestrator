@@ -16,7 +16,7 @@ import ato_process
 import ato_product
 from ato_execution_host import CommandHost, HostProfile
 from ato_task_store import (DELIVERY_OUTCOMES, RunIntent, RunReceipt, TaskError, _directory, _existing,
-    _identity, _identifier, _locked_file, _publish, _read_file, _read_json, _regular, _require, _save,
+    _identity, _identifier, _locked_file, _publish, _read_file, _read_json, _regular, _require, _retry_busy, _save,
     _sha, _state_errors, _strict_json, _valid_id, canonical_json, new_id)
 import budget
 from hub_contract import HubAgentSpec, HubTurnRequest, blocker_fingerprint, validate_review_verdict
@@ -175,14 +175,14 @@ def _evidence(store, task_id, receipt):
     return _strict_json(store.read_evidence(task_id, receipt["evidence_sha256"]), "STATE_CORRUPT")
 
 
+@_retry_busy
 def _load_task(store, task_id):
-    for delay in (.005, .02, .05, .12, None):
-        try:
-            return store.load_task(task_id)
-        except TaskError as exc:
-            if exc.code != "BUSY" or delay is None:
-                raise
-            time.sleep(delay)
+    return store.load_task(task_id)
+
+
+@_retry_busy
+def _load_spec(store, task_id):
+    return store.load_spec(task_id)
 
 
 def _last_settlement(store, task, run, receipts):
@@ -606,6 +606,8 @@ class ExecutionService:
                         status, _ = self.store._project(latest, frozen)
                         if status["status"] == "completed":
                             break
+                    if _existing(fd, "cleanup.json") is not None and "product" in _read_json(fd, "cleanup.json"):
+                        break
                     current = _raw_stop(fd, latest)
                     if current and current["run_id"] == latest["run_id"] and current["epoch"] > latest.get("stop_retired_epoch", 0):
                         record = current
@@ -785,8 +787,12 @@ class ExecutionService:
                 launch["operation"] = "resume"
             def still_current(latest):
                 _require(latest["revision"] == task["revision"], "BUSY")
+            try:
+                node = self.profile.node(self.store, task)
+            except (OSError, ValueError):
+                self._launch_failed(run, validate=still_current)
             _publish_receipt(self.store, run, "launching", generation, launch, validate=still_current)
-            process = self._spawn(run, gate, nonce)
+            process = self._spawn(run, gate, nonce, node)
         # Gate ownership crossed exec on the same open-file description.
         try:
             self._await_start(run, process, launch)
@@ -797,15 +803,19 @@ class ExecutionService:
             process.poll()
             raise
 
-    def _spawn(self, run, gate, nonce):
-        try:
-            return self._spawn_child(run, gate, nonce)
-        except OSError:
-            _publish_receipt(self.store, run, "launch_failed", run["generation"],
-                             {"reason": "LAUNCH_FAILED", "cleanup_verified": True}, "launch_failed")
-            raise TaskError("LAUNCH_FAILED", run["task_id"]) from None
+    def _launch_failed(self, run, *, validate=None):
+        _publish_receipt(self.store, run, "launch_failed", run["generation"],
+                         {"reason": "LAUNCH_FAILED", "cleanup_verified": True}, "launch_failed",
+                         validate=validate)
+        raise TaskError("LAUNCH_FAILED", run["task_id"]) from None
 
-    def _spawn_child(self, run, gate, nonce):
+    def _spawn(self, run, gate, nonce, node):
+        try:
+            return self._spawn_child(run, gate, nonce, node)
+        except (OSError, ValueError):
+            self._launch_failed(run)
+
+    def _spawn_child(self, run, gate, nonce, node):
         runtime = _runtime_identity()
         capability = canonical_json(dict(task_id=run["task_id"], run_id=run["run_id"], nonce=nonce, gate=gate,
                                          seal=run["runtime_seal"]))
@@ -817,7 +827,6 @@ class ExecutionService:
             os.close(write_end)
             write_end = None
             command = [runtime["python"], "-IB", runtime["entry"], "run-child", run["task_id"], run["run_id"]]
-            node = self.profile.node(self.store, _load_task(self.store, run["task_id"]))
             tool_env = {"CTASK_NODE_BIN": str(node)} if node else {}
             return subprocess.Popen(command, cwd=_ENTRY.parent, env={
                 **tool_env, "PATH": hub_sandbox.tool_path(self.profile.worker_executable, node),
@@ -885,7 +894,7 @@ class _RunDriver:
     def __init__(self, store, run, launch, hooks, folder):
         self.store, self.run, self.launch, self.hooks = store, run, launch, hooks
         self.task_id = run["task_id"]
-        self.task, self.spec = _load_task(store, self.task_id), store.load_spec(self.task_id)
+        self.task, self.spec = _load_task(store, self.task_id), _load_spec(store, self.task_id)
         self.folder = folder
         self.profile = HostProfile.from_document(launch["profile"])
         self.host = CommandHost(self, self.profile, folder)
@@ -957,7 +966,7 @@ class _RunDriver:
         _require(_runtime_identity() == self.launch["runtime"] and self.store.runtime_seal == self.run["runtime_seal"]
                  and self.launch["roots"] == _roots(self.store),
                  "RUNTIME_MISMATCH")
-        current = self.store.load_task(self.task_id)
+        current = _load_task(self.store, self.task_id)
         _require(current["run_id"] == self.run["run_id"], "RUN_UNSETTLED")
         binding = _binding(self.hooks, current, self.spec)
         _require(binding["revision"] == self.launch["binding_revision"], "BINDING_CHANGED")
@@ -997,7 +1006,7 @@ class _RunDriver:
     @contextmanager
     def _owned_host(self, *, prepare=False):
         with _worker_lock(self.task):
-            current = self.store.load_task(self.task_id)
+            current = _load_task(self.store, self.task_id)
             state, _, generation, _ = self.store._kernel_facts(current)
             if prepare:
                 self._prepare_stop(current)
@@ -1027,7 +1036,7 @@ class _RunDriver:
             operation = self.launch.get("operation", self.run["kind"])
             if operation == "resume" or self.launch["host_handoff"] is not None:
                 self.guard()
-                task = self.store.load_task(self.task_id)
+                task = _load_task(self.store, self.task_id)
                 binding = _binding(self.hooks, task, self.spec)
                 if self.launch.get("operation") == "resume":
                     ref = self.hooks.claim_continuation(task, binding, self.run, generation, operation=operation)
@@ -1190,7 +1199,7 @@ class _RunDriver:
     def _begin_review(self, generation):
         for _ in range(20):
             self.guard()
-            task = self.store.load_task(self.task_id)
+            task = _load_task(self.store, self.task_id)
             binding = _binding(self.hooks, task, self.spec)
             _barrier(self.hooks, task, binding, "review")
             try:
@@ -1235,7 +1244,8 @@ class _RunDriver:
                                         scope=self.spec["worker_contract"]["scope"], checklist=policy["checklist"],
                                         design_docs=self._design_context(policy), checks=self.checks,
                                         product_id=self.product["product_id"], diff=bundle)).decode())
-        _require(len(prompt.encode()) <= 512 * 1024 and "\x00" not in prompt, "INVALID_REVIEW_PROMPT")
+        if len(prompt.encode()) > 512 * 1024 or "\x00" in prompt:
+            raise ValueError("INVALID_REVIEW_PROMPT")
         root = Path(self.run["worktree"])
         budget_paths = (owner.dir / "budget.json", owner.dir / "events.jsonl")
 
@@ -1265,7 +1275,8 @@ class _RunDriver:
         def stop():
             nonlocal current_budget
             if time.time() >= min(getattr(owner, "_next_budget_poll", 0), owner.deadline):
-                _require(budget_state() == current_budget, "REVIEWER_MUTATION_VIOLATION")
+                if budget_state() != current_budget:
+                    raise ValueError("REVIEWER_MUTATION_VIOLATION")
                 budget.poll(owner)
                 self.review_deadline = owner.deadline
                 current_budget = budget_state()
@@ -1296,7 +1307,7 @@ class _RunDriver:
         if self.host.cleanup_blocked or result.status == "cleanup_blocked":
             raise ato_core.Halt("cleanup_blocked")
         self.guard()
-        current = _binding(self.hooks, self.store.load_task(self.task_id), self.spec)
+        current = _binding(self.hooks, _load_task(self.store, self.task_id), self.spec)
         _require(current["review_revision"] == binding["review_revision"]
                  and current["reviewer"] == binding["reviewer"], "BINDING_CHANGED")
         if result.status != "success":
@@ -1361,7 +1372,7 @@ class _RunDriver:
                          == product["product_id"], "PRODUCT_CHANGED")
                 ref = self.retained_review["review"]["receipt_id"]
                 verdict = _strict_json(self.store.read_evidence(self.task_id, ref), "STATE_CORRUPT")
-                binding = _binding(self.hooks, self.store.load_task(self.task_id), self.spec)
+                binding = _binding(self.hooks, _load_task(self.store, self.task_id), self.spec)
                 _require(verdict["review_revision"] == binding["review_revision"], "BINDING_CHANGED")
                 outcome = self._repair(verdict["verdict"])
             else:

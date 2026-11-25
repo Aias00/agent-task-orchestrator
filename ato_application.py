@@ -16,7 +16,7 @@ from ato_private import render_notice
 from ato_release_lib import ObserverProbe, Refused, mailbox
 from ato_seal import installed_boundary, runtime_seal
 from ato_task_store import (
-    TaskError, _existing, _git, _git_worktrees, _git_text, _read_json, _require, _save, _sha, _strict_json,
+    TaskError, _GIT_ENV, _existing, _git, _git_worktrees, _git_text, _read_json, _require, _save, _sha, _strict_json,
     normalize_repository,
 )
 import hub_worktree
@@ -361,13 +361,14 @@ def _remove_task_worktree(store, execution, task, binding, status, branch, inten
         _require(current["run_id"] == task["run_id"] and not current["worktree_removed"], "CLEANUP_BLOCKED")
         return execution.transaction(task_id, current["revision"], task["stop_epoch"], binding["revision"])
 
+    ref_env = dict(_GIT_ENV, **ato_product.RETENTION_COMMITTER)
     if intent is None:
         with mutate() as (fd, _, _):
             _save(fd, "cleanup.json", expected, exclusive=True)
     try:
         if prepared is not None:
             if head != expected["head"]:
-                _git(path, "update-ref", branch, expected["head"], head)
+                _git(path, "update-ref", branch, expected["head"], head, env=ref_env)
             if ato_product.index_bytes(task) != prepared:
                 ato_product.install_index(task, prepared)
             _require(ato_product.retained_entries(ato_product.measure(task)) == ato_product.retained_entries(manifest),
@@ -381,7 +382,7 @@ def _remove_task_worktree(store, execution, task, binding, status, branch, inten
                 _require(current in (expected["prior_head"], expected["head"]), "CLEANUP_BLOCKED")
                 _require(ato_product.index_bytes(task) in (prepared, original), "CLEANUP_BLOCKED")
                 if current != expected["prior_head"]:
-                    _git(path, "update-ref", branch, expected["prior_head"], current)
+                    _git(path, "update-ref", branch, expected["prior_head"], current, env=ref_env)
                 if ato_product.index_bytes(task) != original:
                     ato_product.install_index(task, original)
             with mutate() as (fd, _, _):

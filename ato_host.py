@@ -15,7 +15,7 @@ import agent_registry
 import ato_config
 from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
 from ato_binding import BindingDecision, BindingGrant, BindingService, read_binding
-from ato_execution import ExecutionHooks, ExecutionService, HostProfile
+from ato_execution import ExecutionHooks, ExecutionService, HostProfile, _stop
 from ato_release_lib import Refused, mailbox_copy
 from ato_task_store import (
     InitialBinding, SubmissionGrant, SubmissionOrigin, TaskError, TaskScope, TaskStore, _REF, _SHA, _absolute,
@@ -293,7 +293,9 @@ class Host:
                 task = self.store.load_task(scope.task_id)
                 if task["run_id"] and not task["worktree_removed"]:
                     run, receipts = self.store._run(task, task["run_id"])
-                    if run["kind"] == "initial" and not receipts:
+                    if (run["kind"] == "initial" and not receipts
+                            and task["stop_epoch"] <= task.get("stop_retired_epoch", 0)
+                            and _stop(self.store, task) is None):
                         operations = operations | {"resume"}
             return BindingGrant(scope, row["reference"], "controller", 1, operations)
         return None
@@ -558,19 +560,33 @@ class Host:
             return None
         return self._acceptance_mailbox_route(bus, row)
 
+    def _local_delivery_credential(self, scope, notice, side):
+        origin = self.store.submission_origin(scope.task_id)
+        original = self._acceptance_record(self._acceptance_origin_name(origin)) if origin is not None else None
+        for row in (original, self.acceptance_notifications()):
+            if row and (row["source_ref"], row["sender"]["endpoint_id"], row["target"]["endpoint_id"]) == (
+                    notice["source_ref"], notice["sender"], notice["target"]):
+                return EndpointCredential(**row[side])
+        return None
+
     def delivery_sender(self, scope, notice):
         if notice.get("local_completion") is True:
-            origin = self.store.submission_origin(scope.task_id)
-            records = [] if origin is None else [self._acceptance_record(self._acceptance_origin_name(origin))]
-            records.append(self.acceptance_notifications())
-            for row in records:
-                if row and (row["source_ref"], row["sender"]["endpoint_id"]) == (
-                        notice["source_ref"], notice["sender"]):
-                    return EndpointCredential(**row["sender"])
+            return self._local_delivery_credential(scope, notice, "sender")
+        row = self.record(notice["from_ref"])
+        if row and row.get("mailbox"):
+            return EndpointCredential(**row["mailbox"])
+        return None
+
+    def delivery_target(self, scope, notice):
+        if notice.get("local_completion") is True:
+            return self._local_delivery_credential(scope, notice, "target")
+        role = "controller" if notice["phase"] == "answer" else "interaction"
+        ref = notice["to_ref"]
+        if not self.endpoint_grant(ref, scope, role, notice["binding_revision"], historical=True):
             return None
-        mailbox = self.record(notice["from_ref"], {}).get("mailbox")
-        if mailbox:
-            return EndpointCredential(**mailbox)
+        row = self._endpoint(ref, scope.repo_key, role, historical=True)
+        if row and row.get("mailbox") and row["mailbox"]["endpoint_id"] == notice["target"]:
+            return EndpointCredential(**row["mailbox"])
         return None
 
     @staticmethod
@@ -609,17 +625,19 @@ class Host:
             self._mailbox_snapshot = None
 
     def compose(self, *, render_notice=None):
+        refresh = self.close_mailbox_snapshot if self.read_only else None
         self.execution = ExecutionService(self.store, self.configured_profile(), authorize=self.authorize,
             hooks=ExecutionHooks(binding=partial(read_binding, self.store)))
         self.interaction = InteractionService(self.store, self.execution, authorize=self.authorize_interaction,
             verify_event=self.verify_event, verify_continuation=self.verify_continuation, route=self.route,
             mailbox=self.mailbox, render_notice=render_notice, local_completion_route=self.local_completion_route,
-            authorize_local_acceptance=self.authorize_local_acceptance, owns_local_binding=self._owns_local_binding)
+            authorize_local_acceptance=self.authorize_local_acceptance, owns_local_binding=self._owns_local_binding,
+            refresh_read_snapshot=refresh)
         self.execution.hooks = self.interaction.execution_hooks()
         self.binding = BindingService(self.execution, actor_grant=self.actor_grant,
             endpoint_grant=self.endpoint_grant, verify_decision=self.verify_binding,
             reviewer_supported=self.reviewer_supported, handoff_observe=partial(self.can_observe, handoff=True),
-            historical_endpoint=partial(self.endpoint_grant, historical=True))
+            historical_endpoint=partial(self.endpoint_grant, historical=True), refresh_read_snapshot=refresh)
         return self
 
     def reviewer_supported(self, scope, agent, mode):

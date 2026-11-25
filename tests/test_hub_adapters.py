@@ -1,4 +1,5 @@
 from dataclasses import asdict,replace
+import errno
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from hub_adapter_agy import AgyHubAdapter
 from hub_adapter_claude import ClaudeHubAdapter
 from hub_adapter_codex import CodexHubAdapter
 from hub_registry import HubRegistry
+import hub_sandbox
 import hub_worktree
 from hub_support import repository,verdict
 
@@ -78,12 +80,29 @@ class HubAdapterTests(unittest.TestCase):
                     self.assertNotIn('/private/fixture-path',encoded)
                     self.assertNotIn('stderr',encoded)
 
-    def test_batch4_agy_rejects_prompt_above_argv_limit_before_launch(self):
+    def test_fixup_agy_defers_prompt_size_to_exec(self):
         adapter = adapter_fixture(self.root, AgyHubAdapter, dict(verdict=verdict()))
-        request = self.request(adapter)
-        request = replace(request, prompt='界' * 40000)
-        with patch.object(adapter, 'doctor', side_effect=AssertionError('must not launch')):
-            self.assertEqual(adapter.run_turn(request).code, 'REVIEW_PROMPT_TOO_LARGE')
+        request = replace(self.request(adapter), prompt='界' * 40000)
+        result = adapter.run_turn(request)
+        self.assertEqual(result.code, 'OK', result)
+
+        doctor = adapter.doctor()
+        oversized = replace(self.request(adapter), prompt=request.prompt)
+        original = hub_sandbox.subprocess.Popen
+        attempts = []
+
+        def exec_size_error(argv, *args, **kwargs):
+            if str(adapter.executable) in argv and '-p' in argv:
+                attempts.append(argv[argv.index('-p') + 1] == oversized.prompt)
+                raise OSError(errno.E2BIG, self.secret)
+            return original(argv, *args, **kwargs)
+
+        with patch.object(adapter, 'doctor', return_value=doctor), \
+                patch.object(hub_sandbox.subprocess, 'Popen', side_effect=exec_size_error):
+            result = adapter.run_turn(oversized)
+        self.assertEqual(attempts, [True])
+        self.assertEqual((result.status, result.code), ('blocked', 'REVIEW_PROMPT_TOO_LARGE'))
+        self.assertNotIn(self.secret, repr(result))
 
     def test_O2_each_malformed_auth_failure_timeout_is_closed(self):
         for klass in CLASSES:

@@ -264,19 +264,42 @@ class HubFoundationTests(unittest.TestCase):
         self.assertEqual(sandbox.group_members(leader.pid), {})
         self.assertEqual(leader.wait(timeout=3), 0)
 
+    def test_fixup_unreaped_child_without_a_birth_can_reap_its_group(self):
+        leader = subprocess.Popen(["/bin/sh", "-c", "sleep 30 </dev/null >/dev/null 2>&1 &"],
+                                  start_new_session=True)
+        self.addCleanup(leader.wait, 5)
+        group = sandbox.OwnedGroup(leader, None)
+        self.addCleanup(group.close)
+        end = time.monotonic() + 3
+        rows = {}
+        while time.monotonic() < end:
+            rows = sandbox.group_members(leader.pid)
+            if rows and leader.pid not in rows:
+                break
+            time.sleep(.03)
+        self.assertTrue(rows and leader.pid not in rows)
+        self.assertIsNone(leader.returncode)
+        self.assertTrue(group.close())
+        self.assertEqual(sandbox.group_members(leader.pid), {})
+
     def test_batch2_review_diff_refuses_a_fifo_without_blocking(self):
         os.mkfifo(self.repo / "pipe")
         binding = {"path": str(self.repo), "base_commit": git(self.repo, "rev-parse", "HEAD").strip()}
         with self.assertRaisesRegex(ValueError, "UNSAFE_REVIEW_FILE"):
             worktree.diff_bundle(binding)
 
-    def test_batch2_real_node_host_check_has_scratch_but_cannot_read_secrets_or_use_network(self):
+    def test_fixup_real_node_check_can_use_loopback_but_cannot_read_credentials_or_reach_external_ip(self):
         node = locate("node")
         home = self.root / "home"
         home.mkdir(mode=0o700)
         secret = home / ".ssh" / "fixture"
         secret.parent.mkdir(mode=0o700)
         secret.write_text("synthetic-secret")
+        gh = home / ".config/gh/hosts.yml"
+        gh.parent.mkdir(parents=True, mode=0o700)
+        gh.write_text("synthetic-token")
+        config = home / ".config/application.json"
+        config.write_text("{}")
         store_home = self.root / "private-store"
         store_home.mkdir(mode=0o700)
         rt = store_home / "turn"
@@ -286,37 +309,56 @@ class HubFoundationTests(unittest.TestCase):
         proof = self.root / "proof"
         proof.mkdir(mode=0o700)
         (rt / "schema.json").write_text("{}")
-        profile = HostProfile(str(node), str(home), proof_roots=(str(proof),))
+        worker_home = self.root / "worker-home"
+        worker_home.mkdir(mode=0o700)
+        profile = HostProfile(str(node), str(worker_home), proof_roots=(str(proof),))
         store = SimpleNamespace(home=store_home, native_homes=())
         driver = SimpleNamespace(store=store, task={"worktree": dict(
             repo=str(self.repo), shared_link_identities={})})
         host = CommandHost(driver, profile, store_home)
         js = """
 const fs = require('node:fs'), net = require('node:net');
-const [secret, schema, port] = process.argv.slice(1);
+const [secret, credential, config, schema, port] = process.argv.slice(1);
 const can = (fn) => { try { fn(); return true; } catch (_) { return false; } };
 const observed = {
     tmp: fs.realpathSync(process.env.TMPDIR),
     secret: can(() => fs.readFileSync(secret)),
+    credential: can(() => fs.readFileSync(credential)),
+    config: can(() => fs.readFileSync(config)),
     schema: can(() => fs.writeFileSync(schema, 'tampered')),
     scratch: can(() => fs.writeFileSync(process.env.TMPDIR + '/writable', 'ok'))
 };
-const socket = net.connect(Number(port), '127.0.0.1');
-socket.once('connect', () => { console.log(JSON.stringify({...observed, connected: true})); socket.end(); });
-socket.once('error', (err) => console.log(JSON.stringify({...observed, connected: false, error: err.code})));
+const connect = (host, port) => new Promise((resolve) => {
+    const client = net.connect(port, host);
+    client.once('connect', () => { client.end(); resolve('connected'); });
+    client.once('error', (err) => resolve(err.code));
+    client.setTimeout(1000, () => { client.destroy(); resolve('timeout'); });
+});
+const server = net.createServer((client) => client.end());
+server.on('error', (err) => console.log(JSON.stringify({...observed, bind: err.code})));
+server.listen(0, '127.0.0.1', async () => {
+    observed.inbound = await connect('127.0.0.1', server.address().port);
+    observed.loopback = await connect('127.0.0.1', Number(port));
+    observed.external = await connect('192.0.2.1', 443);
+    server.close();
+    console.log(JSON.stringify(observed));
+});
 """
         with self.enterContext(socket.socket()) as listener, patch.dict(os.environ, HOME=str(home)):
             listener.bind(("127.0.0.1", 0))
             listener.listen()
-            args = [str(node), "-e", js, str(secret), str(rt / "schema.json"), str(listener.getsockname()[1])]
+            args = [str(node), "-e", js, str(secret), str(gh), str(config),
+                    str(rt / "schema.json"), str(listener.getsockname()[1])]
             result = sandbox.run(host._fence(args, rt, self.repo, write=False), workspace=self.repo, runtime=rt,
                 environment=sandbox.clean_environment(tmp, tmp), timeout=8)
         self.assertEqual(result.code, "OK", result.stderr)
         facts = json.loads(result.stdout)
         self.assertEqual(facts["tmp"], str(tmp))
         self.assertTrue(facts["scratch"])
-        self.assertFalse(facts["secret"] or facts["schema"] or facts["connected"])
-        self.assertIn(facts["error"], {"EPERM", "EACCES"})
+        self.assertFalse(facts["secret"] or facts["credential"] or facts["schema"])
+        self.assertTrue(facts["config"])
+        self.assertEqual((facts["inbound"], facts["loopback"]), ("connected", "connected"))
+        self.assertEqual(facts["external"], "EPERM")
 
     def test_O7_private_ledger_switch_rollover_and_immutable_spec(self):
         book=ledger.HubLedger.create(self.repo,contract.HubAgentSpec('agy'),max_turns=1)

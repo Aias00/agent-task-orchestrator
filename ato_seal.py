@@ -1,5 +1,5 @@
 """Runtime verification for source-selected public and private entrypoints."""
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -41,17 +41,18 @@ def installed_boundary(seal):
 
     @contextmanager
     def guard():
-        try:
-            path = Path(locator).resolve(strict=True)
-            with release_lock(path.parent, shared=True):
+        with ExitStack() as stack:
+            try:
+                path = Path(locator).resolve(strict=True)
+                stack.enter_context(release_lock(path.parent, shared=True))
                 row = file_record(path)
                 expected = launcher_bytes(ROOT, Path(sys.executable).absolute(), seal)
                 if path.name != "ato" or row is None or row["sha256"] != hashlib.sha256(expected).hexdigest():
                     raise TaskError("RUNTIME_MISMATCH")
-                yield
-        except BlockingIOError:
-            raise TaskError("BUSY") from None
-        except (Refused, OSError, RuntimeError):
-            raise TaskError("RUNTIME_MISMATCH") from None
+            except BlockingIOError:
+                raise TaskError("BUSY") from None
+            except (Refused, OSError, RuntimeError):
+                raise TaskError("RUNTIME_MISMATCH") from None
+            yield
 
     return guard()

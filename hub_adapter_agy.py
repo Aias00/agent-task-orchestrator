@@ -34,7 +34,6 @@ class AgyHubAdapter:
         private_values=sandbox.secrets(os.environ)
         try:
             require(request.agent.kind==self.kind)
-            require(len(request.prompt.encode()) <= 96 * 1024,'REVIEW_PROMPT_TOO_LARGE')
             def invoke():
                 doc=self.doctor();require(doc['available'],doc['code'])
                 persistent=request.session_mode!='fresh_only'
@@ -49,6 +48,8 @@ class AgyHubAdapter:
                 if request.agent.effort:command+=['--effort',request.agent.effort]
                 result=sandbox.run(prefix+command,workspace=request.workspace,runtime=rt,environment=env,
                     timeout=request.timeout_seconds,stop=request.stop)
+                if result.code == 'ARGUMENT_LIST_TOO_LONG':
+                    return failed('REVIEW_PROMPT_TOO_LARGE')
                 if result.code!='OK':
                     return failed('AUTH_BLOCKED' if b'not logged in' in result.stderr.lower() else result.code)
                 envelope=strict_json(result.stdout);require(isinstance(envelope,dict) and envelope.get('status')=='SUCCESS')

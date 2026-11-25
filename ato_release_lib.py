@@ -168,6 +168,51 @@ def inventory(root):
     return result
 
 
+_PYTHON_ENTRY = re.compile(r'python(?:3(?:\.\d+)?)?')
+
+
+def _verify_venv(root, files):
+    def verify_file(path, row):
+        require(row.get('kind') == 'file' and not path.is_symlink() and path.is_file(),
+                'sealed interpreter file changed')
+        mode = stat.S_IMODE(path.stat().st_mode)
+        require(mode == row['mode'] and not mode & 0o222 and sha(path) == row['sha256'],
+                'sealed interpreter file changed')
+
+    for name in ('.venv', '.venv/bin'):
+        path = root/name
+        require(not path.is_symlink() and path.is_dir(), 'sealed interpreter directory changed')
+        mode = stat.S_IMODE(path.stat().st_mode)
+        require(not mode & 0o222 and files.get(name) == dict(kind='directory', mode=mode),
+                'sealed interpreter directory changed')
+
+    config = root/'.venv/pyvenv.cfg'
+    config_record = files.get('.venv/pyvenv.cfg')
+    if config_record is not None or os.path.lexists(config):
+        verify_file(config, config_record or {})
+
+    bin_dir = root/'.venv/bin'
+    entries = {path.name for path in bin_dir.iterdir() if _PYTHON_ENTRY.fullmatch(path.name)}
+    prefix = '.venv/bin/'
+    recorded = {name[len(prefix):] for name in files
+                if name.startswith(prefix) and _PYTHON_ENTRY.fullmatch(name[len(prefix):])}
+    require(entries == recorded and 'python' in entries, 'sealed interpreter entries changed')
+    for name in recorded:
+        path = bin_dir/name
+        row = files['.venv/bin/'+name]
+        if row.get('kind') != 'link':
+            verify_file(path, row)
+            continue
+        require(path.is_symlink() and os.readlink(path) == row['target'] and path.is_file(),
+                'sealed interpreter link changed')
+        resolved = path.resolve()
+        if resolved.is_relative_to(root):
+            require(row.get('external_sha256') is None, 'sealed interpreter link changed')
+            verify_file(resolved, files.get(resolved.relative_to(root).as_posix(), {}))
+        else:
+            require(sha(resolved) == row.get('external_sha256'), 'sealed interpreter changed')
+
+
 def verify_snapshot(root, commit, *, legacy=False, full=True, allow_interpreter_change=False):
     require(root.is_dir() and not root.is_symlink(), 'snapshot must be a real directory')
     manifest = json.loads(safe_record(root/MANIFEST)[0])
@@ -205,12 +250,10 @@ def verify_snapshot(root, commit, *, legacy=False, full=True, allow_interpreter_
             require(path.is_file() and mode == files[name]['mode'] and sha(path) == digest
                     and digest == files[name]['sha256'], 'sealed source changed')
             actual[name] = files[name]
-        for name, row in files.items():
-            if re.fullmatch(r'\.venv/bin/python(?:3(?:\.\d+)?)?', name) and row['kind'] == 'link':
-                path = root/name
-                digest = row.get('external_sha256')
-                require(os.readlink(path) == row['target'] and (digest is None or sha(path) == digest),
-                        'sealed interpreter changed')
+        try:
+            _verify_venv(root, files)
+        except OSError:
+            raise Refused('sealed interpreter material changed during inspection') from None
     require(all(not row.get('mode', 0) & 0o222 for row in actual.values()), 'snapshot contains writable files')
     expected = ('runner.py', 'coordination.py') if legacy else (
         'ato.py', 'ato_runtime.py', 'scripts/install.py', 'skills/ato/SKILL.md')

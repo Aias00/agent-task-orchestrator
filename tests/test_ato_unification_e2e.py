@@ -18,11 +18,13 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import agent_registry
+import ato_application
+import hub_worktree
 import ato_observer
 import ato_process
 import ato_product
 from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
-from ato_task_store import TaskStore, normalize_repository
+from ato_task_store import TaskError, TaskStore, normalize_repository
 from message_bus import IdentityError, MessageBus
 import notification_state
 from scripts import ato_host_setup
@@ -30,7 +32,7 @@ from scripts import release_snapshot as release
 from message_bus import EndpointCredential
 from transport import DeliveryResult
 
-from release_support import CURRENT, fake_env, legacy_entry, snapshot, unseal, write
+from release_support import CURRENT, fake_env, legacy_entry, seal, snapshot, unseal, write
 from test_ato_unified_execution import git
 
 
@@ -488,6 +490,120 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(git(repo, "status", "--porcelain"), "")
         self.assertEqual(self.cli("project", "cleanup", task_id, "--confirm"), cleaned)
 
+    def test_fixup_installed_run_can_start_after_optional_node_digest_changes(self):
+        node = write(self.root, "node", "#!/bin/sh\nexit 0\n", 0o700)
+        unseal(self.source)
+        seal(self.source, CURRENT, tools={"node": release.host_tool("node", node)})
+        self.install()
+        self.profile(via_setup=True)
+        node.write_text("#!/bin/sh\nexit 17\n")
+        with self.assertRaisesRegex(release.Refused, "recorded node executable changed"):
+            release.verify_snapshot(self.source, CURRENT)
+        repo, spec, _ = self.task_spec("optional Node digest drift")
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["run_history"][-1]["phase"], "settled")
+
+    def test_fixup_retention_stop_race_and_unchanged_git_blobs(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("stop during retention")
+        git(repo, "config", "user.useConfigOnly", "true")
+        status = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        task_id = status["task_id"]
+        task = self.store.load_task(task_id)
+        head = task["worktree"]["base_commit"]
+        host = self.host
+        remove = hub_worktree.cleanup
+        observed = []
+
+        def stop_during_removal(binding, **options):
+            self.assertNotEqual(git(binding["path"], "rev-parse", "HEAD"), head)
+            self.assertTrue((self.store._task_dir(task_id) / "cleanup.json").is_file())
+            observed.append(host.execution.request_stop(host._local_owner, task_id))
+            self.assertFalse((self.store._task_dir(task_id) / "STOP.json").exists())
+            return remove(binding, **options)
+
+        with patch.object(hub_worktree, "cleanup", side_effect=stop_during_removal), \
+                patch.object(ato_product, "_git", wraps=ato_product._git) as git_calls:
+            cleaned = ato_application.cleanup(host, host._local_owner, task_id)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(cleaned["status"], "completed")
+        self.assertEqual(cleaned["product"], status["product"])
+        self.assertEqual(self.store.load_task(task_id)["stop_epoch"], 0)
+        writes = [call.kwargs["input_data"] for call in git_calls.call_args_list
+                  if call.args[1:2] == ("hash-object",)]
+        self.assertEqual(writes, [b"fixture output\n"])
+        branch = task["worktree"]["branch"]
+        self.assertEqual(git(repo, "show", "-s", "--format=%cn <%ce>", branch), "ATO Host <ato-host@local>")
+
+    def test_fixup_local_completion_reconciliation_and_stale_fifo_cleanup(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("local completion mailbox recovery")
+        (session_id,), _, bus = self.acceptance_mailbox(repo)
+        self.env["CODEX_THREAD_ID"] = session_id
+        with (self.store.native_home / (session_id + ".jsonl")).open("a") as roll:
+            roll.write(json.dumps(dict(type="event_msg", payload=dict(type="task_complete"))) + "\n")
+        host = Host(store=self.store).compose(render_notice=ato_observer.render_notice)
+
+        def queue_completion():
+            finished = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+            task_id = finished["task_id"]
+            saved = self.store.load_task(task_id)
+            correlation = saved["run_heads"][saved["run_id"]][-1]
+            self.assertEqual(host.interaction.dispatch_delivery(task_id, correlation, "completion"), "queued")
+            _, notice = host.interaction._reservation(saved, correlation, "completion")
+            self.assertTrue(notice["local_completion"])
+            return task_id, notice
+
+        stale_task, stale = queue_completion()
+        self.cli("project", "recheck", stale_task, "--checks-only")
+        task_id, notice = queue_completion()
+        scope = host.interaction._scope_record(self.store.load_task(task_id))
+        receiver = host.delivery_target(scope, notice)
+        owner = bus.acquire_endpoint(receiver, owner="fixture")
+        self.assertIsNone(bus.claim(receiver, owner, message_id=notice["mailbox_id"]))
+        self.assertEqual(ato_observer.tick(host, {}), {})
+        self.assertEqual(bus.message(stale["mailbox_id"])["state"], "cancelled")
+        self.assertEqual(bus.message(stale["mailbox_id"])["busy"], 0)
+        claim = bus.claim(receiver, owner, message_id=notice["mailbox_id"])
+        started = bus.begin_dispatch(receiver, owner, claim["id"], claim["claim_token"])
+        bus.finish_dispatch(started["id"], started["attempt_id"], state="delivery_unknown")
+        bus.release_endpoint(receiver, owner)
+        self.assertEqual(self.host_setup("reconcile-delivery", task_id, started["id"]),
+                         dict(message_id=started["id"], state="failed", busy=False))
+        self.assertEqual(bus.message(started["id"])["attempt_id"], started["attempt_id"])
+        self.assertEqual(self.cli("status", task_id)["status"], "completed")
+
+    def test_fixup_mailbox_projection_refreshes_after_busy(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("mailbox snapshot retries")
+        _, _, bus = self.acceptance_mailbox(repo)
+        task_id = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")["task_id"]
+        host = Host(store=self.store, read_only=True).compose()
+        self.addCleanup(host.close_mailbox_snapshot)
+        original = host.interaction._view
+        endpoint_id = "retry-visible"
+        first = True
+
+        def retry_with_new_endpoint(*args):
+            nonlocal first
+            if first:
+                first = False
+                with self.assertRaises(IdentityError):
+                    host.mailbox().endpoint(endpoint_id)
+                bus.register_endpoint(endpoint_id, kind="fake", session_id="fixture",
+                                      project=str(repo), source="fixture")
+                raise TaskError("BUSY")
+            self.assertEqual(host.mailbox().endpoint(endpoint_id)["state"], "active")
+            return original(*args)
+
+        with patch.object(host.interaction, "_view", side_effect=retry_with_new_endpoint) as view:
+            self.assertEqual(host.interaction.task_status(host._local_owner, task_id)["status"], "completed")
+        self.assertEqual(view.call_count, 2)
+
     def test_batch0_local_annotation_does_not_hide_product_invalidation(self):
         self.install()
         self.profile(via_setup=True)
@@ -567,6 +683,8 @@ class InstalledATO(unittest.TestCase):
                 self.assertEqual(ato_observer.tick(self.host, cache), {})
                 self.assertEqual(ato_observer.tick(self.host, cache), {})
         self.assertEqual(bus.message(message["id"])["state"], "turn_completed")
+        cursor = self.host.folder / "observer-ledger" / ("message-" + sha256(message["id"].encode()).hexdigest() + ".json")
+        self.assertFalse(cursor.exists())
         self.assertEqual(len(attempts), 1)
 
     def test_configured_local_completion_notifies_once_without_an_acceptance_record(self):
@@ -1070,6 +1188,12 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual([row["phase"] for row in reserved["run_history"]], ["reserved"])
         run_id = reserved["execution"]["run_id"]
         self.cli("resume", second, actor=origin, error=(4, "BUSY"))
+        stopped_reservation = self.cli(*run_args, actor=origin, error=(4, "BUSY"))["task_id"]
+        self.assertEqual(self.cli("stop", stopped_reservation, actor=origin)["status"], "stopped")
+        self.cli("resume", stopped_reservation, actor=origin, error=(3, "FORBIDDEN"))
+        reservation = self.cli("status", stopped_reservation, actor=origin)
+        self.assertEqual([row["phase"] for row in reservation["run_history"]], ["reserved"])
+        self.assertTrue(reservation["execution"]["stop_requested"])
         self.assertEqual(len((self.native / "attempts").read_text().splitlines()), 1)
 
         self.cli("stop", first, actor=origin)

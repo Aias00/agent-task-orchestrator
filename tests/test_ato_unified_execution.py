@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 import ato_execution as execution
+import ato_execution_host
 import ato_config
 import ato_process
 from ato_task_store import InitialBinding, SubmissionGrant, TaskError, TaskStore
@@ -364,6 +365,57 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual(status["run_history"][0]["phase"], "unknown")
         self.assertEqual(status["stage"]["attempts"], 1)
         self.assert_error("RUN_UNSETTLED", self.service.resume, self.actor, task)
+
+    def test_fixup_node_resolution_precedes_launch_and_pre_effect_failures_settle(self):
+        for error in (ValueError("node preflight"), ValueError("invalid spawn argument")):
+            with self.subTest(error=error):
+                task_id = self.create()
+
+                def resolve_node(store, task):
+                    self.assertEqual(task["task_id"], task_id)
+                    _, receipts = store._run(task, task["run_id"])
+                    self.assertEqual(receipts, [])
+                    if str(error) == "node preflight":
+                        raise error
+                    return None
+
+                with patch.object(execution.HostProfile, "node", autospec=True,
+                                  side_effect=lambda _, store, task: resolve_node(store, task)), \
+                        patch.object(self.service, "_spawn_child", side_effect=error) as spawn:
+                    self.assert_error("LAUNCH_FAILED", self.service.start, self.actor, task_id)
+                self.assertEqual(spawn.call_count, int(str(error) != "node preflight"))
+                status = self.status(task_id)
+                self.assertEqual(status["run_history"][-1]["phase"], "launch_failed")
+                self.assertEqual(status["stage"]["attempts"], 0)
+                self.assertTrue(status["execution"]["verified"])
+
+    def test_fixup_production_node_validation_falls_back_and_valid_node_is_injected(self):
+        task_id = self.create()
+        task = self.store.load_task(task_id)
+        profile = execution.HostProfile(self.service.profile.worker_executable, str(self.worker_home))
+        manifest = self.root / ".release-manifest.json"
+        manifest.write_text(json.dumps({"tools": {"node": {"path": "/fixture/node", "sha256": "a" * 64}}}))
+        with patch.object(ato_execution_host, "__file__", str(self.root / "ato_execution_host.py")):
+            for operation, error in (("safe_record", OSError("read")),
+                                     ("verify_tools", ValueError("digest changed")),
+                                     ("trusted_path", ValueError("invalid path"))):
+                with self.subTest(operation=operation), \
+                        patch.object(ato_execution_host, "verify_tools"), \
+                        patch.object(ato_execution_host, "trusted_path", return_value=Path("/fixture/node")), \
+                        patch.object(ato_execution_host, operation, side_effect=error):
+                    self.assertIsNone(profile.node(self.store, task))
+            with patch.object(ato_execution_host, "verify_tools") as verify, \
+                    patch.object(ato_execution_host, "trusted_path", return_value=Path("/fixture/node")):
+                self.assertEqual(profile.node(self.store, task), Path("/fixture/node"))
+                verify.assert_called_once()
+
+    def test_fixup_oversized_review_prompt_settles_without_running_reviewer(self):
+        task_id = self.create(reviewer=dict(agent=dict(kind="codex"),
+            checklist=[f"{i} " + "x" * 4900 for i in range(112)]))
+        status = self.service.start(self.actor, task_id, foreground=True)
+        self.assertEqual((status["status"], status["reason"]), ("blocked", "INVALID_REVIEW_PROMPT"))
+        self.assertEqual(status["run_history"][-1]["phase"], "settled")
+        self.assertFalse((self.reviewer_home / "round").exists())
 
     def test_pre_effect_launcher_error_retains_attempt_and_allows_explicit_resume(self):
         task = self.create()

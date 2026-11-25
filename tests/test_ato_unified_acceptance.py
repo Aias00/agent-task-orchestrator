@@ -23,7 +23,7 @@ from ato_execution import ExecutionService, HostProfile, _initial_binding, _publ
 from ato_private import render_notice
 from ato_task_store import InitialBinding, RunIntent, SubmissionGrant, TaskError
 from ato_task_store import TaskStore, new_id
-from message_bus import MessageBus
+from message_bus import MailboxError, MessageBus
 import notification_state
 import recovery
 from test_ato_unified_execution import _REVIEWER, _WORKER, git
@@ -627,6 +627,107 @@ class UnifiedAcceptanceTests(unittest.TestCase):
                 message = bus.message(reference["mailbox_id"])
                 self.assertEqual(message["state"], "cancelled" if transition == "claim" else "failed")
                 self.assertEqual((message["external_possible"], message["busy"]), (0, 0))
+
+    def test_fixup_stale_first_guard_preserves_replacement_dispatch_and_error(self):
+        task = self.create()
+        expires = time.time() + 60
+        request = self.ask(task, expires_at=expires)
+        user = self.proof(task, "user")
+        bus = self.mailbox()
+        sender = bus.register_endpoint("race-sender", kind="fake", session_id="race-hub",
+                                       project=str(self.repo), source="fixture")
+        target = bus.register_endpoint("race-target", kind="fake", session_id="race-origin",
+                                       project=str(self.repo), source="fixture")
+        owner = bus.acquire_endpoint(target, owner="first dispatcher")
+        adapter = SimpleNamespace(send=lambda *_: self.fail("superseded dispatcher sent"))
+        self.interaction.route = lambda *args: MailboxRoute(sender, target, "fixture-route", owner,
+                                                           {"fake": adapter})
+        self.interaction.record_answer(user, request, "choice", self.event(user, "answer", request, "choice"))
+        original_claim = bus.claim
+        replacement = []
+
+        def take_over(*args, **kwargs):
+            old = original_claim(*args, **kwargs)
+            bus.release_endpoint(target, owner)
+            successor = bus.acquire_endpoint(target, owner="replacement dispatcher")
+            claimed = original_claim(target, successor, message_id=old["id"])
+            replacement.append(bus.begin_dispatch(target, successor, claimed["id"], claimed["claim_token"]))
+            self.clock = expires + 1
+            return old
+
+        cancel_unsent = self.interaction.cancel_unsent
+
+        def contested_cleanup(*args):
+            cancel_unsent(*args)
+            raise MailboxError("cleanup contention")
+
+        with patch.object(bus, "claim", side_effect=take_over), \
+                patch.object(self.interaction, "cancel_unsent", side_effect=contested_cleanup) as cancel:
+            self.assert_code("STALE_REQUEST", self.interaction.dispatch_delivery, task, request, "answer")
+        cancel.assert_called_once()
+        started, = replacement
+        current = bus.message(started["id"])
+        self.assertEqual((current["state"], current["attempt_id"], current["external_possible"], current["busy"]),
+                         ("dispatching", started["attempt_id"], 1, 1))
+
+    def test_fixup_answered_question_cancels_its_queue_and_populates_observer_cache(self):
+        task = self.create()
+        self.qualify(task)
+        request = self.ask(task)
+        user = self.proof(task, "user")
+        bus = self.mailbox()
+        sender = bus.register_endpoint("cached-origin", kind="fake", session_id="origin",
+                                       project=str(self.repo), source="fixture")
+        target = bus.register_endpoint("cached-hub", kind="fake", session_id="hub",
+                                       project=str(self.repo), source="fixture")
+        self.interaction.route = lambda *args: MailboxRoute(sender, target, "fixture-route") if (
+            args[2] == "question") else None
+        self.interaction.render_notice = render_notice
+        policy = dict(hub_thread=_INTERACTION, mode="user_input_only", completion="silent")
+        with patch.object(notification_state, "status", return_value=policy):
+            self.assertEqual(self.interaction.dispatch_delivery(task, request, "question"), "queued")
+            reference = self.interaction.delivery_reference(task, request, "question")
+            self.interaction.record_answer(user, request, "choice", self.event(user, "answer", request, "choice"))
+            host = SimpleNamespace(store=self.store, folder=self.store.root / "host",
+                                   interaction=self.interaction, delivery_sender=lambda *_: sender)
+            cache = {}
+            self.assertEqual(ato_observer.tick(host, cache), {})
+            self.assertEqual(bus.message(reference["mailbox_id"])["state"], "cancelled")
+            self.assertEqual(cache[task], self.store.load_task(task)["revision"])
+            with patch.object(self.interaction, "dispatch_delivery", side_effect=AssertionError("must hit cache")):
+                self.assertEqual(ato_observer.tick(host, cache), {})
+
+    def test_fixup_observer_releases_a_failed_run_stale_notification(self):
+        task_id = self.create()
+        mode = self.root / "worker-home" / "mode"
+        mode.write_text("blocked")
+        actor = self.proof(task_id, "origin")
+        status = self.execution.start(actor, task_id, foreground=True)
+        task, _, _ = self.interaction._task(task_id)
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["run_history"][-1]["phase"], "settled")
+        correlation = task["run_heads"][task["run_id"]][-1]
+
+        bus = self.mailbox()
+        sender = bus.register_endpoint("failure-origin", kind="fake", session_id="origin",
+                                       project=str(self.repo), source="fixture")
+        target = bus.register_endpoint("failure-hub", kind="fake", session_id="hub",
+                                       project=str(self.repo), source="fixture")
+        self.interaction.route = lambda *args: MailboxRoute(sender, target, "fixture-route") if (
+            args[2] == "failure") else None
+        self.interaction.render_notice = render_notice
+        policy = dict(hub_thread=_INTERACTION, mode="user_input_only", completion="silent")
+        with patch.object(notification_state, "status", return_value=policy), \
+                patch("failure_attention.policy", return_value=dict(
+                    enabled=True, hub_thread=_INTERACTION, configured_at=900)):
+            self.assertEqual(self.interaction.dispatch_delivery(task_id, correlation, "failure"), "queued")
+        _, notice = self.interaction._reservation(task, correlation, "failure")
+        self.assertEqual(self.execution.request_stop(actor, task_id)["status"], "stopped")
+        host = SimpleNamespace(store=self.store, folder=self.store.root / "host",
+                               interaction=self.interaction, delivery_sender=lambda *_: sender)
+        self.assertEqual(ato_observer.tick(host, {}), {})
+        self.assertEqual(bus.message(notice["mailbox_id"])["state"], "cancelled")
+        self.assertEqual(bus.message(notice["mailbox_id"])["busy"], 0)
 
     def test_notification_policy_and_completion_once_keep_human_receipt_separate(self):
         task = self.create()

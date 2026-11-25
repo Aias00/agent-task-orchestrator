@@ -109,7 +109,9 @@ class HostProfile:
     def node(self, store, task):
         roots = (store.home, Path(task["repo"]["root"]), Path(task["worktree"]["path"]))
         manifest = Path(__file__).resolve().with_name(".release-manifest.json")
-        if not self.fixture:
+        try:
+            if self.fixture:
+                return locate("node", forbidden=roots)
             if not manifest.is_file():
                 return None
             record = json.loads(safe_record(manifest)[0]).get("tools", {}).get("node")
@@ -117,8 +119,6 @@ class HostProfile:
                 return None
             verify_tools({"node": record})
             return trusted_path(record["path"], forbidden=roots, executable=True)
-        try:
-            return locate("node", forbidden=roots)
         except (OSError, ValueError):
             return None
 
@@ -208,6 +208,9 @@ class CommandHost:
             return argv
         q = lambda path: json.dumps(str(path))
         rules = ["(version 1)", "(allow default)", "(deny file-write*)", "(deny network*)",
+                 '(allow network-bind (local ip "localhost:*"))',
+                 '(allow network-inbound (local ip "localhost:*"))',
+                 '(allow network-outbound (remote ip "localhost:*"))',
                  '(allow file-write* (literal "/dev/null") (subpath ' + q(runtime / "tmp")
                  + ') (literal ' + q(runtime / "result.json") + ') (literal ' + q(runtime / "output.json") + '))']
         if write:
@@ -218,7 +221,8 @@ class CommandHost:
                      *(root / name for name in binding["shared_link_identities"]),
                      *(Path(binding["repo"]) / name for name in binding["shared_link_identities"])):
             rules.append("(deny file-write* (subpath " + q(path) + "))")
-        credential_paths = (".ssh", ".aws", ".gnupg", ".claude", ".gemini", ".pi", ".config", "Library/Keychains")
+        credential_paths = (".ssh", ".aws", ".gnupg", ".claude", ".gemini", ".pi",
+                            ".config/gh", ".config/gcloud", "Library/Keychains")
         homes = {Path(pwd.getpwuid(os.getuid()).pw_dir), Path.home()}
         rules.extend(hub_sandbox.read_denials(runtime, (
             *self.profile.protected_reads(self.driver.store), root / ".codex/tasks",

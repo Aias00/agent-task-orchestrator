@@ -1,4 +1,5 @@
 """Content-addressed product and independent check evidence for unified Tasks."""
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import stat
@@ -12,6 +13,7 @@ from ato_task_store import (TaskError, _checkout_environment, _directory, _file_
 _MAX_FILES = 20000
 _MAX_FILE = 64 * 1024 * 1024
 _MAX_TOTAL = 256 * 1024 * 1024
+RETENTION_COMMITTER = dict(GIT_COMMITTER_NAME="ATO Host", GIT_COMMITTER_EMAIL="ato-host@local")
 
 
 def _names(data):
@@ -140,7 +142,15 @@ def build_retention(task, manifest, scratch, *, existing=None):
     """Build the Git tree from accepted file bytes using an isolated index."""
     root = Path(task["worktree"]["path"])
     env = dict(_checkout_environment(root), GIT_AUTHOR_NAME="ATO Host", GIT_AUTHOR_EMAIL="ato-host@local",
-               GIT_COMMITTER_NAME="ATO Host", GIT_COMMITTER_EMAIL="ato-host@local")
+               **RETENTION_COMMITTER)
+    head = manifest["head"]
+    object_hash = "sha1" if len(head) == 40 else "sha256"
+    head_blobs = {}
+    for entry in _names(_git(root, "ls-tree", "-rz", "--full-tree", head, env=env)[0]):
+        metadata, name = entry.split("\t", 1)
+        _, kind, oid = metadata.split()
+        if kind == "blob":
+            head_blobs[name] = oid
     with TemporaryDirectory(prefix="cleanup-index-", dir=scratch) as folder:
         index = Path(folder)/"index"
         env["GIT_INDEX_FILE"] = str(index)
@@ -161,11 +171,17 @@ def build_retention(task, manifest, scratch, *, existing=None):
                         content = _read_file(fd, path.name, limit=_MAX_FILE, private=False,
                                              stable_path=True, code="PRODUCT_CHANGED")
                     _require(_sha(content) == row["sha256"], "PRODUCT_CHANGED")
-                oid = _git(root, "hash-object", "-w", "--stdin", env=env, input_data=content)[0].decode().strip()
+                oid = head_blobs.get(row["path"])
+                if oid:
+                    blob = hashlib.new(object_hash, f"blob {len(content)}\0".encode(), usedforsecurity=False)
+                    blob.update(content)
+                    if blob.hexdigest() != oid:
+                        oid = None
+                if oid is None:
+                    oid = _git(root, "hash-object", "-w", "--stdin", env=env, input_data=content)[0].decode().strip()
             entries.extend(f"{mode} {oid}\t{row['path']}\0".encode())
         _git(root, "update-index", "-z", "--index-info", env=env, input_data=entries)
         tree = _git(root, "write-tree", env=env)[0].decode().strip()
-        head = manifest["head"]
         if existing is not None:
             commit = existing
             _require(_git_text(root, "rev-parse", "--verify", commit+"^{tree}") == tree,

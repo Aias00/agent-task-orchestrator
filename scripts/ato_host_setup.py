@@ -24,7 +24,7 @@ from ato_task_store import (
     _strict_json, _text, canonical_json, normalize_repository, read_input_file,
 )
 from codex_session_adapter import CodexSessionAdapter
-from message_bus import EndpointCredential, MailboxError
+from message_bus import MailboxError
 
 OPERATIONS = {
     "controller": ("observe", "initial", "stop", "resume", "recheck", "reconcile",
@@ -237,13 +237,9 @@ def reconcile_delivery(host, args):
         _, notice = host.interaction._reservation(task, selected["correlation_id"], phase)
         message = host.interaction._message(task, notice) if notice else None
         _require(message and message["id"] == selected["id"] and message["external_possible"], "FORBIDDEN")
-        role = "controller" if phase == "answer" else "interaction"
-        row = host._endpoint(notice["to_ref"], task["repo"]["key"], role, historical=True)
         scope = host.interaction._scope_record(task)
-        _require(host.endpoint_grant(notice["to_ref"], scope, role, notice["binding_revision"], historical=True)
-                 and row.get("mailbox"), "FORBIDDEN")
-        credential = EndpointCredential(**row["mailbox"])
-        _require(credential.endpoint_id == message["target"], "FORBIDDEN")
+        credential = host.delivery_target(scope, notice)
+        _require(credential is not None and credential.endpoint_id == message["target"], "FORBIDDEN")
         owner = bus.acquire_endpoint(credential, owner="ato-host-reconcile", lease_seconds=60)
         try:
             endpoint = bus.authenticate(credential)

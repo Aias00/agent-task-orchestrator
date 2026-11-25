@@ -116,7 +116,8 @@ class InteractionService:
     def __init__(self, store, execution, *, authorize=None, verify_event=None,
                  verify_continuation=None, route=None, mailbox=None, render_notice=None,
                  local_completion_route=None, authorize_local_acceptance=None, owns_local_binding=None,
-                 clock=time.time):
+                 refresh_read_snapshot=None, clock=time.time):
+        self._refresh_read_snapshot = refresh_read_snapshot
         self.store = store
         self.execution = execution
         self.authorize = authorize
@@ -978,6 +979,9 @@ class InteractionService:
         for row in self._rows(task):
             for phase, notice in row["outbox"].items():
                 yield phase, row["request"]["request_id"], notice
+        yield from self._notice_files(task)
+
+    def _notice_files(self, task):
         with self._records(task["task_id"]) as fd:
             if fd is None:
                 return
@@ -1371,16 +1375,28 @@ class InteractionService:
                 raise
             notice = updated
 
+        guard_calls = 0
+        claim_token = None
+
         def pre_send():
+            nonlocal guard_calls, claim_token
+            guard_calls += 1
+            if guard_calls == 1:
+                claimed = bus.message(notice["mailbox_id"])
+                if claimed["state"] == "claimed":
+                    claim_token = claimed["claim_token"]
             try:
                 guard()
             except TaskError:
-                current = bus.message(notice["mailbox_id"])
-                if current["state"] == "dispatching":
-                    # Only used synchronously by dispatch_one, before adapter.send.
-                    bus.finish_dispatch(current["id"], current["attempt_id"], state="failed")
-                else:
-                    self.cancel_unsent(task, notice, route.sender)
+                try:
+                    if guard_calls == 1:
+                        self.cancel_unsent(task, notice, route.sender)
+                    elif guard_calls == 2 and claim_token:
+                        current = bus.message(notice["mailbox_id"])
+                        if current["state"] == "dispatching" and current["claim_token"] == claim_token:
+                            bus.finish_dispatch(current["id"], current["attempt_id"], state="failed")
+                except MailboxError:
+                    pass  # Retain the original guard error and durable attempt.
                 raise
 
         if message["state"] != "queued":

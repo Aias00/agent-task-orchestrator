@@ -1,5 +1,6 @@
 """Read-only launch and owned process cleanup. No adapter or core imports."""
 from dataclasses import dataclass, field
+import errno
 from contextvars import ContextVar
 import hashlib
 import json
@@ -164,7 +165,7 @@ class OwnedGroup:
         if self.process.pid in rows and rows[self.process.pid]!=self.leader_identity:return rows,False
         trusted=any(value and self.known.get(pid)==value for pid,value in rows.items())
         # An unreaped session leader's PID still anchors its process group.
-        if (not trusted and self.leader_identity and isinstance(self.process, _ChildProcess)
+        if (not trusted and isinstance(self.process, _ChildProcess)
                 and self.process.returncode is None and self.process.pid not in rows):
             trusted = True
         if trusted:self.known.update({pid:value for pid,value in rows.items() if value})
@@ -218,8 +219,15 @@ def run(command, *, workspace, runtime, environment, prompt='', timeout=300, sto
             deadline=time.monotonic()+timeout
             if host is not None:
                 host.before_spawn(runtime)
-            process=subprocess.Popen(list(command),cwd=workspace,env=environment,stdin=source,
-                stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,umask=0o077)
+            try:
+                process=subprocess.Popen(list(command),cwd=workspace,env=environment,stdin=source,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,umask=0o077)
+            except OSError as exc:
+                if exc.errno != errno.E2BIG:
+                    raise
+                if host is not None:
+                    host.finished(runtime, None, True)
+                return ProcessResult('ARGUMENT_LIST_TOO_LONG', None)
             if host is None:
                 birth=identity(process.pid)
                 owner=OwnedGroup(process,birth,{process.pid:birth} if birth else {})

@@ -211,7 +211,8 @@ class BindingService:
     """
 
     def __init__(self, execution, *, actor_grant, endpoint_grant, verify_decision, reviewer_supported=None,
-                 handoff_observe=None, historical_endpoint=None):
+                 handoff_observe=None, historical_endpoint=None, refresh_read_snapshot=None):
+        self._refresh_read_snapshot = refresh_read_snapshot
         self.execution = execution
         self.store = execution.store
         self.actor_grant = actor_grant
