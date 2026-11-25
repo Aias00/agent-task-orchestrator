@@ -37,13 +37,14 @@ lease still match. It starts no work. Without that correlated receipt,
 PID absence or reuse still leaves the Run unresolved.
 [Process identity](../ato_process.py)
 
-The default unified elapsed time policy is advisory. The first launch pins
-the verified time policy and subsequent Runs reject drift. Individual
-command and review deadlines, stage and attempt limits, STOP and review
-rounds still apply. Tech review uses the H1 tripwire and structured
-verdict. Successful execution and verification yield `completed` with
-content-addressed check receipts and a product manifest. Product and evidence are reverified
-before use. [Product evidence](../ato_product.py) · [H1 implementation](h1-offline-implementation.md)
+Each declared stage must complete before the workflow can deliver its product.
+Shared checks may already pass before later stages execute. The `stage` summary
+lists their IDs in `remaining_stage_ids`. A historical settlement with missing
+stages projects as `blocked` with `STAGES_INCOMPLETE`. An explicit `ato resume`
+continues from the first unfinished declared stage in the existing worktree.
+The original Run and its check receipts remain in history. Completion retains
+content-addressed check receipts and a product manifest, which are verified
+before use. [Product evidence](../ato_product.py)
 
 ## Shared calls for T4 and T5
 

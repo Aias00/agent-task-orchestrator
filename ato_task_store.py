@@ -741,6 +741,11 @@ _CHECK_STATUS = {"pending", "passed", "failed", "needs_input"}
 _KERNEL_CHILD_STATUS = _KERNEL_STATUS | {"plan_changed", "ready_for_checks"}
 
 
+def remaining_declared_stages(contract, state):
+    completed = {row["preset"] for row in state["stages"] if row["status"] == "completed"}
+    return [stage for stage in contract["stages"] if stage["id"] not in completed]
+
+
 def _binding_valid(value):
     _fields(value, ("controller_ref", "interaction_ref", "revision"))
     return (_matches(_REF, value["controller_ref"]) and _matches(_REF, value["interaction_ref"])
@@ -1673,6 +1678,7 @@ class TaskStore:
                 steps.append(dict(stage_id=preset, step_id=key, state=row["status"], attempts=count))
         _require(state.get("active_run") is None or state["active_run"] in directories)
         return dict(state=state["status"], stage_id=stage_id, criterion_ids=sorted(criteria),
+                    remaining_stage_ids=[row["id"] for row in remaining_declared_stages(contract, state)],
                     steps=steps, attempts=sum(step["attempts"] for step in steps),
                     elapsed_seconds=state["elapsed_seconds"], planning_attempts=state["planning_attempts"]), active_child, latest
 

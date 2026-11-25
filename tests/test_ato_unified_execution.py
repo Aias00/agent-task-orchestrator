@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+import ato_core
 import ato_execution as execution
 import ato_execution_host
 import ato_config
@@ -152,7 +153,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         path.chmod(0o700)
         return path
 
-    def create(self, *, reviewer=None, max_attempts=3, checks=None, preset=False):
+    def create(self, *, reviewer=None, max_attempts=3, checks=None, preset=False, followup=False):
         spec = dict(schema_version=1, repo=str(self.repo), base_ref="HEAD",
             worker_contract=dict(objective="implement the frozen work", scope="worktree only",
                 authorization="fixture source", limits=dict(max_attempts=max_attempts),
@@ -160,10 +161,14 @@ class UnifiedExecutionTests(unittest.TestCase):
                             dict(id="deliver", kind="manual", description="human delivery")]))
         if reviewer is not None:
             spec["reviewer"] = reviewer
-        if preset:
+        if preset or followup:
             spec["worker_contract"]["stages"] = [
                 dict(id="frozen-first", covers=["command"], plan=dict(objective="first", tasks=[
                     dict(id="change", prompt="write the requested artifact", checks=[["true"]])]))]
+        if followup:
+            spec["worker_contract"]["stages"].append(
+                dict(id="frozen-second", covers=["command"], plan=dict(objective="second", tasks=[
+                    dict(id="extend", prompt="extend the requested artifact", checks=[["true"]])])))
         path = self.root / "spec.json"
         path.write_text(json.dumps(spec))
         normalized = self.store.normalize_spec(self.repo, path)
@@ -204,6 +209,41 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual((Path(status["product"]["worktree"]) / "delivery.txt").read_text(), "implemented\n")
         self.assertFalse((self.repo / "delivery.txt").exists())
         self.assert_error("NOT_RESUMABLE", self.service.resume, self.actor, task)
+
+    def test_green_shared_check_still_executes_every_declared_stage(self):
+        task = self.create(followup=True)
+        status = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(status["status"], "completed", status)
+        self.assertEqual(status["stage"]["remaining_stage_ids"], [])
+        self.assertEqual([(step["stage_id"], step["state"]) for step in status["stage"]["steps"]],
+                         [("frozen-first", "completed"), ("frozen-second", "completed")])
+        self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work", "work"])
+
+    def test_legacy_completion_with_a_missing_stage_resumes_only_that_stage(self):
+        task = self.create(followup=True)
+        finished = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(finished["status"], "completed", finished)
+        stored = self.store.load_task(task)
+        state_file = Path(stored["workflow"]["directory"]) / "state.json"
+        state = ato_core.read(state_file)
+        first_stage = state["stages"][0]
+        # Model an older release's valid settlement and green check receipt with a skipped preset.
+        state["stages"] = [first_stage]
+        ato_core.save(state_file, state)
+
+        incomplete = self.status(task)
+        self.assertEqual((incomplete["status"], incomplete["reason"], incomplete["next_step"]),
+                         ("blocked", "STAGES_INCOMPLETE", "RESUME_MISSING_STAGES"))
+        self.assertEqual(incomplete["stage"]["remaining_stage_ids"], ["frozen-second"])
+        self.assertEqual(incomplete["checks"], finished["checks"])
+        self.assertIsNone(incomplete["product"])
+
+        resumed = self.service.resume(self.actor, task, foreground=True)
+        self.assertEqual(resumed["status"], "completed", resumed)
+        self.assertEqual(resumed["stage"]["remaining_stage_ids"], [])
+        self.assertEqual([row["kind"] for row in resumed["run_history"]], ["initial", "resume"])
+        self.assertEqual(ato_core.read(state_file)["stages"][0], first_stage)
+        self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work", "work", "work"])
 
     def test_batch2_worker_json_event_flood_keeps_valid_output_and_settles(self):
         task = self.create()

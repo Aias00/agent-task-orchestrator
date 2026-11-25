@@ -17,7 +17,7 @@ import ato_product
 from ato_execution_host import CommandHost, HostProfile
 from ato_task_store import (DELIVERY_OUTCOMES, RunIntent, RunReceipt, TaskError, _directory, _existing,
     _identity, _identifier, _locked_file, _publish, _read_file, _read_json, _regular, _require, _retry_busy, _save,
-    _sha, _state_errors, _strict_json, _valid_id, canonical_json, new_id)
+    _sha, _state_errors, _strict_json, _valid_id, canonical_json, new_id, remaining_declared_stages)
 import budget
 from codex_session_adapter import worker_config_args
 from hub_contract import HubAgentSpec, HubTurnRequest, blocker_fingerprint, validate_review_verdict
@@ -484,6 +484,9 @@ class ExecutionService:
                 status["acceptance"] = acceptance
             execution = status["execution"]
             if historical_close and execution["state"] == "idle" and execution["verified"]:
+                if status["reason"] == "STAGES_INCOMPLETE":
+                    status["next_step"] = "REVIEW_CLOSED_TASK"
+                    return
                 status.update(status="completed", reason=None, next_step=None)
 
     def _project_execution(self, task, spec, history, generation, status):
@@ -540,6 +543,13 @@ class ExecutionService:
         if phase == "settled" and data.get("reason") is not None:
             status["reason"] = data["reason"]
         delivered = phase == "settled" and last["outcome"] in DELIVERY_OUTCOMES
+        if (phase == "settled" and execution["state"] == "idle" and execution["verified"]
+                and not execution["stop_requested"] and (delivered or status["reason"] == "STAGES_INCOMPLETE")
+                and status["stage"] and status["stage"]["remaining_stage_ids"]):
+            if data.get("checks"):
+                status["checks"] = data["checks"]
+            status.update(status="blocked", reason="STAGES_INCOMPLETE", next_step="RESUME_MISSING_STAGES")
+            return
         decision = (self.hooks.decision_status(task, binding)
                     if not delivered and not execution["stop_requested"] else None)
         if decision:
@@ -648,7 +658,10 @@ class ExecutionService:
         handoff = None
         if kind == "resume":
             retryable = _RETRYABLE if self.profile.fixture else _RETRYABLE | {"needs_host", "needs_input", "waiting"}
-            _require(last["outcome"] in retryable and state["status"] != "contract_changed", "NOT_RESUMABLE")
+            premature_completion = (last["outcome"] in DELIVERY_OUTCOMES
+                                    and bool(remaining_declared_stages(spec["worker_contract"], state)))
+            _require((last["outcome"] in retryable or premature_completion)
+                     and state["status"] != "contract_changed", "NOT_RESUMABLE")
             if self.profile.fixture:
                 _require(proof.get("reason") not in {"TIME_LIMIT", "REVIEWER_MUTATION_VIOLATION", "review_loop_exhausted",
                                                     "repeated_blockers", "PRODUCT_CHANGED_DURING_CHECKS"}
@@ -1073,6 +1086,9 @@ class _RunDriver:
                 self.guard()
                 if for_work and driver.host.advisory and driver.launch["host_handoff"] is None:
                     # The final independent pass records the real results after the Worker settles.
+                    if remaining_declared_stages(self.contract, self.state):
+                        driver.reason = "STAGES_INCOMPLETE"
+                        raise ato_core.Halt("blocked")
                     raise ato_core.Halt("completed")
                 before = None if driver.host.advisory else ato_product.measure(driver.task)
                 super().check_total()
@@ -1081,13 +1097,13 @@ class _RunDriver:
                     raise ato_core.Halt("blocked")
 
             def run_active_stage(self, retry, host_checks=False):
-                if not driver.host.advisory or host_checks:
+                if host_checks:
                     return super().run_active_stage(retry, host_checks=host_checks)
                 while super().run_active_stage(retry):
-                    done = {row["preset"] for row in self.state["stages"]}
-                    next_stage = next((row for row in self.contract["stages"] if row["id"] not in done), None)
-                    if next_stage is None:
+                    remaining = remaining_declared_stages(self.contract, self.state)
+                    if not remaining:
                         return True
+                    next_stage = remaining[0]
                     self.stage(next_stage["plan"], next_stage["covers"], next_stage["id"])
                     retry = False
                 return False
@@ -1099,17 +1115,12 @@ class _RunDriver:
             owner = self._workflow()
             owner.guard()
             if preset is None:
-                if self.host.advisory:
-                    if owner.state.get("active_run"):
-                        return
-                    done = {row["preset"] for row in owner.state["stages"]}
-                    preset = next((row for row in owner.contract["stages"] if row["id"] not in done), None)
-                    if preset is None:
-                        return
-                else:
-                    if owner.state["stages"]:
-                        return
-                    preset = owner.contract["stages"][0]
+                if owner.state.get("active_run"):
+                    return
+                remaining = remaining_declared_stages(owner.contract, owner.state)
+                if not remaining:
+                    return
+                preset = remaining[0]
             owner.stage(preset["plan"], preset["covers"], preset["id"])
 
     def _work(self, *, retry=False, host_handoff=None):
@@ -1405,6 +1416,9 @@ class _RunDriver:
         while True:
             with self._owned_host() as (lease, _, _):
                 owner = self._workflow()
+                if remaining_declared_stages(owner.contract, owner.state):
+                    self.reason = "STAGES_INCOMPLETE"
+                    return "blocked"
                 passed, generation = self._checks(owner, lease)
                 if self.host.advisory:
                     if recheck and self.previous_receipt["outcome"] not in DELIVERY_OUTCOMES and not all(
@@ -1502,6 +1516,8 @@ class _RunDriver:
         if outcome != "cleanup_blocked" and self.reason != "REVIEWER_MUTATION_VIOLATION":
             if self.stopped() or kernel_stop:
                 self.reason, outcome = "STOPPED", "stopped"
+        if outcome == "completed" and remaining_declared_stages(contract, state):
+            self.reason, outcome = "STAGES_INCOMPLETE", "blocked"
         evidence = dict(reason=self.reason, cleanup_verified=outcome != "cleanup_blocked",
                         review_rounds=self.review_rounds, fingerprints=self.fingerprints,
                         product=self.product, checks=self.checks, review=self.review,
