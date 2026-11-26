@@ -195,23 +195,31 @@ def run_logged(argv, root, env, name):
 def observer_environment(source, env):
     env = dict(env)
     path = Path(source['root'])/MANIFEST
+    node = None
     if path.is_file():
-        tools = read(path).get('tools', {})
-        verify_tools({key: value for key, value in tools.items() if key == 'node'})
-        node = tools.get('node')
+        node = read(path).get('tools', {}).get('node')
+        if node is not None:
+            verify_tools({'node': node})
+    if node is None and source.get('surface') != SURFACE:
+        node = host_tool('node')
+    if node is None:
+        env.pop('CTASK_NODE_BIN', None)
     else:
-        node = None
-    node = node or host_tool('node')
-    env['CTASK_NODE_BIN'] = node['path']
+        env['CTASK_NODE_BIN'] = node['path']
     return env
 
 
-def install_dependencies(root, env):
+def install_dependencies(root, env, *, with_pi):
+    venv = [sys.executable, '-m', 'venv']
+    if not with_pi:
+        run_logged([*venv, '--without-pip', root/'.venv'], root, env, 'venv')
+        return {}
+
     forbidden = (root, Path(env.pop('ATO_RELEASE_SOURCE')))
     tools = {name: host_tool(name, env.pop('ATO_RELEASE_'+name.upper(), None), forbidden=forbidden)
              for name in ('node', 'npm')}
     env['CTASK_NODE_BIN'] = tools['node']['path']
-    run_logged([sys.executable, '-m', 'venv', root/'.venv'], root, env, 'venv')
+    run_logged([*venv, root/'.venv'], root, env, 'venv')
     wheelhouse = env.pop('ATO_RELEASE_WHEELHOUSE', None)
     links = ['--find-links', wheelhouse] if wheelhouse is not None else []
     run_logged([root/'.venv/bin/python', '-m', 'pip', 'install', '--no-index', '--no-cache-dir',
@@ -243,8 +251,13 @@ def qualify(root, env):
     run_logged([python, '-m', 'py_compile', *[p for p in sources if p.endswith('.py')]], root, env, 'compile')
 
 
-def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, npm_cache=None, run_tests=False):
+def stage(repo, commit, root, *, with_pi=False, node_bin=None, npm_bin=None,
+          wheelhouse=None, npm_cache=None, run_tests=False):
     require(sys.version_info >= (3, 12), 'Python 3.12 or later is required')
+    with_pi = with_pi or run_tests or any(p is not None for p in (node_bin, npm_bin, wheelhouse, npm_cache))
+    if with_pi:
+        require(wheelhouse is not None and npm_cache is not None,
+                'Pi/ACP staging requires --wheelhouse and --npm-cache')
     commit, tree = git_commit(repo, commit)
     require(not root.exists() and not root.is_symlink(), 'snapshot destination already exists; never reuse it')
     root.mkdir(mode=0o700, parents=False)
@@ -268,14 +281,13 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         source = {p: sha(root/p) for p in command(['git', 'ls-files', '-z'], cwd=root).split('\0') if p and not (root/p).is_symlink()}
         with tempfile.TemporaryDirectory(prefix='ato-release-qualification-') as home:
             env = environment(Path(home)/'ato', Path(home)/'native', home=Path(home))
-            env['npm_config_cache'] = str(npm_cache or Path(home)/'npm-cache')
-            if wheelhouse is not None:
-                env['ATO_RELEASE_WHEELHOUSE'] = str(wheelhouse)
-            env['ATO_RELEASE_SOURCE'] = str(repo)
-            for name, value in (('NODE', node_bin), ('NPM', npm_bin)):
-                if value is not None:
-                    env['ATO_RELEASE_'+name] = str(value)
-            tools = install_dependencies(root, env)
+            if with_pi:
+                env.update(npm_config_cache=str(npm_cache), ATO_RELEASE_WHEELHOUSE=str(wheelhouse),
+                           ATO_RELEASE_SOURCE=str(repo))
+                for name, value in (('NODE', node_bin), ('NPM', npm_bin)):
+                    if value is not None:
+                        env['ATO_RELEASE_'+name] = str(value)
+            tools = install_dependencies(root, env, with_pi=with_pi)
             if run_tests:
                 run_release_tests(root, env)
             qualify(root, env)
@@ -285,15 +297,17 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         # to write its final private manifest, then close it permanently.
         seal(root)
         root.chmod(0o700)
-        manifest = dict(version=1, surface=SURFACE, qualified=True, tests="passed" if run_tests else "not_run", root=str(root), commit=commit, tree=tree,
+        manifest = dict(version=1, surface=SURFACE, qualified=True, tests="passed" if run_tests else "not_run",
+                        with_pi=with_pi, root=str(root), commit=commit, tree=tree,
                         source_files=source, files=inventory(root),
-                        tools={k:v for k,v in (tools or {}).items() if k == 'node'},
-                        build_tools=tools or {}, created_at=time.time())
+                        tools={k: v for k, v in tools.items() if k == 'node'},
+                        build_tools=tools, created_at=time.time())
         save(root/MANIFEST, manifest)
         (root/MANIFEST).chmod(0o400)
         root.chmod(0o500)
         verify_snapshot(root, commit)
-        return dict(snapshot=str(root), commit=commit, tree=tree, qualified=True, tests=manifest["tests"], activated=False)
+        return dict(snapshot=str(root), commit=commit, tree=tree, qualified=True, with_pi=with_pi,
+                    tests=manifest["tests"], activated=False)
     except BaseException:
         # Keep failed evidence; absence of a sealed qualified manifest prevents
         # activation. Never remove an operator-selected existing directory.
@@ -826,14 +840,15 @@ def main(argv=None):
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--legacy-context', action='store_true', help='Old CODEX_HOME-only layout')
     parser.add_argument('--commit', help='Full Git commit for stage, diagnosis or activation')
+    parser.add_argument('--with-pi', action='store_true', help='Include the optional Pi and ACP dependencies while staging')
     parser.add_argument('--run-tests', action='store_true', help='Run the full offline suite while staging')
     parser.add_argument('--allow-runtime-change', action='store_true')
     parser.add_argument('--converge-mixed-entrypoints', action='store_true')
     parser.add_argument('--allow-prior-interpreter-change', action='store_true')
     args = parser.parse_args(argv)
 
-    if args.run_tests and not args.stage:
-        parser.error('--run-tests requires --stage')
+    if (args.with_pi or args.run_tests) and not args.stage:
+        parser.error('--with-pi and --run-tests require --stage')
 
     def need(*names):
         for name in names:
@@ -854,9 +869,9 @@ def main(argv=None):
             if isinstance(value, Path):
                 require(value.is_absolute() and value == value.resolve(), 'select absolute canonical paths')
         if args.stage:
-            need('wheelhouse', 'npm_cache')
-            result = stage(args.repo, args.commit, args.snapshot, node_bin=args.node_bin, npm_bin=args.npm_bin,
-                           wheelhouse=args.wheelhouse, npm_cache=args.npm_cache, run_tests=args.run_tests)
+            result = stage(args.repo, args.commit, args.snapshot, with_pi=args.with_pi,
+                           node_bin=args.node_bin, npm_bin=args.npm_bin, wheelhouse=args.wheelhouse,
+                           npm_cache=args.npm_cache, run_tests=args.run_tests)
         else:
             need('bin_dir', 'ato_home', 'codex_home')
             paths = scoped_paths(args.bin_dir, args.ato_home, args.codex_home, legacy_home=args.legacy_ato_home,

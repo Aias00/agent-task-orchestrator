@@ -10,20 +10,28 @@ Specs can optionally protect paths or forbid deletions with `guardrails`.
 
 ## Quick start
 
-Install from a qualified snapshot using its interpreter. Choose an executable
-directory and, optionally, a Skill directory.
+From a Git checkout on macOS, run the quick installer with Python 3.12 or later.
+It stages the checked-out commit and installs `ato` for your account. Core
+installation uses Git and Python and needs no Node.js, npm or dependency cache.
 
 ```sh
-"$SNAPSHOT/.venv/bin/python" -IB "$SNAPSHOT/scripts/install.py" \
-  --bin-dir "$BIN_DIR" --skills-dir "$SKILLS_DIR"
+python3.12 -IB scripts/quick_install.py
+export PATH="$HOME/.local/bin:$PATH"
 ato --help
 ```
 
-Configure the Worker once and run the installed `ato` as the account that
-owns its private state. The default root is `$HOME/.local/share/ato`. Set
-`ATO_HOME` to select a different private root. This account can submit and
-manage its local tasks directly. Set `ATO_ACTOR_FILE` when acting as an
-explicitly enrolled actor. [Trusted host setup](docs/ato-host-setup.md)
+The installer keeps snapshots under `~/.local/share/ato-releases` and accepts
+`--bin-dir`, `--releases-dir`, and an optional `--skills-dir` such as
+`$HOME/.codex/skills`. Use [journaled cutover](docs/runtime-upgrade.md) for an
+existing installation. To include Pi/ACP, add `--with-pi` and provide
+`--wheelhouse PATH` and `--npm-cache PATH` with Node.js/npm available.
+
+For local tasks, install and sign in to the native Codex CLI. ATO looks for
+`codex` on `PATH` or uses `CTASK_CODEX_BIN` when set. Configure a profile to
+select explicit tools or enroll scoped actors. Run `ato` as the account that
+owns its private state, which defaults to `$HOME/.local/share/ato`. Set
+`ATO_HOME` to choose another private root and `ATO_ACTOR_FILE` to act as an
+enrolled actor. [Trusted host setup](docs/ato-host-setup.md)
 
 Write a JSON spec next to the repository or use an absolute `repo` path.
 

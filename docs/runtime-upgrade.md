@@ -1,29 +1,32 @@
 # Offline snapshot, cutover and rollback
 
 `scripts/release_snapshot.py` stages a specific Git tree and verifies the
-qualified snapshot. Supply canonical absolute paths. Select the full commit,
-an unused snapshot directory, and local caches containing the pinned Python
-wheels and npm dependency content.
+qualified snapshot. Supply canonical absolute paths, the full commit, and an
+unused snapshot directory. Core staging uses Git and Python 3.12 or later.
 
 ```sh
 python3.12 scripts/release_snapshot.py --stage \
-  --repo "$SOURCE" --commit "$COMMIT" --snapshot "$SNAPSHOT" \
-  --wheelhouse "$WHEELHOUSE" --npm-cache "$NPM_CACHE"
+  --repo "$SOURCE" --commit "$COMMIT" --snapshot "$SNAPSHOT"
 ```
 
-Stage uses a Git archive and verifies the tree before qualification. It then
-installs from the local caches with offline flags, checks the dependency graph
-and compiles the tracked Python sources. Add `--run-tests` to `--stage` to run
-the full offline fixture suite before sealing. The manifest records `tests` as
-`not_run` by default or `passed` after a successful requested test run.
-It records hashes, modes, links, log and interpreter inventory in the
-read-only snapshot. Stage keeps failed evidence without marking it qualified.
-A separately supplied `--node-bin` and `--npm-bin` select exact trusted
-tools. Fixture results apply to releases staged with `--run-tests`.
+Stage verifies the tree from a Git archive, creates a virtual environment,
+checks the dependency graph, and compiles the tracked Python sources. For
+Pi/ACP, add `--with-pi --wheelhouse "$WHEELHOUSE" --npm-cache "$NPM_CACHE"`.
+This installs the pinned Python and Node dependencies offline. Use
+`--node-bin` and `--npm-bin` to select exact tools. Existing staging commands
+that supply the dependency cache paths still select Pi/ACP.
 
-For a fresh target, use the snapshot's `scripts/install.py`. It installs
-the single `ato` executable and optionally the Skill. A different executable
-already selected at the target requires the journaled procedure below.
+`--run-tests` runs the full offline fixture suite, which requires the same
+Pi/ACP dependency caches. The manifest records `with_pi` and records `tests`
+as `not_run` by default or `passed` after a successful requested test run. It
+also records hashes, modes, links, logs, and interpreter inventory in the
+read-only snapshot. Stage keeps failed evidence for inspection.
+
+For a fresh target, `python3.12 -IB scripts/quick_install.py` stages and
+installs the checked-out commit in one command. If a snapshot is already
+prepared, use its `scripts/install.py` to install the single `ato` executable
+and optionally the Skill. A different executable already selected at the
+target requires the journaled procedure below.
 
 ## Inspect and switch an existing selection
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -618,22 +619,27 @@ class StageTests(unittest.TestCase):
                         '-c','commit.gpgsign=false','commit','-qm','offline fixture'],check=True)
         self.commit,self.tree=release.git_commit(self.repo,'HEAD')
 
-    def install(self,root,env):
-        self.assertTrue(Path(env['ATO_HOME']).is_relative_to(Path(env['npm_config_cache']).parent))
+    def install(self, root, env, *, with_pi):
+        self.assertTrue(Path(env['ATO_HOME']).is_relative_to(Path(env['HOME'])))
         self.assertFalse(Path(env['ATO_HOME']).exists())
         p=root/'.venv/bin/python';p.parent.mkdir(parents=True);p.write_text('isolated test interpreter');p.chmod(0o755)
-        (root/'integrations/pi-acp/node_modules').mkdir(parents=True)
+        if with_pi:
+            (root/'integrations/pi-acp/node_modules').mkdir(parents=True)
+        return {}
 
     def test_stage_archives_exact_tree_qualifies_isolated_target_and_seals_all_material(self):
         with patch.object(release,'install_dependencies',side_effect=self.install),patch.object(release,'qualify') as qualify:
             result=release.stage(self.repo,self.commit,self.dest)
         self.assertFalse(result['activated'])
+        self.assertFalse(result['with_pi'])
         self.assertEqual(result['tests'], 'not_run')
         self.assertEqual(result['tree'],self.tree)
         qualify.assert_called_once()
         self.assertEqual(qualify.call_args.args[0],self.dest)
         self.assertFalse((self.dest/'.git').exists())
         manifest=release.verify_snapshot(self.dest,self.commit)
+        self.assertFalse(manifest['with_pi'])
+        self.assertFalse((self.dest/'integrations/pi-acp/node_modules').exists())
         self.assertEqual(manifest['source_files']['ato.py'],release.sha(self.repo/'ato.py'))
         for name,row in manifest['files'].items():
             self.assertFalse(row.get('mode',0) & 0o222,name)
@@ -679,13 +685,28 @@ class StageTests(unittest.TestCase):
     def test_stage_records_explicit_test_run(self):
         with patch.object(release, 'install_dependencies', side_effect=self.install), patch.object(
                 release, 'run_release_tests') as suite, patch.object(release, 'qualify'):
-            result = release.stage(self.repo, self.commit, self.dest, run_tests=True)
+            result = release.stage(self.repo, self.commit, self.dest, run_tests=True,
+                                   wheelhouse=self.base/'wheels', npm_cache=self.base/'npm-cache')
         suite.assert_called_once()
+        self.assertTrue(result['with_pi'])
         self.assertEqual(result['tests'], 'passed')
         self.assertEqual(release.verify_snapshot(self.dest, self.commit)['tests'], 'passed')
 
 
 class DependencyToolTests(unittest.TestCase):
+    def test_core_staging_and_observer_do_not_resolve_node(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            release.save(root/release.MANIFEST, dict(tools={}))
+            env = release.environment(root/'ato', root/'native')
+            with patch.object(release, 'host_tool') as host_tool, patch.object(release, 'run_logged') as run:
+                self.assertEqual(release.install_dependencies(root, env, with_pi=False), {})
+                selected = release.observer_environment(dict(root=str(root), surface=release.SURFACE), env)
+            host_tool.assert_not_called()
+            run.assert_called_once_with([sys.executable, '-m', 'venv', '--without-pip', root/'.venv'],
+                                        root, env, 'venv')
+            self.assertNotIn('CTASK_NODE_BIN', selected)
+
     def test_nvm_style_tools_are_explicit_pinned_and_loader_environment_is_clean(self):
         with tempfile.TemporaryDirectory(prefix='ato-host-tools-') as folder:
             base=Path(folder).resolve();tool_dir=base/'host-node/bin';tool_dir.mkdir(parents=True)
@@ -695,7 +716,7 @@ class DependencyToolTests(unittest.TestCase):
             env=release.environment(base/'ato',base/'native')
             env.update(ATO_RELEASE_SOURCE=str(base/'source'),ATO_RELEASE_NODE=str(tool_dir/'node'),ATO_RELEASE_NPM=str(tool_dir/'npm'))
             with patch.object(release,'run_logged') as run:
-                tools=release.install_dependencies(root,env)
+                tools=release.install_dependencies(root, env, with_pi=True)
             self.assertEqual(env['PATH'],release.PATH)
             self.assertEqual(env['CTASK_NODE_BIN'],str(tool_dir/'node'))
             argv, _, npm_env, _ = run.call_args_list[-1].args
@@ -707,7 +728,7 @@ class DependencyToolTests(unittest.TestCase):
             js_env = dict(env, ATO_RELEASE_SOURCE=str(base/'source'), ATO_RELEASE_NODE=str(tool_dir/'node'),
                           ATO_RELEASE_NPM=str(npm_js))
             with patch.object(release, 'run_logged') as js_run:
-                release.install_dependencies(root, js_env)
+                release.install_dependencies(root, js_env, with_pi=True)
             self.assertEqual(js_run.call_args.args[0][:3], [str(tool_dir/'node'), str(npm_js), 'ci'])
             release.verify_tools(tools)
             release.save(root/release.MANIFEST,dict(tools=tools))
