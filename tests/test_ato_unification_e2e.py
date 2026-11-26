@@ -19,12 +19,13 @@ from uuid import uuid4
 
 import agent_registry
 import ato_application
+import ato_execution
 import hub_worktree
 import ato_observer
 import ato_process
 import ato_product
 from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
-from ato_task_store import TaskError, TaskStore, normalize_repository
+from ato_task_store import TaskError, TaskStore, canonical_json, normalize_repository
 from message_bus import IdentityError, MessageBus
 import notification_state
 from scripts import ato_host_setup
@@ -795,10 +796,36 @@ class InstalledATO(unittest.TestCase):
             task_ids.append(task_id)
             origin = self.store.tasks / task_id / "origin-session.json"
             self.assertEqual(origin.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(json.loads(origin.read_text()), dict(version=1, task_id=task_id,
+            self.assertEqual(json.loads(origin.read_text()), dict(version=2, kind="codex", task_id=task_id,
                 native_home=str(self.store.native_home), session_id=locator if project else None,
                 project=str(project) if project else None))
             self.assertEqual(list(self.host.folder.glob("acceptance-origin-*.json")), [])
+
+        # A v1 receipt must still select its verified Codex thread and route.
+        previous = self.store.tasks / task_ids[0] / "origin-session.json"
+        record = json.loads(previous.read_text())
+        record.pop("kind")
+        record["version"] = 1
+        previous.write_bytes(canonical_json(record))
+        with patch.object(ato_execution, "worker_config_args", return_value=["inherited"]) as config:
+            self.assertEqual(ato_execution._worker_controller_args(self.store, task_ids[0]), ["inherited"])
+            config.assert_called_once_with(self.store.native_home, sessions[0])
+
+        agy_tasks = []
+        self.env["CODEX_THREAD_ID"] = sessions[0]
+        for marker in ("ANTIGRAVITY_CONVERSATION_ID", "ATO_SUBMISSION_KIND"):
+            self.env[marker] = str(uuid4()) if marker.startswith("ANTI") else "agy"
+            result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+            del self.env[marker]
+            self.assertEqual(result["status"], "completed")
+            task_id = result["task_id"]
+            agy_tasks.append(task_id)
+            source = self.store.submission_origin(task_id)
+            self.assertEqual((source.kind, source.session_id, source.project), ("agy", None, None))
+            with patch.dict(os.environ, {"CODEX_THREAD_ID": sessions[0]}), patch.object(
+                    ato_execution, "worker_config_args") as config:
+                self.assertEqual(ato_execution._worker_controller_args(self.store, task_id), [])
+                config.assert_not_called()
 
         attempts = {}
 
@@ -835,7 +862,8 @@ class InstalledATO(unittest.TestCase):
             self.assertEqual([row["state"] for row in result["delivery"]], ["delivery_unknown"])
         self.assertEqual(attempts[task_ids[0]][0][1]["target"], legacy["target"]["endpoint_id"])
         self.assertEqual(self.host.acceptance_notifications(), legacy)
-        self.assertEqual(self.cli("status", task_ids[2])["delivery"], [])
+        for task_id in [task_ids[2], *agy_tasks]:
+            self.assertEqual(self.cli("status", task_id)["delivery"], [])
 
     def test_installed_host_enrollment_and_scoped_question_without_fixture_grants(self):
         self.install()

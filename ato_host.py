@@ -218,6 +218,10 @@ class Host:
         if grant.binding != binding:
             return None
         if actor is self._local_owner:
+            if (os.environ.get("ATO_SUBMISSION_KIND") == "agy"
+                    or os.environ.get("ANTIGRAVITY_CONVERSATION_ID")):
+                # A caller hint can suppress Codex routing, never authorize delivery.
+                return replace(grant, origin=SubmissionOrigin(str(self.store.native_home), None, None, "agy"))
             adapter = CodexSessionAdapter()
             if session_id := adapter.current_locator():
                 with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
@@ -450,7 +454,7 @@ class Host:
 
     def register_acceptance_route(self, bus, origin, source, *, repo_key=None):
         """Enroll one native session or opt a repository into the legacy route."""
-        _require(origin.valid() and origin.session_id and origin.native_home == str(self.store.native_home),
+        _require(origin.kind == "codex" and origin.valid() and origin.session_id and origin.native_home == str(self.store.native_home),
                  "FORBIDDEN")
         name = self._acceptance_origin_name(origin)
         with self.store._private(self.folder, create=True) as fd:
@@ -520,7 +524,7 @@ class Host:
         return self._acceptance_mailbox_route(bus, row)
 
     def _origin_acceptance_route(self, bus, origin, *, create=True):
-        if origin.session_id is None or origin.native_home != str(self.store.native_home):
+        if origin.kind != "codex" or origin.session_id is None or origin.native_home != str(self.store.native_home):
             return None
         with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
             if CodexSessionAdapter().session_project(origin.session_id) != origin.project:
@@ -555,6 +559,8 @@ class Host:
 
     def _local_delivery_credential(self, scope, notice, side):
         origin = self.store.submission_origin(scope.task_id)
+        if origin is not None and origin.kind != "codex":
+            return None
         original = self._acceptance_record(self._acceptance_origin_name(origin)) if origin is not None else None
         for row in (original, self.acceptance_notifications()):
             if row and (row["source_ref"], row["sender"]["endpoint_id"], row["target"]["endpoint_id"]) == (

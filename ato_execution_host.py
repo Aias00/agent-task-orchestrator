@@ -215,7 +215,8 @@ class CommandHost:
             environment["GIT_OPTIONAL_LOCKS"] = "0"
         else:
             environment = {key: value for key, value in os.environ.items()
-                           if key not in {"ATO_ACTOR_FILE", "ATO_LAUNCH_SEAL", "ATO_LAUNCHER", "CODEX_THREAD_ID"}
+                           if key not in {"ATO_ACTOR_FILE", "ATO_LAUNCH_SEAL", "ATO_LAUNCHER", "CODEX_THREAD_ID",
+                                          "ATO_SUBMISSION_KIND", "ANTIGRAVITY_CONVERSATION_ID"}
                            and not key.startswith("ATO_PRIVATE_")}
             environment["CODEX_HOME"] = str(self.driver.store.native_home)
         output = None

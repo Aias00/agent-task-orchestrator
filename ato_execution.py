@@ -333,6 +333,14 @@ def _verify_released(state, run, generation, fence):
              "RUN_UNSETTLED")
 
 
+def _worker_controller_args(store, task_id):
+    origin = store.submission_origin(task_id)
+    if origin is not None and origin.kind != "codex":
+        return []
+    thread = origin.session_id if origin is not None else os.environ.get("CODEX_THREAD_ID")
+    return worker_config_args(store.native_home, thread)
+
+
 class ExecutionService:
     """Public Task execution API. The actor verifier is separate from visibility.
 
@@ -806,9 +814,7 @@ class ExecutionService:
                           stop_epoch=stop["epoch"] if stop else task["stop_epoch"],
                           stop_run_id=stop["run_id"] if stop else None)
             if not self.profile.fixture:
-                origin = self.store.submission_origin(task_id)
-                thread = origin.session_id if origin and origin.session_id else os.environ.get("CODEX_THREAD_ID")
-                launch["controller_args"] = worker_config_args(self.store.native_home, thread)
+                launch["controller_args"] = _worker_controller_args(self.store, task_id)
             if reuse_initial:
                 launch["operation"] = "resume"
             def still_current(latest):

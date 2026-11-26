@@ -12,7 +12,10 @@ operations.
    `ato project validate --repo PATH --spec FILE`. Include the task's command
    checks. Manual criteria are optional. Use the installed `ato` as the
    account that owns the private ATO state for local tasks. Submit using
-   `ato run --repo PATH --spec FILE` and retain the Task ID.
+   `ato run --repo PATH --spec FILE` and retain the Task ID. When submitting from AGY, prefix that command
+   with `ATO_SUBMISSION_KIND=agy` so the worker uses its default Codex
+   configuration even when AGY inherited a Codex thread ID. Use the Task ID
+   for status updates in AGY.
 2. Read `ato status TASK_ID` to check execution, independent checks, pending
    decisions and the next action. Use `ato list --repo PATH` for the project.
 3. Use `ato inbox` from the verified interaction endpoint. Relay the actual

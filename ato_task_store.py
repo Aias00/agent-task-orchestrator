@@ -688,10 +688,11 @@ class SubmissionOrigin:
     native_home: str
     session_id: str | None
     project: str | None
+    kind: str = "codex"
 
     def valid(self):
         try:
-            return _absolute(self.native_home) and (
+            return self.kind in ("codex", "agy") and _absolute(self.native_home) and (
                 (self.session_id is None and self.project is None)
                 or (_matches(_NATIVE_SESSION_ID, self.session_id) and _absolute(self.project))
             )
@@ -962,10 +963,11 @@ class TaskStore:
                 row = _read_json(fd, "origin-session.json")
             except FileNotFoundError:
                 return None
-        _fields(row, ("version", "task_id", "native_home", "session_id", "project"))
-        origin = SubmissionOrigin(row["native_home"], row["session_id"], row["project"])
-        _require(type(row["version"]) is int and row["version"] == 1 and row["task_id"] == task_id
-                 and origin.valid())
+        _require(isinstance(row, dict) and type(row.get("version")) is int and row["version"] in (1, 2))
+        fields = ("version", "task_id", "native_home", "session_id", "project")
+        _fields(row, fields if row["version"] == 1 else (*fields, "kind"))
+        origin = SubmissionOrigin(row["native_home"], row["session_id"], row["project"], row.get("kind", "codex"))
+        _require(row["task_id"] == task_id and origin.valid())
         return origin
 
     def _spec(self, fd, task):
@@ -1154,7 +1156,7 @@ class TaskStore:
                     _save(staged, "task.json", task, exclusive=True)
                     if grant.origin is not None:
                         _save(staged, "origin-session.json", dict(
-                            version=1, task_id=task_id, **asdict(grant.origin)), exclusive=True)
+                            version=2, task_id=task_id, **asdict(grant.origin)), exclusive=True)
                     for name in ("runs", "evidence", "bindings", "interaction"):
                         os.mkdir(name, mode=0o700, dir_fd=staged)
                     # Stage real, private lock inodes before publishing the Task.
