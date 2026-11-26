@@ -171,8 +171,8 @@ def _cancel_stale(host, service, task, phase, correlation):
 @_state_errors
 def _tick_task(host, service, task_id, cache=None):
     task, _, binding = service._task(task_id)
-    if task["creation"]["runtime_seal"] != host.store.runtime_seal:
-        return
+    # Publication switches observers while existing Runs keep their original seal.
+    # Delivery authorization is checked against the Task binding and generation.
     if cache is not None and cache.get(task_id) == task["revision"]:
         return
     failure, settled = None, True

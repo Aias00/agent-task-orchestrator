@@ -69,7 +69,11 @@ The journal records each managed executable's presence, exact bytes and mode, an
 the sealed source and interpreter for each present entry. It includes the old
 and new observer identity and both state contexts. Dry-run reports Task and
 mailbox activity. Existing Runs keep their sealed source and mailbox rows
-remain in place. The tool stops the verified observer with
+remain in place. The selected Observer continues reading compatible prior-release
+Task records and dispatching eligible notices to their verified original routes.
+Each notice retains its Task binding, Run, STOP epoch and generation checks.
+Existing mailbox receipts preserve delivery deduplication across observer upgrades.
+The tool stops the verified observer with
 SIGTERM and holds both mailbox writer boundaries while replacing the launcher
 and removing the recorded retired entries. An already authorized observer
 requires a prepared target observation configuration. The tool verifies its

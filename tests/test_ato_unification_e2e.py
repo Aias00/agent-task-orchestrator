@@ -715,6 +715,47 @@ class InstalledATO(unittest.TestCase):
         self.assertFalse(cursor.exists())
         self.assertEqual(len(attempts), 1)
 
+    def test_new_observer_delivers_old_release_completion_once_to_original_session(self):
+        self.install()
+        self.profile(via_setup=True)
+        repo, spec, _ = self.task_spec("completion across observer cutover")
+        (session_id,), _, bus = self.acceptance_mailbox(repo)
+        self.env["CODEX_THREAD_ID"] = session_id
+        result = self.cli("run", "--repo", repo, "--spec", spec, "--foreground")
+        task_id = result["task_id"]
+        self.assertEqual(self.cli("status", task_id)["delivery"], [])
+        original = self.store.load_task(task_id)
+        attempts = []
+
+        class Adapter:
+            capabilities = {"native_queue_serialization"}
+
+            def send(self, endpoint, message):
+                attempts.append((endpoint["session_id"], message))
+                return DeliveryResult("delivery_unknown")
+
+        with patch.object(ato_observer, "CodexSessionAdapter", return_value=Adapter()):
+            for observer_seal in ("d" * 64, "e" * 64):
+                current_store = TaskStore(self.store.home, native_home=self.store.native_home,
+                                          runtime_seal=observer_seal)
+                self.assertNotEqual(original["creation"]["runtime_seal"], current_store.runtime_seal)
+                current_host = Host(store=current_store).compose(render_notice=ato_observer.render_notice)
+                current_host.interaction.dispatch_envelope = partial(ato_observer._dispatch, current_host)
+                current_host.interaction.observe_envelope = partial(ato_observer._dispatch, current_host,
+                                                                    observe_only=True)
+                cache = {}
+                self.assertEqual(ato_observer.tick(current_host, cache), {})
+                self.assertEqual(ato_observer.tick(current_host, cache), {})
+        self.assertEqual(len(attempts), 1)
+        recipient, message = attempts[0]
+        self.assertEqual(recipient, session_id)
+        self.assertEqual(message["task_id"], task_id)
+        self.assertEqual(bus.message(message["id"])["state"], "delivery_unknown")
+        after = self.store.load_task(task_id)
+        for field in ("creation", "run_id", "run_heads", "stop_epoch", "spec_sha256"):
+            self.assertEqual(after[field], original[field])
+        self.assertEqual(self.cli("status", task_id)["completion_notification"]["state"], "delivery_unknown")
+
     def test_configured_local_completion_notifies_once_without_an_acceptance_record(self):
         self.install()
         self.profile(via_setup=True)

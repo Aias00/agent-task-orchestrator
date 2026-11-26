@@ -256,6 +256,8 @@ class PublicCLI(unittest.TestCase):
         self.assertEqual(command, private_runtime_command("read-handoff", old_locator))
         self.assertNotIn("Confirm fixture option?", old_message["body"])
         self.assertEqual(read_handoff(app.host, proof_for(user), old_locator)["request_id"], request)
+        with patch.object(app.host.store, "runtime_seal", "f" * 64):
+            self.assertEqual(read_handoff(app.host, proof_for(user), old_locator)["request_id"], request)
 
         evidence = write(self.fixture, "handoff.json", json.dumps({
             "schema_version": 1, "task_id": task_id, "spec_sha256": normalized.spec_sha256,

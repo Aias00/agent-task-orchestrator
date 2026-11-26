@@ -39,8 +39,6 @@ def read_handoff(host, proof, ref):
             if exc.code in {"STATE_CORRUPT", "SPEC_CHANGED", "BUSY", "CHECKS_REQUIRED", "PRODUCT_CHANGED"}:
                 continue
             raise
-        if task["creation"]["runtime_seal"] != host.store.runtime_seal:
-            continue
         for phase, correlation in candidates:
             try:
                 _, item, notice = service._delivery_item(task, host.store.load_spec(task_id), correlation, phase)
