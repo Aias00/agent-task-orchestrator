@@ -10,15 +10,18 @@ Specs can optionally protect paths or forbid deletions with `guardrails`.
 
 ## Quick start
 
-From a Git checkout on macOS, run the quick installer with Python 3.12 or later.
-It stages the checked-out commit and installs `ato` for your account. Core
-installation uses Git and Python and needs no Node.js, npm or dependency cache.
+On macOS with Git and Python 3.12 or later, install `ato` for your account.
+Core installation needs no Node.js, npm, or dependency cache.
 
 ```sh
-python3.12 -IB scripts/quick_install.py
+curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/main/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ato --help
 ```
+
+From a Git checkout, run `sh ./install.sh` to install the checked-out commit.
+For a piped install, set `ATO_INSTALL_REF` on the `sh` side to select a fixed
+Git revision, and pass options after `sh -s --`.
 
 The installer keeps snapshots under `~/.local/share/ato-releases` and accepts
 `--bin-dir`, `--releases-dir`, and an optional `--skills-dir` such as
@@ -108,3 +111,7 @@ in the selected Python environment and the npm fixture under
 The [contract](docs/ato-unified-contract.md) specifies result codes and
 evidence. The [document index](docs/README.md) includes development status and
 historical implementation records.
+
+## License
+
+ATO is distributed under the [MIT License](LICENSE).
