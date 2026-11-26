@@ -1,8 +1,10 @@
 """Product visibility and explicit path rules on real local Git trees."""
 import os
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import ato_product as product
 from test_ato_unified_task_store import git
@@ -88,6 +90,47 @@ class ProductDiffTests(unittest.TestCase):
         self.assertIn("+updated", result["patch"])
         self.assertFalse(marker.exists())
         self.assertEqual((index.stat().st_mtime_ns, index.read_bytes()), (before[0].st_mtime_ns, before[1]))
+
+    def test_replaced_gitlink_needs_no_submodule_object(self):
+        oid = "a" * 40
+        git(self.repo, "update-index", "--add", "--cacheinfo", f"160000,{oid},sub")
+        git(self.repo, "commit", "-qm", "gitlink fixture")
+        self.task["worktree"]["base_commit"] = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "rm", "--cached", "sub")
+        self.write("sub", "replacement\n")
+        result = product.collect_diff(self.task, include_patch=True)
+        self.assertEqual(result["summary"]["files_modified"], ["sub"])
+        self.assertIn("+replacement", result["patch"])
+
+    def test_large_recreated_text_has_unknown_counts_and_text_type(self):
+        self.write("large", "x" * (1024 * 1024 + 1))
+        git(self.repo, "add", "large")
+        git(self.repo, "commit", "-qm", "large base")
+        self.task["worktree"]["base_commit"] = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "rm", "--cached", "large")
+        self.write("large", "changed\n")
+        row, = product.collect_diff(self.task)["files"]
+        self.assertEqual((row["status"], row["binary"], row["lines_added"]), ("M", False, None))
+
+    def test_untracked_races_preserve_product_error_boundary(self):
+        self.assertEqual(product._untracked_bytes(self.repo, "missing/leaf", None), (None, b"", False))
+        (self.repo / "alias").symlink_to(self.repo / "app")
+        with self.assertRaises(product.TaskError) as caught:
+            product._untracked_bytes(self.repo, "alias/change", None)
+        self.assertEqual(caught.exception.code, "PRODUCT_CHANGED")
+
+    def test_patch_wait_timeout_kills_child_and_missing_git_is_typed(self):
+        with patch.object(product.shutil, "which", return_value=None), self.assertRaises(product.TaskError) as caught:
+            product._git_argv(self.repo, "diff")
+        self.assertEqual(caught.exception.code, "UNSUPPORTED_CAPABILITY")
+        with patch.object(product.subprocess, "Popen") as spawn:
+            child = spawn.return_value.__enter__.return_value
+            child.stdout.read.return_value = b""
+            child.wait.side_effect = subprocess.TimeoutExpired("git", 30)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                product._git_patch(self.repo, {}, [])
+            child.wait.assert_called_once_with(timeout=30)
+            child.kill.assert_called_once_with()
 
     def test_file_list_and_patch_have_independent_bounds(self):
         for i in range(202):

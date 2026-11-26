@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 import agent_registry
 import ato_config
 import ato_cli
-from ato_application import Application
+from ato_application import Application, project_diff
 from ato_execution import HostProfile
 from ato_host import Host
 from ato_config import private_runtime_command
@@ -100,6 +100,21 @@ class PublicCLI(unittest.TestCase):
         return Application(Host(store=self.store,
                                 profile=HostProfile(str(executable), str(worker_home), fixture=True)).compose(
                                     render_notice=render_notice))
+
+    def test_visible_diff_failures_preserve_task_id_and_redact_host_errors(self):
+        task_id = "task-" + "1" * 32
+        host = Mock()
+        host.interaction.task_status.return_value = {"status": "running"}
+        host.store.load_task.return_value = dict(worktree_removed=False, worktree=dict(base_commit="base", branch="ref"))
+        for failure, expected in ((OSError("private path"), "BINDING_CHANGED"),
+                                  (ValueError("git failed"), "BINDING_CHANGED"),
+                                  (subprocess.TimeoutExpired("git", 30), "BINDING_CHANGED"),
+                                  (TaskError("PRODUCT_CHANGED"), "PRODUCT_CHANGED")):
+            with self.subTest(failure=failure), patch("ato_product.collect_diff", side_effect=failure):
+                with self.assertRaises(TaskError) as caught:
+                    project_diff(host, object(), task_id)
+                self.assertEqual((caught.exception.exit_code, caught.exception.code, caught.exception.task_id),
+                                 (4, expected, task_id))
 
     def test_help_and_read_only_diagnostics_do_not_touch_homes(self):
         for argv in (("--help",), ("project", "--help"), ("agent", "--help"), ("system", "--help")):

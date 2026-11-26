@@ -177,13 +177,18 @@ def project_diff(host, proof, task_id, *, stat_only=False):
     worktree = task["worktree"]
     if worktree is None:
         return result
-    if task["worktree_removed"]:
-        host.store._repo_matches(task)
-    else:
-        host.store._verify_worktree(task)
-    result.update(base=worktree["base_commit"], branch=worktree["branch"],
-                  worktree_state="removed" if task["worktree_removed"] else "present")
-    result.update(ato_product.collect_diff(task, include_patch=not stat_only))
+    try:
+        if task["worktree_removed"]:
+            host.store._repo_matches(task)
+        else:
+            host.store._verify_worktree(task)
+        result.update(base=worktree["base_commit"], branch=worktree["branch"],
+                      worktree_state="removed" if task["worktree_removed"] else "present")
+        result.update(ato_product.collect_diff(task, include_patch=not stat_only))
+    except TaskError as exc:
+        raise TaskError(exc.code, task_id) from None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise TaskError("BINDING_CHANGED", task_id) from None
     return result
 
 

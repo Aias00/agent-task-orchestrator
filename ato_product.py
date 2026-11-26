@@ -231,43 +231,57 @@ def _diff_row(name, status, added, deleted):
 def _untracked_bytes(root, name, base_entry):
     path = root / name
     limit = 1024 * 1024
-    with _directory(path.parent) as parent:
-        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
-        if stat.S_ISLNK(info.st_mode):
-            return "120000", os.fsencode(os.readlink(path.name, dir_fd=parent)), False
-        if not stat.S_ISREG(info.st_mode):
-            return None, b"", False
-        fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
-        with os.fdopen(fd, "rb") as stream:
-            opened = os.fstat(fd)
-            _require(stat.S_ISREG(opened.st_mode) and _file_stamp(opened) == _file_stamp(info), "PRODUCT_CHANGED")
-            data = stream.read(limit + 1)
-            # Recreated index deletions can be large. Compare the object ID
-            # incrementally without retaining either entire version in memory.
-            if base_entry and len(data) > limit:
-                mode, oid = base_entry
-                disk_mode = "100755" if opened.st_mode & stat.S_IXUSR else "100644"
-                if mode == disk_mode:
-                    algorithm = "sha1" if len(oid) == 40 else "sha256"
-                    digest = hashlib.new(algorithm, f"blob {opened.st_size}\0".encode(), usedforsecurity=False)
-                    digest.update(data)
-                    for chunk in iter(lambda: stream.read(limit), b""):
-                        digest.update(chunk)
-                    if digest.hexdigest() == oid:
-                        return None, b"", False
+    try:
+        with _directory(path.parent, code="PRODUCT_CHANGED") as parent:
+            info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                return "120000", os.fsencode(os.readlink(path.name, dir_fd=parent)), False
+            if not stat.S_ISREG(info.st_mode):
+                return None, b"", False
+            fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+            with os.fdopen(fd, "rb") as stream:
+                opened = os.fstat(fd)
+                _require(stat.S_ISREG(opened.st_mode) and _file_stamp(opened) == _file_stamp(info), "PRODUCT_CHANGED")
+                data = stream.read(limit + 1)
+                # Recreated index deletions can be large. Compare the object ID
+                # incrementally without retaining either entire version in memory.
+                if base_entry and len(data) > limit:
+                    mode, oid = base_entry
+                    disk_mode = "100755" if opened.st_mode & stat.S_IXUSR else "100644"
+                    if mode == disk_mode:
+                        algorithm = "sha1" if len(oid) == 40 else "sha256"
+                        digest = hashlib.new(algorithm, f"blob {opened.st_size}\0".encode(), usedforsecurity=False)
+                        digest.update(data)
+                        for chunk in iter(lambda: stream.read(limit), b""):
+                            digest.update(chunk)
+                        if digest.hexdigest() == oid:
+                            return None, b"", False
+    except FileNotFoundError:
+        return None, b"", False
     mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
     return mode, data[:limit], len(data) > limit
 
 
+def _git_argv(root, *args):
+    git = shutil.which("git", path=os.defpath)
+    _require(git is not None, "UNSUPPORTED_CAPABILITY")
+    return [git, "-C", str(root), "-c", "core.hooksPath=" + os.devnull,
+            "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false",
+            "-c", "protocol.allow=never", *args]
+
+
 def _git_patch(root, env, args):
-    argv = [shutil.which("git", path=os.defpath), "-C", str(root), "-c", "core.fsmonitor=false",
-            "-c", "core.hooksPath=" + os.devnull, "diff", *_DIFF_FLAGS, *args]
+    argv = _git_argv(root, "diff", *_DIFF_FLAGS, *args)
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as process:
         data = process.stdout.read(_MAX_PATCH_BYTES + 1)
         if len(data) > _MAX_PATCH_BYTES:
             process.kill()
-        elif process.wait() != 0:
-            raise TaskError("BINDING_CHANGED")
+        else:
+            try:
+                _require(process.wait(timeout=30) == 0, "BINDING_CHANGED")
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise
     return bytearray(data)
 
 
@@ -279,13 +293,17 @@ def _add_untracked(root, env, tree, name, rows, patch, truncated):
     before = "/dev/null"
     if name in tree:
         oldmode, oid = tree[name]
-        size = int(_git(root, "cat-file", "-s", oid, env=env)[0])
-        if size > 1024 * 1024:
-            # No complete hunk can be generated without reading the base.
-            rows[name] = _diff_row(name, "M", None, None)
-            truncated |= patch is not None
-            return truncated
-        old = _git(root, "cat-file", "-p", oid, env=env)[0]
+        if oldmode == "160000":
+            old = f"Subproject commit {oid}\n".encode("ascii")
+        else:
+            size = int(_git(root, "cat-file", "-s", oid, env=env)[0])
+            if size > 1024 * 1024:
+                # No complete hunk can be generated without reading the base.
+                rows[name] = _diff_row(name, "M", None, None)
+                rows[name]["binary"] = b"\0" in data or mode == "120000"
+                truncated |= patch is not None
+                return truncated
+            old = _git(root, "cat-file", "-p", oid, env=env)[0]
         if not partial and mode == oldmode and data == old:
             return truncated
         before = "a/" + name
@@ -425,7 +443,7 @@ def _manifest_changes(task, manifest, root, env, tree, rules=None):
     """Compare frozen modes/bytes with base objects, independently of Git index flags."""
     target = {row["path"]: row for row in retained_entries(manifest)}
     changes = {}
-    argv = [shutil.which("git", path=os.defpath), "-C", str(root), "cat-file", "--batch"]
+    argv = _git_argv(root, "cat-file", "--batch")
     with subprocess.Popen(argv, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL) as reader:
         try:

@@ -498,7 +498,8 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual(git(repo, "status", "--porcelain"), "")
         self.assertEqual(self.cli("project", "cleanup", task_id, "--confirm"), cleaned)
         git(repo, "branch", "-D", branch)
-        self.cli("project", "diff", task_id, error=(4, "BINDING_CHANGED"))
+        error = self.cli("project", "diff", task_id, error=(4, "BINDING_CHANGED"))
+        self.assertEqual(error["task_id"], task_id)
 
     def test_fixup_installed_run_can_start_after_optional_node_digest_changes(self):
         node = write(self.root, "node", "#!/bin/sh\nexit 0\n", 0o700)

@@ -1470,7 +1470,7 @@ class _RunDriver:
                 if recheck:
                     self.reason = "REVIEW_CHANGES_REQUIRED"
                     return "blocked"
-            self.product, self.checks, self.review = None, [], None
+            self.product, self.checks, self.review, self.guardrail_violations = None, [], None, []
             outcome = self._repair(verdict)
             if outcome:
                 return outcome
