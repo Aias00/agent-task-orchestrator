@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-task-orchestrator"
-version = "1.0.0"
+version = "1.0.1"
 description = "ATO unified task orchestration source with independent host checks"
 readme = "README.md"
 license = "MIT"
