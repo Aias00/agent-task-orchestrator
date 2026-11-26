@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -352,6 +353,63 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual(json.loads(mirror.read_text())["epoch"], current["stop_epoch"])
         (self.worker_home / "mode").unlink()
         self.assertEqual(self.service.resume(self.actor, task, foreground=True)["status"], "completed")
+
+    def test_first_mailbox_wal_contention_retries_without_replaying_launch(self):
+        task = self.create()
+        with ato_config.use_unified_kernel(self.store.kernel_root, self.store.native_home):
+            path = ato_config.ensure_interaction_directory() / "mailbox" / "state.sqlite"
+        path.touch(mode=0o600, exist_ok=False)
+        reader = sqlite3.connect(path)
+        self.addCleanup(reader.close)
+        reader.execute("create table fixture_marker (id integer)")
+        reader.execute("begin")
+        reader.execute("select * from fixture_marker").fetchall()
+        original_connect = transport.MessageBus._connect
+        original_open = transport.managed_bus
+        conflicts = []
+
+        def connect(bus):
+            con = original_connect(bus)
+            con.execute("pragma busy_timeout=0")
+            return con
+
+        def open_mailbox():
+            try:
+                return original_open()
+            except sqlite3.OperationalError as exc:
+                conflicts.append(exc.sqlite_errorcode)
+                reader.rollback()
+                raise
+
+        with patch.object(transport.MessageBus, "_connect", connect), patch.object(
+                transport, "managed_bus", side_effect=open_mailbox):
+            result = self.service.start(self.actor, task, foreground=True)
+        self.assertEqual(conflicts, [sqlite3.SQLITE_BUSY])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(result["run_history"]), 1)
+        self.assertEqual(len(self.processes), 1)
+        self.assertEqual((self.worker_home / "attempts").read_text().splitlines(), ["work"])
+
+    def test_mailbox_busy_exhaustion_leaves_initial_run_unlaunched(self):
+        task = self.create()
+        busy = sqlite3.OperationalError("fixture contention")
+        busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        with patch.object(transport, "managed_bus", side_effect=busy), self.assertRaises(TaskError) as caught:
+            self.service.start(self.actor, task)
+        self.assertEqual((caught.exception.code, caught.exception.task_id), ("BUSY", task))
+        _, receipts = execution._current(self.store, self.store.load_task(task))
+        self.assertEqual(receipts, [])
+        self.assertEqual(self.processes, [])
+        self.assertEqual(self.service.start(self.actor, task, foreground=True)["status"], "completed")
+
+    def test_mailbox_open_does_not_retry_other_sqlite_errors(self):
+        error = sqlite3.OperationalError("fixture disk error")
+        error.sqlite_errorcode = sqlite3.SQLITE_IOERR
+        with patch.object(transport, "managed_bus", side_effect=error) as opened:
+            with self.assertRaises(sqlite3.OperationalError) as caught:
+                execution._open_launch_mailbox("fixture")
+        self.assertIs(caught.exception, error)
+        opened.assert_called_once_with()
 
     def test_independent_worktrees_run_concurrently_but_each_task_has_one_driver(self):
         first, second = self.create(), self.create()

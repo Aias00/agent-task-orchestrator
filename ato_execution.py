@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -184,6 +185,22 @@ def _load_task(store, task_id):
 @_retry_busy
 def _load_spec(store, task_id):
     return store.load_spec(task_id)
+
+
+def _open_launch_mailbox(task_id):
+    # Two first opens can race on the transition to WAL. Retry only the
+    # idempotent constructor, before publishing any receipt or spawning a child.
+    deadline = time.monotonic() + 1
+    for delay in (.005, .02, .05, .12, None):
+        try:
+            return transport.managed_bus()
+        except sqlite3.OperationalError as exc:
+            primary = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if primary not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+            if delay is None or time.monotonic() + delay >= deadline:
+                raise TaskError("BUSY", task_id) from None
+            time.sleep(delay)
 
 
 def _last_settlement(store, task, run, receipts):
@@ -741,7 +758,7 @@ class ExecutionService:
                         for _, receipt in receipts:
                             if receipt["phase"] == "launching":
                                 _require(_evidence(self.store, task_id, receipt)["time_policy"] == policy, "NOT_RESUMABLE")
-                bus = transport.managed_bus()
+                bus = _open_launch_mailbox(task_id)
                 lease = bus.execution_lease(recovery.execution_resource(state["repo"]))
                 if stop:
                     # A clean STOP normally releases its lease. A retained
