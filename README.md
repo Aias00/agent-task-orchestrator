@@ -20,6 +20,8 @@ ato --help
 ```
 
 From a Git checkout, run `sh ./install.sh` to install the checked-out commit.
+If you already have a sealed snapshot, run its [scripts/install.py](scripts/install.py)
+with the snapshot's interpreter.
 For a piped install, set `ATO_INSTALL_REF` on the `sh` side to select a fixed
 Git revision, and pass options after `sh -s --`.
 
@@ -36,7 +38,8 @@ owns its private state, which defaults to `$HOME/.local/share/ato`. Set
 `ATO_HOME` to choose another private root and `ATO_ACTOR_FILE` to act as an
 enrolled actor. [Trusted host setup](docs/ato-host-setup.md)
 
-Write a JSON spec next to the repository or use an absolute `repo` path.
+Place a JSON spec using `"repo": "."` in the repository, or set `repo` to the
+repository's absolute path.
 
 ```json
 {

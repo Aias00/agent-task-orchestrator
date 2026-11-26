@@ -477,7 +477,11 @@ class InstalledATO(unittest.TestCase):
         self.assertEqual((cleaned["status"], cleaned["worktree_state"]), ("completed", "removed"))
         self.assertEqual(cleaned["product"], before["product"])
         self.assertEqual(self.cli("stop", task_id), cleaned)
-        self.assertEqual(self.cli("status", task_id), cleaned)
+        status = self.cli("status", task_id)
+        self.assertEqual(status.pop("completion_notification"), dict(
+            source="unknown", session_verified_at_submission=None, state="no_delivery_record"))
+        self.assertEqual(status.pop("watchdog"), dict(state="not_observed", alerts=[]))
+        self.assertEqual(status, cleaned)
         self.assertFalse((task_dir / "STOP.json").exists())
 
     def test_batch2_cleanup_retains_uncommitted_verified_product_after_cutover(self):
