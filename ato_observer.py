@@ -9,6 +9,7 @@ from threading import Event
 import time
 
 import ato_config
+import ato_watchdog
 from agent_registry import SessionEvent, SessionIdentity
 import ato_process
 import failure_attention
@@ -252,6 +253,8 @@ def _watch(host, config, fd, seal, birth, stop):
                failed_task_count=0, first_task_failure=None)
     cache = {}
     policy = None
+    sampler = ato_watchdog.Sampler(host)
+    watchdog_error = None
     try:
         while not stop.is_set():
             try:
@@ -266,13 +269,20 @@ def _watch(host, config, fd, seal, birth, stop):
                 task_failures = tick(host, cache)
             except (OSError, ValueError, sqlite3.Error):
                 task_failures = None
+            try:
+                if sampled_task := sampler.poll():
+                    ato_watchdog.deliver(host, sampled_task, _dispatch)
+                watchdog_error = sampler.last_error
+            except (OSError, ValueError, sqlite3.Error, KeyError, TypeError, MailboxError):
+                watchdog_error = "MONITOR_UNAVAILABLE"
             failed = task_failures is None or bool(task_failures)
             first = next(iter(task_failures.items())) if task_failures else None
-            row.update(heartbeat=time.time(), state="watching",
+            row.update(heartbeat=time.time(), state="watching", watchdog_error=watchdog_error,
                        consecutive_failures=row["consecutive_failures"] + 1 if failed else 0,
                        failed_task_count=len(task_failures) if task_failures is not None else None,
                        first_task_failure=dict(task_id=first[0], code=first[1]) if first else None)
             _save(fd, "process.json", row)
             stop.wait(2)
     finally:
+        sampler.close()
         _save(fd, "process.json", dict(row, heartbeat=time.time(), state="stopped"))

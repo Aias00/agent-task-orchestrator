@@ -22,6 +22,7 @@ import ato_application
 import ato_execution
 import hub_worktree
 import ato_observer
+import ato_watchdog
 import ato_process
 import ato_product
 from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
@@ -1272,6 +1273,68 @@ class InstalledATO(unittest.TestCase):
         other_repo, other_spec, _ = self.task_spec("other diff fixture")
         other = self.cli("run", "--repo", other_repo, "--spec", other_spec, "--foreground")
         self.cli("project", "diff", other["task_id"], actor=proof, error=(3, "NOT_FOUND"))
+
+    def test_watchdog_sampler_and_public_status_are_read_only_for_task(self):
+        self.install()
+        self.profile()
+        repo, spec_file, _ = self.task_spec("watchdog sampler fixture")
+        result = self.cli("run", "--repo", repo, "--spec", spec_file, "--foreground")
+        task_id = result["task_id"]
+        self.assertEqual(self.cli("status", task_id)["watchdog"]["state"], "not_observed")
+        self.assertFalse((self.store.root / "watchdog").exists())
+        task_file = self.store.tasks / task_id / "task.json"
+        before = task_file.read_bytes()
+        sampler = ato_watchdog.Sampler(self.host)
+        self.addCleanup(sampler.close)
+        sampler.poll()
+        self.assertIsNotNone(sampler.job)
+        deadline = time.monotonic() + 30
+        while sampler.job is not None and time.monotonic() < deadline:
+            sampler.poll()
+            time.sleep(.02)
+        self.assertIsNone(sampler.job)
+        self.assertIsNone(sampler.last_error)
+        observed = self.cli("status", task_id)
+        self.assertEqual(observed["status"], "completed")
+        self.assertEqual(observed["watchdog"]["state"], "observing")
+        self.assertEqual(observed["watchdog"]["alerts"], [])
+        self.assertEqual(observed["watchdog"]["metrics"]["run_count"], 1)
+        self.assertEqual(task_file.read_bytes(), before)
+
+    def test_watchdog_alert_delivery_unknown_is_deduplicated_across_restart(self):
+        self.install()
+        self.profile(mode="blocked", via_setup=True)
+        repo, spec_file, _ = self.task_spec("watchdog delivery fixture")
+        (session_id,), binary, bus = self.acceptance_mailbox(repo)
+        self.env["CODEX_THREAD_ID"] = session_id
+        result = self.cli("run", "--repo", repo, "--spec", spec_file, "--foreground",
+                          error=(4, "RUN_UNSETTLED"))
+        task_id = result["task_id"]
+        snapshot = ato_watchdog.collect(self.host, task_id)
+        record = ato_watchdog.reduce_sample(None, snapshot)
+        self.assertTrue(record["alerts"])
+        ato_watchdog.save(self.store, record)
+        attempts = []
+
+        class Adapter:
+            capabilities = {"native_queue_serialization"}
+
+            def send(self, endpoint, message):
+                attempts.append(message)
+                return DeliveryResult("delivery_unknown")
+
+        with patch.object(ato_observer, "CodexSessionAdapter", return_value=Adapter()):
+            ato_watchdog.deliver(self.host, task_id, ato_observer._dispatch)
+            restarted = Host(store=self.store).compose()
+            ato_watchdog.deliver(restarted, task_id, ato_observer._dispatch)
+        self.assertEqual(len(attempts), len(record["alerts"]))
+        self.assertTrue(all(message["kind"] == "ato_watchdog" for message in attempts))
+        self.assertTrue(all(bus.message(message["id"])["state"] == "delivery_unknown" for message in attempts))
+        observed = self.cli("status", task_id)
+        self.assertEqual(observed["status"], "blocked")
+        self.assertTrue(all(alert["notification"]["state"] == "delivery_unknown"
+                            for alert in observed["watchdog"]["alerts"]))
+        self.assertNotIn(session_id, json.dumps(observed["watchdog"]))
 
     def test_declared_guardrails_block_advisory_settlement_and_recheck(self):
         self.install()

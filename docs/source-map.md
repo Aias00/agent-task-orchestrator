@@ -9,7 +9,7 @@ Workflow kernel.
 | Standard-library primitives, shared public exception and compatibility exports | `ato_core.py`; re-exported by `runner.py` and `recovery.py` |
 | Public launcher, command parsing and composition | `bin/ato`, `ato.py`, `ato_cli/__init__.py`, `ato_application.py` |
 | Task/Run ledger, admission, ownership and accepted product retention | `ato_task_store.py`, `ato_execution.py`, `ato_execution_host.py`, `ato_product.py`, `ato_process.py` |
-| Enrolled credentials, bindings, answers, acceptance and observation | `ato_host.py`, `ato_binding.py`, `ato_acceptance.py`, `ato_observer.py`, `ato_private.py`, `ato_runtime.py` |
+| Enrolled credentials, bindings, answers, acceptance and observation | `ato_host.py`, `ato_binding.py`, `ato_acceptance.py`, `ato_observer.py`, `ato_watchdog.py`, `ato_private.py`, `ato_runtime.py` |
 | Complete workflow, stage execution and independent checks | `workflow.py`, `runner.py`, `permissions.py` |
 | Bounded recovery, host actions and accumulated time | `recovery.py`, `execution_state.py`, `host_recheck.py`, `host_budget.py`, `budget.py` |
 | Durable task observation, questions and disposition | `control.py`, `interaction.py`, `workflow_closure.py`, `failure_attention.py` |

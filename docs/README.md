@@ -6,6 +6,7 @@
 
 日常使用见 [ATO 快速开始](../README.md#quick-start)，宿主配置见 [受信任宿主](ato-host-setup.md)。本节同时保留执行与交互机制的参考资料。
 
+- [Observer 执行监控设计](observer-watchdog.md)
 - [Task-based execution budgets](adaptive-budgets.md)
 - [Adding a trusted adapter](agent-adapter-guide.md)
 - [Adapter and transport boundary](agent-transports.md)

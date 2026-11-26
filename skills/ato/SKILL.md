@@ -23,6 +23,11 @@ operations.
    `unsupported`; an unverified Codex origin reports `unbound`.
    `no_delivery_record` means no task completion notice is visible yet.
    `delivery_unknown` means delivery could not be confirmed. Use `ato list --repo PATH` for the project.
+   Read `watchdog` for sampled execution alerts, recovery evidence and timing.
+   Check `sampled_at` and `state` before treating a monitoring result as current.
+   A stale sample or `not_observed` supplies no current health conclusion.
+   Alerts are advisory. Compare them with the task spec and diff before acting.
+   Timing and retries alone cannot establish efficiency gains.
 3. Use `ato inbox` from the verified interaction endpoint. Relay the actual
    request to the user. The enrolled user records their decision using
    `ato answer REQUEST_ID --answer TEXT`.

@@ -8,6 +8,7 @@ import time
 import ato_config
 import ato_process
 import ato_product
+import ato_watchdog
 import budget
 import hub_sandbox
 from ato_execution import _current, _repo_gate, _worker_lock, _verify_exit, _active_proof
@@ -82,6 +83,7 @@ class Application:
             status = api.task_status(proof, args.task_id)
             origin = host.store.submission_origin(args.task_id)
             status["completion_notification"] = completion_notification(status, origin)
+            status["watchdog"] = ato_watchdog.public_status(host.store, args.task_id)
             return status
         if operation == "stop":
             result = host.execution.request_stop(proof, args.task_id)
@@ -276,7 +278,8 @@ def system_status(host):
         except (OSError, ValueError, TypeError, KeyError):
             raise TaskError("STATE_CORRUPT") from None
     return dict(schema_version=1, release=host.store.runtime_seal, namespace="unified-v1", time_policy=time_policy,
-                observer=dict(pid=pid, state=state, **host.observer_transport()), mailbox=mailbox_summary)
+                observer=dict(pid=pid, state=state, watchdog_error=(row or {}).get("watchdog_error"),
+                              **host.observer_transport()), mailbox=mailbox_summary)
 
 
 def doctor(host, *, probe_versions=False):
