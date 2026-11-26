@@ -4,9 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-import agents
+from ato_adapters import agents
 import agent_registry
-from acp_bridge import ACPAdapter
+from ato_adapters.acp_bridge import ACPAdapter
 
 agent_registry.register(ACPAdapter('offline_acp_fixture', __file__))
 agent_registry.register(ACPAdapter('offline_pi_acp_fixture', __file__))
@@ -14,7 +14,7 @@ agent_registry.set_runtime_entrypoint(__file__)
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '_acp_bridge':
-        import acp_bridge
+        from ato_adapters import acp_bridge
         try:
             import os
             label = sys.argv[3]

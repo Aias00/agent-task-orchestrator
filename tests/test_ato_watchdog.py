@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-import ato_watchdog as watchdog
-from ato_task_store import TaskStore, SubmissionOrigin, TaskError
+from ato_task import ato_watchdog as watchdog
+from ato_task.ato_task_store import TaskStore, SubmissionOrigin, TaskError
 
 TASK = "task-" + "a" * 32
 RUN = "run-" + "b" * 32

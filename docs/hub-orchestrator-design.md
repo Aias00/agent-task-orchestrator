@@ -38,10 +38,10 @@
 
 | 基线模块 / 门禁 | 源码事实 | 对 H1 设计的硬约束 |
 | --- | --- | --- |
-| [workflow.py](../workflow.py) L19–88、L207–228、L362–469 | 已有不可变合约、`contract_hash`、宿主独立 `checks`、仓库锁 `.codex/tasks/.worker.lock`、`manual` 人工验收停点（`needs_input`） | H1 外层编排器直接组合 `workflow.create` 与 `Workflow.execute`，不修改 `workflow.py` AST |
+| [workflow.py](../ato_workflow/workflow.py) L19–88、L207–228、L362–469 | 已有不可变合约、`contract_hash`、宿主独立 `checks`、仓库锁 `.codex/tasks/.worker.lock`、`manual` 人工验收停点（`needs_input`） | H1 外层编排器直接组合 `workflow.create` 与 `Workflow.execute`，不修改 `workflow.py` AST |
 | [runner.py](../runner.py) L105–189 | 已有 `STOP` 守卫、W1 有界退出感知 `Popen.wait`（≤150ms）、进程组 `SIGTERM → 2s → SIGKILL` 清理与 `cleanup_blocked` | `hub_sandbox.py` 沿用同等进程组、退出感知轮询和清理语义 |
-| [agents.py](../agents.py) L242–355 | 已有 macOS `sandbox-exec` 写限制、敏感路径 7 项排除、Claude `--safe-mode --restricted --tools Read,Glob,Grep --json-schema` 与鉴权阻塞识别 | `hub_adapter_claude.py` 与 `hub_sandbox.py` 对齐其只读工具与鉴权失败分类，不破坏现有 worker 逻辑 |
-| [pi_toolchain.py](../pi_toolchain.py) | 纯 stdlib 叶模块，提供 `write_exclusions(runtime)` 保护运行时根与可信目录 | `hub_sandbox.py` 可单向复用 `write_exclusions`，不引入反向依赖 |
+| [agents.py](../ato_adapters/agents.py) L242–355 | 已有 macOS `sandbox-exec` 写限制、敏感路径 7 项排除、Claude `--safe-mode --restricted --tools Read,Glob,Grep --json-schema` 与鉴权阻塞识别 | `hub_adapter_claude.py` 与 `hub_sandbox.py` 对齐其只读工具与鉴权失败分类，不破坏现有 worker 逻辑 |
+| [pi_toolchain.py](../ato_pi/pi_toolchain.py) | 纯 stdlib 叶模块，提供 `write_exclusions(runtime)` 保护运行时根与可信目录 | `hub_sandbox.py` 可单向复用 `write_exclusions`，不引入反向依赖 |
 | [check_architecture.py](../scripts/check_architecture.py) L11–54、[结构测试](../tests/test_architecture_structure.py) L37–46 | 自动扫描根 `*.py` 与 `ato_cli/`（含函数内延迟 import），要求双向依赖 ≤8 且为 [31 对历史基线](../tests/fixtures/architecture-baseline.json) 子集 | H1 新模块置于根 `hub_*.py`，严格单向依赖，**新增 0 对双向依赖** |
 | [test_pi_production_profile.py](../tests/test_pi_production_profile.py) L153–166 | 校验八核心 AST SHA-256 等于 [w2-core-ast.json](../tests/fixtures/w2-core-ast.json)，并禁止八核心导入 vendor 前缀 | H1 保持八核心零变更，并扩充 vendor AST 禁入前缀覆盖 `hub_adapter_` |
 | [cli-surface.json](../tests/fixtures/cli-surface.json) | 冻结现有 55 个 `ctask` 子命令/别名/参数 | H1 新增独立模块 `hub_cli.py`，不改 `ato_cli/parser.py` |
@@ -212,7 +212,7 @@ class HubAdapter(Protocol):
 - **双重只读防线**（绝不只靠提示词；具体策略已由 [h1-cli-spike.md](h1-cli-spike.md) 实测落定）：
   1. **OS 层写拒绝（按厂商实测边界区分，避免 Seatbelt 嵌套冲突）**：
      - **AGY / Claude**：由 ATO 外层施加 macOS 只读 `sandbox-exec` profile——全局 `(deny file-write*)`，仅放行 `/dev/null`、当次 `runtime_dir`（叠加 `pi_toolchain.write_exclusions`）以及开启原生 `session_resume` 时必需的该 CLI 原生会话目录（AGY 为 `$HOME/.gemini/antigravity-cli`，Claude 为 `~/.claude` / `~/.claude.json` / `/tmp/claude-<uid>`）；**目标主仓、隔离 worktree、`.git`、`.codex/tasks`、`runtime/trusted` 全部在 OS 层禁止写入**。AGY 不再依赖与 `--disable-slash-commands` 冲突的 `--mode plan`，也不与内建 `--sandbox` 叠套。
-     - **Codex**：实测外层 `sandbox-exec` 会与 Codex 内建 Seatbelt 冲突导致连只读命令也失败，因此遵循 [agents.py](../agents.py) L72–73，采用 Codex 原生只读 Seatbelt（首轮 `--sandbox read-only`，续轮 `-c sandbox_mode="read-only"`），不叠套外层 `sandbox-exec`。
+     - **Codex**：实测外层 `sandbox-exec` 会与 Codex 内建 Seatbelt 冲突导致连只读命令也失败，因此遵循 [agents.py](../ato_adapters/agents.py) L72–73，采用 Codex 原生只读 Seatbelt（首轮 `--sandbox read-only`，续轮 `-c sandbox_mode="read-only"`），不叠套外层 `sandbox-exec`。
   2. **事后树完整性绊线**：无论哪家主控，每轮审阅前后均强制执行 `snapshot_integrity`，形成独立于 CLI 内部实现的第二重硬保障。
 - **清洁环境与防泄漏**：
   - 子进程环境剥离 `PYTHONPATH`、`NODE_OPTIONS`、`DYLD_*`、`LD_*`、`CTASK_SESSION_REF` 及 ATO actor 凭据路径；

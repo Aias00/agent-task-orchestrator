@@ -13,18 +13,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import agent_registry
 from agent_registry import SessionActivity, SessionIdentity
-import ato_config
-from ato_execution import _repo_gate, quarantine_task
-from ato_host import Host, _CREDENTIAL, _SESSION
-from ato_execution_host import HostProfile
-from ato_seal import installed_boundary, runtime_seal
-from ato_task_store import (
+from ato_common import ato_config
+from ato_task.ato_execution import _repo_gate, quarantine_task
+from ato_task.ato_host import Host, _CREDENTIAL, _SESSION
+from ato_task.ato_execution_host import HostProfile
+from ato_release.seal import installed_boundary, runtime_seal
+from ato_task.ato_task_store import (
     SubmissionOrigin, TaskError, _directory, _fields, _identifier, _matches, _read_json,
     _repo_boundaries, _require, _save, _sha,
     _strict_json, _text, canonical_json, normalize_repository, read_input_file,
 )
-from codex_session_adapter import CodexSessionAdapter
-from message_bus import MailboxError
+from ato_adapters.codex_session_adapter import CodexSessionAdapter
+from ato_workflow.message_bus import MailboxError
 
 OPERATIONS = {
     "controller": ("observe", "initial", "stop", "resume", "recheck", "reconcile",
@@ -165,8 +165,8 @@ def enroll_endpoint(host, args):
             row["revisions"] = sorted(set(row["revisions"]) | {args.revision})
         if args.native_kind:
             _require(not row.get("mailbox"), "FORBIDDEN")
-            import agents
-            import transport
+            from ato_adapters import agents
+            from ato_workflow import transport
             adapter = agents.registry.get(args.native_kind, "session_verify")
             with ato_config.use_unified_kernel(host.store.kernel_root, host.store.native_home):
                 _require(adapter.verify_session(args.native_session, repo.root), "FORBIDDEN")
@@ -197,7 +197,7 @@ def approve_binding(host, args):
         host.binding._authorize_endpoints(scope, after)
         evidence.update({"from": binding["controller_ref"], "to": args.to, "interaction": target})
     else:
-        from hub_contract import HubAgentSpec
+        from ato_review.hub_contract import HubAgentSpec
         _require(args.to is None and args.interaction is None, "INVALID_EVIDENCE")
         evidence["reviewer"] = asdict(HubAgentSpec(args.kind, args.model, args.effort))
     digest = _sha(canonical_json(evidence))
@@ -244,7 +244,7 @@ def reconcile_delivery(host, args):
         try:
             endpoint = bus.authenticate(credential)
             identity = SessionIdentity(endpoint["kind"], endpoint["session_id"], endpoint["project"], endpoint["source"])
-            import agents
+            from ato_adapters import agents
             capability = agent_registry.session_capabilities(endpoint["kind"])
             _require(capability.state("session.activity") is agent_registry.CapabilityState.SUPPORTED,
                      "UNSUPPORTED_CAPABILITY")

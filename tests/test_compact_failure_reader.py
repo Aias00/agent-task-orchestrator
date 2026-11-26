@@ -8,10 +8,10 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import ato_config
-import control
+from ato_common import ato_config
+from ato_workflow import control
 import coordination
-import failure_notice
+from ato_workflow import failure_notice
 import test_compact_failure as fixtures
 from test_interaction import HUB
 
@@ -70,7 +70,7 @@ class CompactFailureReaderTests(unittest.TestCase):
         reader.write_text('#!/bin/sh\nexit 0\n')
         reader.chmod(0o755)
         with patch.dict(os.environ, CTASK_HANDOFF_READER=str(reader)), \
-                patch('control.subprocess.run') as sent:
+                patch('ato_workflow.control.subprocess.run') as sent:
             with self.assertRaisesRegex(ValueError, 'compact notice bound'):
                 control.send(self.key, HUB, 'private fixture', workflow=str(self.d))
         sent.assert_not_called()
@@ -81,7 +81,7 @@ class CompactFailureReaderTests(unittest.TestCase):
     def test_unknown_failure_delivery_is_never_replayed(self):
         self.prepare()
         before = (self.d/'state.json').read_bytes()
-        with patch('control.subprocess.run', side_effect=subprocess.TimeoutExpired('synthetic queue', 1)) as sent:
+        with patch('ato_workflow.control.subprocess.run', side_effect=subprocess.TimeoutExpired('synthetic queue', 1)) as sent:
             first = control.send(self.key, HUB, 'private fixture', workflow=str(self.d))
             second = control.send(self.key, HUB, 'private fixture', workflow=str(self.d))
         self.assertEqual(first['state'], 'delivery_unknown')

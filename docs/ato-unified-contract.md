@@ -338,7 +338,7 @@ Worker/Reviewer writes, with stage output admitted through the existing
 host-owned protocol. Refuse an adapter profile that cannot preserve this
 boundary. Reuse the reviewer integrity checks across both product and
 ignored scratch/runtime entries, including link edges.
-[H1 worktree implementation](../hub_worktree.py)
+[H1 worktree implementation](../ato_review/hub_worktree.py)
 
 Reserve IDs with exclusive filesystem creation. Stage the Task in
 `preparing` with a private creation intent before any Git or kernel
@@ -471,7 +471,7 @@ Worker completion. ATO records elapsed time and cumulative attempts without
 using either to halt a new unified Run. Check commands remain reproducible
 from the original spec. A STOP or a real unresolved execution outcome remains
 visible, and the next Run records its own identity and source seal.
-[Baseline execution fixes](ato-unified-baseline.md) · [Workflow](../workflow.py)
+[Baseline execution fixes](ato-unified-baseline.md) · [Workflow](../ato_workflow/workflow.py)
 
 STOP is a short Task-level mutation. An already completed Task returns its
 existing status. On other Tasks with an admissible stop transition, it
@@ -507,7 +507,7 @@ the STOP stays effective until exact reconciliation. A later STOP always
 wins and no code unconditionally unlinks STOP, adopts an old PID or retries
 unknown work. Bound host-only actions require a frozen `host_handoff` and
 authentic provenance, and return to the same independent checks after work.
-[Recovery evidence](recovery-escalation.md) ·
+[Recovery evidence](history/recovery-escalation.md) ·
 [Execution authority and host handoffs](worker-permissions-and-handoffs.md)
 
 ### Private sealed invocation
@@ -749,16 +749,16 @@ bounded, redacted context from the verified handoff instead of passing a
 foreign native session ID. H1 session rollover and attach mechanics can
 remain trusted adapter features, with qualification and idle checks.
 [H1 design](hub-orchestrator-design.md) ·
-[Neutral session boundaries](session-decoupling/operator-handoff.md)
+[Neutral session boundaries](history/session-decoupling/operator-handoff.md)
 
 ### Independent implementation ownership
 
 | Stage | Exclusive source and test ownership | Shared integration required |
 | --- | --- | --- |
-| T2 | `ato_task_store.py` and `tests/test_ato_unified_task_store.py` | Typed normalization, IDs, Task/Run persistence, immutable blob helpers, compare-and-swap and query snapshot APIs. T2 leaves execution and actor-specific policy to consumers. |
-| T3 | `ato_execution.py`, private execution bootstrap and `tests/test_ato_unified_execution.py` | Driver and launch/STOP/recovery integration, independent check and product projection, trusted host callbacks and the shared snapshot/transaction adapters. |
-| T4 | `ato_acceptance.py` and `tests/test_ato_unified_acceptance.py` | Owns requests, answers, presentation, product acceptance, their receipts and notification eligibility under `interaction/`. Uses read-only binding values injected by the composition root, plus T2/T3 transaction, actor and evidence helpers. No writes to bindings. |
-| T5 | `ato_binding.py` and `tests/test_ato_unified_handoff.py` | Owns controller/interaction/Reviewer binding revisions, verified handoff evidence and binding projection under `bindings/`. Receives current unresolved request/evidence references through a callback. Does not edit questions, answers, acceptance or delivery receipts. |
+| T2 | `ato_task/ato_task_store.py` and `tests/test_ato_unified_task_store.py` | Typed normalization, IDs, Task/Run persistence, immutable blob helpers, compare-and-swap and query snapshot APIs. T2 leaves execution and actor-specific policy to consumers. |
+| T3 | `ato_task/ato_execution.py`, private execution bootstrap and `tests/test_ato_unified_execution.py` | Driver and launch/STOP/recovery integration, independent check and product projection, trusted host callbacks and the shared snapshot/transaction adapters. |
+| T4 | `ato_task/ato_acceptance.py` and `tests/test_ato_unified_acceptance.py` | Owns requests, answers, presentation, product acceptance, their receipts and notification eligibility under `interaction/`. Uses read-only binding values injected by the composition root, plus T2/T3 transaction, actor and evidence helpers. No writes to bindings. |
+| T5 | `ato_task/ato_binding.py` and `tests/test_ato_unified_handoff.py` | Owns controller/interaction/Reviewer binding revisions, verified handoff evidence and binding projection under `bindings/`. Receives current unresolved request/evidence references through a callback. Does not edit questions, answers, acceptance or delivery receipts. |
 | T6 | Public parser/dispatch, sealed runtime wiring, install/release and single Skill integration plus `tests/test_ato_unified_cli.py` | Compose T4/T5 through the T3 seam, install the routing and status callbacks, and compose route supersession/reconciliation via the shared mailbox. Integrate user CLI, private notification rendering and worker bindings into a sealed source. |
 | T7 | `tests/test_ato_unification_e2e.py` and final qualification evidence | Exercise all composed paths across subprocess/API boundaries using temporary offline fixtures. |
 
@@ -778,7 +778,7 @@ independent queue or writer lease.
 The following inventory uses the exact frozen
 [55 parser names and aliases](../tests/fixtures/cli-surface.json)
 and their [historical handler fixtures](../tests/fixtures/legacy_cli/__init__.py), plus
-[the H1 parser](../hub_cli.py). A public replacement uses the new Task ID.
+[the H1 parser](../tests/fixtures/hub_cli.py). A public replacement uses the new Task ID.
 An internal disposition describes the remaining trusted caller and seam.
 A retired operation remains usable only by its original sealed version
 against its own prior namespace, where that version still supports it.
@@ -877,21 +877,21 @@ on authorized submission in the new namespace.
 - [`runner.runtime_command`](../runner.py) and the
   [registry bootstrap](../agent_registry.py) are the cross-process seam.
   [`run_cmd` fixture](../tests/fixtures/legacy_cli/run_cmd.py) used `_worker`.
-  [`control`](../control.py) uses `_controller`. [`recovery`](../recovery.py)
+  [`control`](../ato_workflow/control.py) uses `_controller`. [`recovery`](../recovery.py)
   uses `_supervisor` and `resume --retry-failed`. Translate remaining
   unified calls to sealed private operations. A recovery attempt cannot
-  provide its own authorization for `resume-run`. [`delegation`](../delegation.py)
+  provide its own authorization for `resume-run`. [`delegation`](../ato_workflow/delegation.py)
   used `_dispatcher` and `start`, and is outside the new dispatch path.
-- [`interaction`](../interaction.py), [`control`](../control.py) and
+- [`interaction`](../ato_workflow/interaction.py), [`control`](../ato_workflow/control.py) and
   [`recovery`](../recovery.py) have old command text in question, answer,
   operational, budget, handoff and recovery templates. The v1 composition
   uses typed records and new compact rendering before envelope hashing. It
   must not send those legacy templates, rewrite hashes of existing claims
-  or bypass the queue gate. Reuse the [mailbox](../message_bus.py),
-  [transport barriers](../transport.py), scoped actor checks and correlation
+  or bypass the queue gate. Reuse the [mailbox](../ato_workflow/message_bus.py),
+  [transport barriers](../ato_workflow/transport.py), scoped actor checks and correlation
   rules. [`coordination`](../coordination.py) and
-  [`failure_notice`](../failure_notice.py) currently use
-  [`reader_command`](../ato_config.py) to generate `ato-read-handoff`.
+  [`failure_notice`](../ato_workflow/failure_notice.py) currently use
+  [`reader_command`](../ato_common/ato_config.py) to generate `ato-read-handoff`.
   New wakes use sealed `read-handoff`. Legacy markers in retained receipts
   remain audit data. Protect current v1 canonical question, failure and
   final-completion claims at both dispatch barriers before any adapter call.

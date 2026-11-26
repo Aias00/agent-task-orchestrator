@@ -1,7 +1,7 @@
 import json
 import unittest
 from pathlib import Path
-from acp_outcome import Outcome
+from ato_adapters.acp_outcome import Outcome
 
 REPLAY = Path(__file__).parent/'fixtures/pi-error-end-turn.json'
 

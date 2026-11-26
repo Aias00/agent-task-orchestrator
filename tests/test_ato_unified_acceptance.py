@@ -15,19 +15,19 @@ import unittest
 from unittest.mock import Mock, patch
 
 import agent_registry
-import ato_config
-import ato_observer
-import ato_process
-from ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
-from ato_execution import ExecutionService, HostProfile, _initial_binding, _publish_receipt
-from ato_private import render_notice
-from ato_task_store import InitialBinding, RunIntent, SubmissionGrant, TaskError
-from ato_task_store import TaskStore, new_id
-from message_bus import MailboxError, MessageBus
-import notification_state
+from ato_common import ato_config
+from ato_task import ato_observer
+from ato_task import ato_process
+from ato_task.ato_acceptance import InteractionService, MailboxRoute, VerifiedEvent
+from ato_task.ato_execution import ExecutionService, HostProfile, _initial_binding, _publish_receipt
+from ato_task.ato_private import render_notice
+from ato_task.ato_task_store import InitialBinding, RunIntent, SubmissionGrant, TaskError
+from ato_task.ato_task_store import TaskStore, new_id
+from ato_workflow.message_bus import MailboxError, MessageBus
+from ato_workflow import notification_state
 import recovery
 from test_ato_unified_execution import _REVIEWER, _WORKER, git
-from transport import DeliveryResult, TransportEvent, receive_event
+from ato_workflow.transport import DeliveryResult, TransportEvent, receive_event
 
 
 _CONTROLLER = "agentref-" + "1" * 32
@@ -509,8 +509,8 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         self.assertEqual(calls, [request])
 
     def test_observer_applies_correlated_native_terminal_without_sending_again(self):
-        import agents
-        from codex_session_adapter import CodexSessionAdapter
+        from ato_adapters import agents
+        from ato_adapters.codex_session_adapter import CodexSessionAdapter
         task = self.create()
         request = self.ask(task, continuation="resume")
         user = self.proof(task, "user")
@@ -718,7 +718,7 @@ class UnifiedAcceptanceTests(unittest.TestCase):
         self.interaction.render_notice = render_notice
         policy = dict(hub_thread=_INTERACTION, mode="user_input_only", completion="silent")
         with patch.object(notification_state, "status", return_value=policy), \
-                patch("failure_attention.policy", return_value=dict(
+                patch("ato_workflow.failure_attention.policy", return_value=dict(
                     enabled=True, hub_thread=_INTERACTION, configured_at=900)):
             self.assertEqual(self.interaction.dispatch_delivery(task_id, correlation, "failure"), "queued")
         _, notice = self.interaction._reservation(task, correlation, "failure")

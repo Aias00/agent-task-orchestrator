@@ -8,13 +8,13 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import ato_config
-import ato_process
-from ato_execution import run_child
-from ato_host import Host, host_record
-from ato_private import read_handoff, render_notice
-from ato_seal import runtime_seal
-from ato_task_store import TaskError, TaskStore, _fields, _identifier, _require, _sha, _strict_json
+from ato_common import ato_config
+from ato_task import ato_process
+from ato_task.ato_execution import run_child
+from ato_task.ato_host import Host, host_record
+from ato_task.ato_private import read_handoff, render_notice
+from ato_release.seal import runtime_seal
+from ato_task.ato_task_store import TaskError, TaskStore, _fields, _identifier, _require, _sha, _strict_json
 
 
 def runtime_hooks(store):
@@ -62,7 +62,7 @@ def main(argv):
                     result = dict(valid=False, action="end_silently", reason="stale_or_unavailable")
                 print(json.dumps(result, ensure_ascii=False, allow_nan=False))
             case ["observe"]:
-                from ato_observer import observe
+                from ato_task.ato_observer import observe
                 seal, launch = host_intent("observe", fields=("journal", "nonce"))
                 path = Path(launch["journal"])
                 journal = host_record(path, path.parent, code="FORBIDDEN")

@@ -18,21 +18,21 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import agent_registry
-import ato_application
-import ato_execution
-import hub_worktree
-import ato_observer
-import ato_watchdog
-import ato_process
-import ato_product
-from ato_host import ACCEPTANCE_NOTIFICATIONS, Host
-from ato_task_store import TaskError, TaskStore, canonical_json, normalize_repository
-from message_bus import IdentityError, MessageBus
-import notification_state
+from ato_task import ato_application
+from ato_task import ato_execution
+from ato_review import hub_worktree
+from ato_task import ato_observer
+from ato_task import ato_watchdog
+from ato_task import ato_process
+from ato_task import ato_product
+from ato_task.ato_host import ACCEPTANCE_NOTIFICATIONS, Host
+from ato_task.ato_task_store import TaskError, TaskStore, canonical_json, normalize_repository
+from ato_workflow.message_bus import IdentityError, MessageBus
+from ato_workflow import notification_state
 from scripts import ato_host_setup
 from scripts import release_snapshot as release
-from message_bus import EndpointCredential
-from transport import DeliveryResult
+from ato_workflow.message_bus import EndpointCredential
+from ato_workflow.transport import DeliveryResult
 
 from release_support import CURRENT, fake_env, legacy_entry, seal, snapshot, unseal, write
 from test_ato_unified_execution import git

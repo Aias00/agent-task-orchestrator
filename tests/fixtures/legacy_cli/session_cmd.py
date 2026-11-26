@@ -3,11 +3,11 @@ import json
 
 def handle(args, core):
     if args.command == 'agent-doctor':
-        import agents
+        from ato_adapters import agents
         print(json.dumps(agents.doctor(), ensure_ascii=False, indent=2))
         return 0
     if args.command in ('delegate', 'delegation-status', 'delegation-accept', '_dispatcher'):
-        import delegation
+        from ato_workflow import delegation
         if args.command == 'delegate':
             result = delegation.delegate(args.repo, args.plan, args.name, args.source, args.request_id, args.timeout, args.session_kind)
         elif args.command == 'delegation-status':
@@ -20,13 +20,13 @@ def handle(args, core):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command == 'session-register':
-        import agents
-        import session_router
+        from ato_adapters import agents
+        from ato_workflow import session_router
         print(session_router.register(args.kind, args.identity, args.project, args.source))
         return 0
     if args.command in ('local-session-create', 'local-session-grant'):
-        import agents
-        import local_session_adapter
+        from ato_adapters import agents
+        from ato_adapters import local_session_adapter
         if args.command == 'local-session-create':
             result = local_session_adapter.create(args.project, args.role, args.source, args.credential_file, args.user_credential_file)
         else:

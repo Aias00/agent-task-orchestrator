@@ -16,20 +16,20 @@ from unittest.mock import patch
 import uuid
 
 import agent_registry
-import agents
-import budget
-import control
-import failure_attention
-import host_recheck
-import interaction
-from message_bus import ConflictError, IdentityError, MessageBus
-import notifications
+from ato_adapters import agents
+from ato_workflow import budget
+from ato_workflow import control
+from ato_workflow import failure_attention
+from ato_workflow import host_recheck
+from ato_workflow import interaction
+from ato_workflow.message_bus import ConflictError, IdentityError, MessageBus
+from ato_workflow import notifications
 import recovery
 import runner
-import session_router
-import transport
-import workflow
-from hub_loop import GuardedWorkflow
+from ato_workflow import session_router
+from ato_workflow import transport
+from ato_workflow import workflow
+from ato_review.hub_loop import GuardedWorkflow
 
 
 class RecoveryAdapter:
@@ -333,7 +333,7 @@ class SessionV2RecoveryTests(unittest.TestCase):
                     bus = MessageBus(self.root/(kind+'-'+role+'.sqlite'), clock=lambda: moment[0])
                     self.acquire_host_lease(bus, role); moment[0] = 131; self.activity = 'unknown'
                     before = (self.d/'state.json').read_bytes()
-                    with patch('transport.managed_bus', return_value=bus), patch.object(
+                    with patch('ato_workflow.transport.managed_bus', return_value=bus), patch.object(
                             runner.Runner, 'command', side_effect=AssertionError('no command allowed')):
                         with self.assertRaisesRegex(ValueError, 'unknown native activity'): self.host_entry(kind)
                     self.assertEqual((self.d/'state.json').read_bytes(), before)
@@ -347,7 +347,7 @@ class SessionV2RecoveryTests(unittest.TestCase):
                 token, fence = self.acquire_host_lease(bus, 'session_host')
                 resource = recovery.execution_resource(self.repo); prior = bus.execution_lease(resource)
                 moment[0] = 131; self.activity = 'idle'
-                with patch('transport.managed_bus', return_value=bus): self.host_entry(kind)
+                with patch('ato_workflow.transport.managed_bus', return_value=bus): self.host_entry(kind)
                 current = bus.execution_lease(resource)
                 self.assertEqual(current['state'], 'released'); self.assertGreater(current['fence'], fence)
                 with self.assertRaises(ConflictError):
@@ -375,7 +375,7 @@ class SessionV2RecoveryTests(unittest.TestCase):
                     self.assertGreater(bus.execution_lease(resource)['lease_until'], expires)
                     observed.append(lease['fence'])
                     raise runner.Halt('stopped')
-                with patch('transport.managed_bus', return_value=bus), patch.object(runner.Runner, 'command', command):
+                with patch('ato_workflow.transport.managed_bus', return_value=bus), patch.object(runner.Runner, 'command', command):
                     if kind == 'budget':
                         with self.assertRaises(runner.Halt): self.host_entry(kind)
                     else: self.host_entry(kind)
@@ -412,7 +412,7 @@ class SessionV2RecoveryTests(unittest.TestCase):
         q = self.queued(); bus = transport.managed_bus(); message = bus.message(q['delivery']['mailbox_id'])
         bus.clock = lambda: time.time()+31
         self.events = [self.event(q, 'message_received')]
-        with patch('transport.managed_bus', return_value=bus): recovery.tick(self.d)
+        with patch('ato_workflow.transport.managed_bus', return_value=bus): recovery.tick(self.d)
         self.assertNotIn('observed_turn', self.ledger()['requests'][-1])
         self.assertTrue(next(r for r in bus.receipts(message['id']) if r['receipt_id'] == self.events[0].event_id)['late'])
 
@@ -423,7 +423,7 @@ class SessionV2RecoveryTests(unittest.TestCase):
         old, fence = bus.acquire_execution(resource, project=self.repo, task_id=str(self.d),
             contract_hash=s['contract_hash'], generation=gen, role='origin', owner='prior', source='fixture', lease_seconds=5)
         moment[0] = 106
-        with patch('transport.managed_bus', return_value=bus), recovery.locked(self.repo/'.codex/tasks/.worker.lock'):
+        with patch('ato_workflow.transport.managed_bus', return_value=bus), recovery.locked(self.repo/'.codex/tasks/.worker.lock'):
             self.activity = 'active'
             with self.assertRaisesRegex(ValueError, 'active or unknown'):
                 with recovery.execution_owner(self.d, s): self.fail('active native origin')
@@ -504,7 +504,7 @@ class SessionV2RecoveryTests(unittest.TestCase):
     def test_terminal_recovery_alert_is_attempted_once_per_request(self):
         q = self.queued(); ledger = self.ledger(); ledger['requests'][-1]['expires_at'] = 0
         runner.save(self.d/'recovery.json', ledger)
-        with patch('interaction.supervision_alert', return_value={'routed': False, 'reason': 'fixture quiet'}) as alert:
+        with patch('ato_workflow.interaction.supervision_alert', return_value={'routed': False, 'reason': 'fixture quiet'}) as alert:
             for _ in range(3): recovery.tick(self.d)
         self.assertEqual(alert.call_count, 1)
 

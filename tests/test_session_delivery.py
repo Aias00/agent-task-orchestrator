@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts import prepare_session_candidate as candidate
+from scripts.history import prepare_session_candidate as candidate
 from scripts import verify_pi_session_local as smoke
 from legacy_support import LEGACY_CLI
 
@@ -158,8 +158,7 @@ class ReproducibleBundleTests(unittest.TestCase):
 
 class CodexFailProbeTests(unittest.TestCase):
     def test_fail_probes_block_static_alias_native_db_and_appserver_but_allow_ato_sqlite(self):
-        import appserver
-        import codex_session_adapter
+        from ato_adapters import appserver, codex_session_adapter
         import sqlite3
         with tempfile.TemporaryDirectory(prefix='ato-delivery-probes-') as folder:
             root = Path(folder).resolve()
@@ -187,7 +186,7 @@ class CodexFailProbeTests(unittest.TestCase):
             env = dict(HOME=str(root/'empty-home'), CODEX_HOME=str(root/'unavailable-codex'),
                 ATO_HOME=str(root/'ato'), PYTHONPATH=smoke.codex_probes(root),
                 PYTHONDONTWRITEBYTECODE='1', PATH='/usr/bin:/bin')
-            code = '''import codex_session_adapter
+            code = '''from ato_adapters import codex_session_adapter
 try: codex_session_adapter.CodexSessionAdapter.current_locator()
 except AssertionError: print('fail_probe_loaded')
 else: raise AssertionError('fail probe missing')
@@ -202,7 +201,7 @@ else: raise AssertionError('fail probe missing')
                 '--source', 'synthetic local-only fixture'], env=env, cwd=root,
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            import session_router
+            from ato_workflow import session_router
             self.assertTrue(session_router.is_reference(json.loads(result.stdout)['reference']))
             self.assertNotIn('Error in sitecustomize', result.stderr)
             self.assertFalse((root/'unavailable-codex').exists())

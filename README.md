@@ -115,6 +115,22 @@ The [contract](docs/ato-unified-contract.md) specifies result codes and
 evidence. The [document index](docs/README.md) includes development status and
 historical implementation records.
 
+## Repository layout
+
+| Directory | Responsibility |
+| --- | --- |
+| `bin/`, `ato_cli/` | Public launcher and command parsing |
+| `ato_common/` | Shared configuration, file IO, and process identity |
+| `ato_task/` | Task and Run records, execution, acceptance, and observation |
+| `ato_workflow/` | Workflow stages, session routing, mailbox, and notifications |
+| `ato_review/` | Review contracts, isolation, and worktree checks |
+| `ato_adapters/`, `ato_pi/` | Native agent adapters and optional Pi support |
+| `ato_release/`, `scripts/` | Sealing, installation, and release commands |
+| `docs/history/`, `scripts/history/` | Archived qualification records and tools |
+
+The root contains the public and private Python entrypoints, shared primitives,
+and compatibility modules. [Source and capability map](docs/source-map.md)
+
 ## License
 
 ATO is distributed under the [MIT License](LICENSE).

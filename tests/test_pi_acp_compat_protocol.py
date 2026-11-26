@@ -8,8 +8,8 @@ import unittest
 import acp
 from acp.schema import DeniedOutcome, RequestPermissionResponse, TextContentBlock
 
-import pi_acp_compat as compat
-from pi_toolchain import clean_environment, locate
+from ato_pi import pi_acp_compat as compat
+from ato_pi.pi_toolchain import clean_environment, locate
 
 ROOT = Path(__file__).resolve().parents[1]
 

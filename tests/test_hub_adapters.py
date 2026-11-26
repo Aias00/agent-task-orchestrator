@@ -9,13 +9,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hub_contract import HubAgentSpec,HubTurnRequest
-from hub_adapter_agy import AgyHubAdapter
-from hub_adapter_claude import ClaudeHubAdapter
-from hub_adapter_codex import CodexHubAdapter
-from hub_registry import HubRegistry
-import hub_sandbox
-import hub_worktree
+from ato_review.hub_contract import HubAgentSpec,HubTurnRequest
+from ato_adapters.hub_adapter_agy import AgyHubAdapter
+from ato_adapters.hub_adapter_claude import ClaudeHubAdapter
+from ato_adapters.hub_adapter_codex import CodexHubAdapter
+from ato_adapters.hub_registry import HubRegistry
+from ato_review import hub_sandbox
+from ato_review import hub_worktree
 from hub_support import repository,verdict
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -71,7 +71,7 @@ class HubAdapterTests(unittest.TestCase):
                 with self.subTest(kind=klass.kind,code=code):
                     diagnostic=dict(available=False,code=code,stderr=self.secret+' /private/fixture-path')
                     with patch.object(adapter,'doctor',return_value=diagnostic) as doctor,patch(
-                            'hub_sandbox.turn_context',side_effect=AssertionError('must not launch')):
+                            'ato_review.hub_sandbox.turn_context',side_effect=AssertionError('must not launch')):
                         result=adapter.run_turn(self.request(adapter))
                     doctor.assert_called_once_with()
                     self.assertEqual(result.code,code)
@@ -163,7 +163,7 @@ class HubAdapterTests(unittest.TestCase):
         self.assertLessEqual((Path(request.runtime_dir)/'stderr.log').stat().st_size,1024*1024)
 
     def test_O3_unknown_recycled_group_cannot_be_signalled(self):
-        import hub_sandbox
+        from ato_review import hub_sandbox
         process=type('Process',(),dict(pid=12345))()
         owner=hub_sandbox.OwnedGroup(process,'original',{12345:'original'})
         with patch.object(hub_sandbox,'group_members',return_value={12345:'recycled'}),patch.object(hub_sandbox.os,'killpg') as kill:

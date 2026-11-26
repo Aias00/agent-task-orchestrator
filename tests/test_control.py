@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
-import control
-import interaction
+from ato_workflow import control
+from ato_workflow import interaction
 import recovery
 import runner
-import workflow
+from ato_workflow import workflow
 from legacy_support import LEGACY_CLI
 
 
@@ -23,7 +23,7 @@ class ControlTests(unittest.TestCase):
     transport = fixtures.InteractionTests.transport
 
     def prepare(self):
-        with patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             q = interaction.ask(self.d, 'Choose A?', 'A')
         with patch.dict(os.environ, CODEX_THREAD_ID=HUB):
             control.enable('Fixture user asked for persistent follow-up', 60, 2)
@@ -33,7 +33,7 @@ class ControlTests(unittest.TestCase):
         return next(x for x in control.rows(True) if x['id'] == identifier)
 
     def tick(self):
-        with patch('control.subprocess.run', side_effect=self.transport):
+        with patch('ato_workflow.control.subprocess.run', side_effect=self.transport):
             control.tick()
 
     def verify_running_progress(self, directory, question_id):
@@ -55,7 +55,7 @@ class ControlTests(unittest.TestCase):
             interaction.inbox()
             self.assertNotIn('presented_at', self.action(q['id']))
             control.record(q['id'], state='presented', note='Actually explained in hub at 12:00')
-            with patch('interaction.subprocess.run', side_effect=self.transport):
+            with patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
                 interaction.answer(q['id'], 'A', 'Actual user reply')
         self.tick()
         self.assertEqual(self.action(q['id'])['state'], 'awaiting_acceptance')
@@ -86,9 +86,9 @@ class ControlTests(unittest.TestCase):
     def test_bounded_reminders_survive_restart_and_never_manufacture_answer(self):
         q = self.prepare()
         moment = runner.now()
-        with patch('control.subprocess.run', side_effect=self.transport) as send:
+        with patch('ato_workflow.control.subprocess.run', side_effect=self.transport) as send:
             for delta in [0, 10, 61, 65, 122, 183, 999]:
-                with patch('control.core.now', return_value=moment+delta):
+                with patch('ato_workflow.control.core.now', return_value=moment+delta):
                     control.tick()
             self.assertEqual(send.call_count, 3)  # one initial and two reminders
         self.assertEqual(self.action(q['id'])['reminders'], 2)
@@ -96,23 +96,23 @@ class ControlTests(unittest.TestCase):
 
     def test_unknown_send_and_dispatch_crash_never_retry_even_as_reminder(self):
         q = self.prepare()
-        with patch('control.subprocess.run', side_effect=subprocess.TimeoutExpired('queue', 25)) as send:
+        with patch('ato_workflow.control.subprocess.run', side_effect=subprocess.TimeoutExpired('queue', 25)) as send:
             control.tick()
-            with patch('control.core.now', return_value=runner.now()+10000):
+            with patch('ato_workflow.control.core.now', return_value=runner.now()+10000):
                 control.tick()
             self.assertEqual(send.call_count, 1)
         self.assertEqual(self.action(q['id'])['notice']['state'], 'delivery_unknown')
         # Durable claim also survives interruption before receipt persistence.
-        with patch('control.subprocess.run', side_effect=KeyboardInterrupt):
+        with patch('ato_workflow.control.subprocess.run', side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 control.send('crash-key', HUB, 'fixture')
-        with patch('control.subprocess.run') as send:
+        with patch('ato_workflow.control.subprocess.run') as send:
             self.assertEqual(control.send('crash-key', HUB, 'fixture')['state'], 'dispatching')
             send.assert_not_called()
 
     def test_correlated_turn_reply_is_relayed_once_and_not_completion(self):
         q = self.prepare()
-        with patch.dict(os.environ, CODEX_THREAD_ID=HUB), patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch.dict(os.environ, CODEX_THREAD_ID=HUB), patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             interaction.answer(q['id'], 'A', 'Actual user reply')
         interaction.accept(q['id'])
         rollout = self.home/(ORIGIN+'.jsonl')
@@ -126,7 +126,7 @@ class ControlTests(unittest.TestCase):
         with rollout.open('a') as f:
             for kind, fields in events:
                 f.write(json.dumps(dict(type='event_msg', payload=dict(type=kind, **fields)))+'\n')
-        with patch('control.subprocess.run', side_effect=self.transport) as send:
+        with patch('ato_workflow.control.subprocess.run', side_effect=self.transport) as send:
             control.tick(); control.tick()
             relays = [c.args[0][-1] for c in send.call_args_list if '[ctask-origin-reply' in c.args[0][-1]]
             self.assertEqual(len(relays), 1)
@@ -136,7 +136,7 @@ class ControlTests(unittest.TestCase):
 
     def test_native_response_item_message_correlates_with_answer(self):
         q = self.prepare()
-        with patch.dict(os.environ, CODEX_THREAD_ID=HUB), patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch.dict(os.environ, CODEX_THREAD_ID=HUB), patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             interaction.answer(q['id'], 'A', 'Actual reply')
         with (self.home/(ORIGIN+'.jsonl')).open('a') as f:
             for item in [dict(type='event_msg', payload=dict(type='task_started', turn_id='native')),
@@ -150,13 +150,13 @@ class ControlTests(unittest.TestCase):
     def test_stop_and_stale_question_are_not_reopened_or_reminded(self):
         q = self.prepare(); self.tick()
         (self.d/'STOP').touch()
-        with patch('control.subprocess.run') as send:
+        with patch('ato_workflow.control.subprocess.run') as send:
             control.tick(); control.tick(); send.assert_not_called()
         self.assertEqual(self.action(q['id'])['state'], 'stopped')
 
     def test_same_task_continuation_explicit_link_preserves_final_acceptance(self):
         q = self.prepare(); self.tick()
-        with patch.dict(os.environ, CODEX_THREAD_ID=HUB), patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch.dict(os.environ, CODEX_THREAD_ID=HUB), patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             interaction.answer(q['id'], 'Continue original task', 'Actual fixture instruction')
         interaction.accept(q['id'])
         new = workflow.create(self.repo, self.repo/'input.json', ORIGIN)
@@ -185,7 +185,7 @@ class ControlTests(unittest.TestCase):
         self.assertTrue(any(a['id'] == q['id'] for a in control.rows()))
 
     def test_no_configuration_no_monitoring_or_sends(self):
-        with patch('control.subprocess.run') as send:
+        with patch('ato_workflow.control.subprocess.run') as send:
             self.assertFalse(control.tick()); send.assert_not_called()
         with self.assertRaises(ValueError):
             control.enable('not in hub')
@@ -194,7 +194,7 @@ class ControlTests(unittest.TestCase):
         q = self.prepare(); control.register(self.d)
         c = runner.read(self.d/'contract.json'); c['objective'] = 'tampered'
         runner.save(self.d/'contract.json', c)
-        with patch('control.subprocess.run', side_effect=self.transport) as send:
+        with patch('ato_workflow.control.subprocess.run', side_effect=self.transport) as send:
             control.tick(); first = send.call_count
             control.tick(); control.tick()
             self.assertEqual(send.call_count, first)
@@ -208,7 +208,7 @@ class ControlTests(unittest.TestCase):
         control.reconcile_questions(control.settings())
         with patch.dict(os.environ, CODEX_THREAD_ID=HUB):
             control.record(q['id'], state='presented', note='Just explained to user')
-        with patch('control.subprocess.run') as send:
+        with patch('ato_workflow.control.subprocess.run') as send:
             control.tick(); send.assert_not_called()
 
     def test_completed_workflow_has_separate_unreported_result(self):
@@ -260,8 +260,8 @@ target=sys.argv[sys.argv.index('--thread')+1]
 print('Queued message '+target+' for thread '+target+'.')
 '''); queue.chmod(0o755)
         env = dict(os.environ, CTASK_QUEUE_BIN=str(queue))
-        cmd = [sys.executable, '-c', 'import control; control.tick()']
-        processes = [subprocess.Popen(cmd, cwd=Path(control.__file__).parent, env=env,
+        cmd = [sys.executable, '-c', 'from ato_workflow import control; control.tick()']
+        processes = [subprocess.Popen(cmd, cwd=Path(control.__file__).resolve().parents[1], env=env,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
         for p in processes:
             out, err = p.communicate(timeout=8)

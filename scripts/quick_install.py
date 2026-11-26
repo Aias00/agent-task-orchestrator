@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from install import install
-from ato_core import ensure_private_dir
+from ato_common.ato_core import ensure_private_dir
 from release_snapshot import (
     MANIFEST, PUBLIC, Refused, entrypoints, git_commit, release_lock, require, stage, verify_snapshot,
 )

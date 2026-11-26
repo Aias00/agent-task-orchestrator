@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 import agent_registry
-from transport import DeliveryResult
+from ato_workflow.transport import DeliveryResult
 
 
 class FixtureAdapter:

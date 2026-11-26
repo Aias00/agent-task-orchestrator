@@ -57,7 +57,7 @@ unrelated old tool output, failed tool events or native end_turn cannot replace
 those receipts. The host records both bounded tool status and independent file
 checks without retaining model/tool bodies or credentials.
 
-Current observed counts and host-pending state are in [validation.md](validation.md).
+Current observed counts and host-pending state are in [validation.md](../history/session-decoupling/validation.md).
 The external verifier binds a successful host proof to the exact candidate
 manifest hash. Source changes after that sample require origin review; they do
 not silently grant another sample or permission to replay any uncertain action.

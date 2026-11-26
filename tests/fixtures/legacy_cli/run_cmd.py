@@ -6,11 +6,11 @@ from pathlib import Path
 
 def handle(args, core):
     if args.command == 'trace':
-        import task_trace
+        from ato_workflow import task_trace
         print(json.dumps(task_trace.query(args.directory, args.task), ensure_ascii=False, indent=2))
         return 0
     if args.command == 'permission-check':
-        import permissions
+        from ato_workflow import permissions
         plan = core.read(args.plan)
         permissions.validate(plan)
         argv = permissions.probe_argv(plan, args.repo)
@@ -49,7 +49,7 @@ def handle(args, core):
         if core.read(Path(args.directory) / 'state.json').get('kind') == 'workflow':
             import recovery
             recovery.start(args.directory)
-            from workflow import Workflow
+            from ato_workflow.workflow import Workflow
             Workflow(args.directory).execute(args.retry_failed)
         else:
             core.Runner(args.directory).execute(args.retry_failed)
@@ -72,7 +72,7 @@ def handle(args, core):
                     raise ValueError('a worker launch is already pending')
             core.ensure_resumable(d)
             if args.command == 'resume' and args.accepted_answer:
-                import budget
+                from ato_workflow import budget
                 budget.check_approved_resume(d, args.accepted_answer)
             (d / 'STOP').unlink(missing_ok=True)
             cmd = core.runtime_command('_worker', str(d))

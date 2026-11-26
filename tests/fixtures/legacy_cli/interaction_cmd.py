@@ -3,11 +3,11 @@ import json
 
 def handle(args, core):
     if args.command in ('hub', 'ask', 'inbox', 'read-question', 'read', 'answer', 'respond', 'accept-answer', 'continue-task'):
-        import agents
-        import interaction
+        from ato_adapters import agents
+        from ato_workflow import interaction
         proof, reference, bound_workflow = (None, None, None)
         if args.actor_file:
-            from local_session_adapter import load_actor_file
+            from ato_adapters.local_session_adapter import load_actor_file
             proof, reference, bound_workflow = load_actor_file(args.actor_file)
         if args.command == 'hub':
             if args.thread and args.session_ref:
@@ -26,7 +26,7 @@ def handle(args, core):
         elif args.command == 'accept-answer':
             result = interaction.accept(args.identifier, budget_stop_evidence=args.budget_stop_evidence, actor_proof=proof)
         else:
-            from workflow import Workflow
+            from ato_workflow.workflow import Workflow
             Workflow(args.directory).execute(continuation=(args.accepted_answer, proof))
             result = core.status(args.directory)
         print(json.dumps(result, ensure_ascii=False, indent=2))

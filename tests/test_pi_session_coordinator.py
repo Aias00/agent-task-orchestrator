@@ -17,12 +17,12 @@ import uuid
 from unittest.mock import patch
 
 import agent_registry as registry
-import agents
-import codex_session_adapter
-import session_router
-import transport
-from pi_session_coordinator import PiCoordinator, PiSessionAdapter, locate, private_read, provision_path
-from pi_session_profile import Launch, LocalPiProfile, SOURCE, ADAPTER_SHA256, derive_coordinator
+from ato_adapters import agents
+from ato_adapters import codex_session_adapter
+from ato_workflow import session_router
+from ato_workflow import transport
+from ato_pi.pi_session_coordinator import PiCoordinator, PiSessionAdapter, locate, private_read, provision_path
+from ato_pi.pi_session_profile import Launch, LocalPiProfile, SOURCE, ADAPTER_SHA256, derive_coordinator
 from pi_toolchain_support import tools_fixture
 
 FIXTURE = Path(__file__).parent/'fixtures/pi_coordinator_fixture.py'
@@ -52,7 +52,7 @@ class PiCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.probes = [patch.object(codex_session_adapter, method,
             side_effect=AssertionError('Codex unavailable: '+method))
             for method in ('session_path', 'queue', 'create_session', 'current')]
-        import appserver
+        from ato_adapters import appserver
         self.probes.append(patch.object(appserver, 'Client', side_effect=AssertionError('Codex app-server unavailable')))
         for probe in self.probes:
             probe.start()
@@ -266,7 +266,7 @@ class PiCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_control_socket_cross_process_adapter_and_invalid_token(self):
         import socket
-        from pi_session_coordinator import control_socket
+        from ato_pi.pi_session_coordinator import control_socket
         await self.host.listen()
         adapter = PiSessionAdapter(kind=self.adapter.kind)  # No in-process attachment.
         result = await asyncio.to_thread(adapter.send, self.endpoint(), self.envelope(body='tool socket'))
@@ -394,8 +394,8 @@ class PiCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         tools, _ = tools_fixture(self.root)
         # This tests command construction only. Even the version subprocess is
         # replaced; it is not an actual-Pi qualification or provider call.
-        with patch('pi_session_profile.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='1.5.2\n')), \
-                patch('pi_session_profile.prepare_toolchain', return_value=tools):
+        with patch('ato_pi.pi_session_profile.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='1.5.2\n')), \
+                patch('ato_pi.pi_session_profile.prepare_toolchain', return_value=tools):
             launch = profile.launch(runtime, self.project, 'read-only')
         self.assertNotIn('CTASK_SESSION_TOKEN', launch.environment)
         self.assertNotIn('CODEX_HOME', launch.environment)
@@ -415,7 +415,7 @@ class PiCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             LocalPiProfile(bad, 'fixture-local/scripted')
 
     async def test_native_file_guard_denies_shell_private_paths_escape_and_stop(self):
-        from pi_session_profile import NODE, ROOT
+        from ato_pi.pi_session_profile import NODE, ROOT
         (self.project/'safe.txt').write_text('synthetic')
         (self.project/'.codex').mkdir()
         (self.project/'.codex/private').write_text('synthetic token')

@@ -11,12 +11,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import agents
-import pi_session_profile
-import pi_toolchain as policy
+from ato_adapters import agents
+from ato_pi import pi_session_profile
+from ato_pi import pi_toolchain as policy
 from pi_toolchain_support import tools_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
+PI_HOST_SOURCES = ('ato_pi/__init__.py', 'ato_pi/pi_toolchain.py', 'ato_pi/pi_acp_compat.py',
+                   'ato_pi/pi_acp_exec.py', 'ato_pi/pi_coordinator_exec.py',
+                   'pi-path-guard.mjs', 'pi-coordinator-guard.mjs')
 
 
 class ToolchainTests(unittest.TestCase):
@@ -32,8 +35,8 @@ class ToolchainTests(unittest.TestCase):
         # Exercise resolution from a protected installation, without changing
         # the host mount's permissions or weakening executable trust checks.
         host=self.base/'owned installation';host.mkdir()
-        for name in ('pi_toolchain.py','pi_acp_compat.py','pi_acp_exec.py','pi_coordinator_exec.py',
-                     'pi-path-guard.mjs','pi-coordinator-guard.mjs'):
+        (host/'ato_pi').mkdir()
+        for name in PI_HOST_SOURCES:
             shutil.copyfile(ROOT/name,host/name)
         source=host/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'
         source.parent.mkdir(parents=True)
@@ -42,7 +45,7 @@ class ToolchainTests(unittest.TestCase):
         manifest.write_text(json.dumps(self.data))
         paths=patch.multiple(policy,ROOT=host,REGISTRY=manifest,SOURCE=source)
         paths.start();self.addCleanup(paths.stop)
-        self.registry = patch('pi_toolchain.registry', return_value=self.data)
+        self.registry = patch('ato_pi.pi_toolchain.registry', return_value=self.data)
         self.registry.start(); self.addCleanup(self.registry.stop)
 
     def resolve(self, **kwargs):
@@ -86,11 +89,11 @@ class ToolchainTests(unittest.TestCase):
     def test_non_executable_and_writable_by_others_are_rejected_before_probe(self):
         for mode in (0o600,0o722):
             self.tools.node.chmod(mode)
-            with patch('pi_toolchain._probe') as probe, self.assertRaises(ValueError):self.resolve()
+            with patch('ato_pi.pi_toolchain._probe') as probe, self.assertRaises(ValueError):self.resolve()
             probe.assert_not_called()
         self.tools.node.chmod(0o700)
         self.tools.node.parent.chmod(0o777)
-        with patch('pi_toolchain._probe') as probe, self.assertRaises(ValueError):self.resolve()
+        with patch('ato_pi.pi_toolchain._probe') as probe, self.assertRaises(ValueError):self.resolve()
         probe.assert_not_called()
         self.tools.node.parent.chmod(0o700)
 
@@ -107,7 +110,7 @@ class ToolchainTests(unittest.TestCase):
                 if mutate=='entry':self.tools.pi.write_text(original+'\n# changed\n')
                 if mutate=='extra':(self.tools.package_root/'extra.js').write_text('changed')
                 if mutate=='version':package.write_text(json.dumps(dict(name='synthetic-pi',version='9.0.0')))
-                with patch('pi_toolchain._probe') as probe, self.assertRaises(ValueError):self.resolve()
+                with patch('ato_pi.pi_toolchain._probe') as probe, self.assertRaises(ValueError):self.resolve()
                 probe.assert_not_called()
                 self.tools.pi.write_text(original);package.write_text(saved)
                 (self.tools.package_root/'extra.js').unlink(missing_ok=True)
@@ -145,7 +148,7 @@ class ToolchainTests(unittest.TestCase):
         for body in ('import time;time.sleep(3)', 'print("x"*100000)',
                      'import sys;print("synthetic secret",file=sys.stderr);sys.exit(1)'):
             self.tools.node.write_text('#!'+sys.executable+'\n'+body+'\n')
-            with self.subTest(body=body), patch('pi_toolchain.PROBE_SECONDS',.25), self.assertRaises(ValueError) as err:
+            with self.subTest(body=body), patch('ato_pi.pi_toolchain.PROBE_SECONDS',.25), self.assertRaises(ValueError) as err:
                 self.resolve()
             self.assertNotIn('synthetic secret',str(err.exception))
 
@@ -165,8 +168,8 @@ class ToolchainTests(unittest.TestCase):
         # A disposable code-owned installation has a synthetic registry, selected
         # by its fixed source location. No production environment override exists.
         host=self.base/('installation-'+role);host.mkdir()
-        for name in ('pi_toolchain.py','pi_acp_compat.py','pi_acp_exec.py','pi_coordinator_exec.py',
-                     'pi-path-guard.mjs','pi-coordinator-guard.mjs'):
+        (host/'ato_pi').mkdir()
+        for name in PI_HOST_SOURCES:
             shutil.copyfile(ROOT/name,host/name)
         source=host/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'
         source.parent.mkdir(parents=True);source.write_text('synthetic original adapter')
@@ -226,7 +229,7 @@ class ToolchainTests(unittest.TestCase):
         config=dict(providers={'fixture':dict(baseUrl='http://127.0.0.1:43210/v1',
             apiKey='ato-local-dummy',api='openai-completions',models=[dict(id='scripted')])})
         profile=pi_session_profile.LocalPiProfile(config,'fixture/scripted')
-        with patch('pi_session_profile.prepare_toolchain',return_value=self.tools):
+        with patch('ato_pi.pi_session_profile.prepare_toolchain',return_value=self.tools):
             profile.launch(self.runtime,self.project,'workspace-write')
         probe='''import json,sys\nfrom pathlib import Path
 r=Path(sys.argv[1]);p=Path(sys.argv[2])
@@ -258,13 +261,14 @@ else:raise AssertionError('runtime replacement allowed')
                 self.assertEqual(result.returncode,0,result.stderr)
 
     def test_module_is_stdlib_only_and_import_has_no_io_or_process_bootstrap(self):
-        tree=ast.parse((ROOT/'pi_toolchain.py').read_text())
+        tree=ast.parse((ROOT/'ato_pi/pi_toolchain.py').read_text())
         for node in ast.walk(tree):
             if isinstance(node,ast.Import): names=[a.name for a in node.names]
             elif isinstance(node,ast.ImportFrom):names=[node.module]
             else:continue
             self.assertTrue(all(n.split('.')[0] in sys.stdlib_module_names for n in names))
-        command='import sys;sys.path.insert(0,'+repr(str(ROOT))+');import pi_toolchain;assert "agents" not in sys.modules'
+        command = ('import sys; sys.path.insert(0, '+repr(str(ROOT))+'); '
+                   'from ato_pi import pi_toolchain; assert "ato_adapters.agents" not in sys.modules')
         home=self.base/'empty-home'
         result=subprocess.run([sys.executable,'-I','-c',command],cwd=self.base,
             env=dict(HOME=str(home),ATO_HOME=str(home),PATH=''),capture_output=True,text=True,timeout=10)

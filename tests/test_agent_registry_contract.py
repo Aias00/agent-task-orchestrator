@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 import agent_registry
-import agents
+from ato_adapters import agents
 
 
 class FixtureAdapter:

@@ -4,7 +4,7 @@
 Native Codex is unchanged. All other commands/targets preserve argv and exec.
 Only canonical current ctask user questions enter a user-input-only hub.
 """
-import ato_config
+from ato_common import ato_config
 import datetime
 import fcntl
 import hashlib
@@ -64,13 +64,13 @@ def pending_user_question(text, target):
     if not match:
         return False
     sys.path.insert(0, RUNTIME)
-    import interaction
+    from ato_workflow import interaction
     import runner as core
     identifier = match[1] or match[2]
     try:
         q = core.read(interaction.question_path(identifier))
         interaction.validate_question(q)
-        import notifications
+        from ato_workflow import notifications
         if notifications.project_suppression(q):
             return False
         # Initial ask is in dispatching state while the real transport gate runs.
@@ -108,9 +108,9 @@ def pending_failure_notice(text, target):
     if not match:
         return False
     sys.path.insert(0, RUNTIME)
-    import control
-    import failure_attention
-    import notifications
+    from ato_workflow import control
+    from ato_workflow import failure_attention
+    from ato_workflow import notifications
     try:
         with control.database() as con:
             found = con.execute('select body from actions where id=?', (match[1],)).fetchone()

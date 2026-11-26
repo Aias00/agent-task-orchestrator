@@ -8,11 +8,11 @@ import unittest
 from unittest.mock import patch
 
 import agent_registry
-import agents
-import interaction
+from ato_adapters import agents
+from ato_workflow import interaction
 import runner
-import session_router
-import workflow
+from ato_workflow import session_router
+from ato_workflow import workflow
 sys.path.insert(0, str(Path(__file__).parent/'fixtures'))
 from fixture_adapter import FixtureAdapter, register
 register()

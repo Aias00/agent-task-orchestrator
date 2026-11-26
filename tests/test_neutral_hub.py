@@ -19,12 +19,12 @@ from unittest.mock import patch
 import uuid
 
 import agent_registry
-import agents
-import interaction
-import local_session_adapter
+from ato_adapters import agents
+from ato_workflow import interaction
+from ato_adapters import local_session_adapter
 import runner
-import session_router
-import transport
+from ato_workflow import session_router
+from ato_workflow import transport
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT/'tests/fixtures/neutral_hub_cli.py'
@@ -183,11 +183,10 @@ class NeutralHubTests(unittest.TestCase):
         trusted host, using the existing in-process Pi transport. Public CLI
         subprocess coverage is separate above; no socket/service is needed.
         """
-        from pi_session_coordinator import PiSessionAdapter
-        from pi_session_profile import Launch
-        import appserver
-        import codex_session_adapter
-        import workflow
+        from ato_pi.pi_session_coordinator import PiSessionAdapter
+        from ato_pi.pi_session_profile import Launch
+        from ato_adapters import appserver, codex_session_adapter
+        from ato_workflow import workflow
         class Profile:
             def launch(profile, runtime, project, sandbox):
                 return Launch((sys.executable, str(ROOT/'tests/fixtures/pi_coordinator_fixture.py'), str(runtime)),

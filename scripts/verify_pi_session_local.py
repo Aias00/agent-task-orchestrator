@@ -40,7 +40,7 @@ def require(condition, message):
 
 
 def save(path, value):
-    from transport import _private_save
+    from ato_workflow.transport import _private_save
     _private_save(path, value)
 
 
@@ -52,8 +52,7 @@ def disabled_codex():
     explicitly isolated Codex namespace is forbidden. No database is opened to
     decide this boundary. Restore all probes for offline in-process tests.
     """
-    import codex_session_adapter
-    import appserver
+    from ato_adapters import appserver, codex_session_adapter
     import sqlite3
     from urllib.parse import unquote, urlsplit
     native_root = Path(os.environ['CODEX_HOME']).resolve()
@@ -275,14 +274,14 @@ def verified_turns(host, reference, expected_messages):
 
 async def scenario(work, evidence):
     import agent_registry
-    import agents
-    import interaction
-    import local_session_adapter
+    from ato_adapters import agents
+    from ato_workflow import interaction
+    from ato_adapters import local_session_adapter
     import recovery
     import runner
-    import session_router
-    import transport
-    from pi_session_profile import LocalPiProfile
+    from ato_workflow import session_router
+    from ato_workflow import transport
+    from ato_pi.pi_session_profile import LocalPiProfile
 
     repo = work/'repo'; repo.mkdir()
     subprocess.run(['/usr/bin/git', 'init', '-q', str(repo)], check=True, timeout=5)

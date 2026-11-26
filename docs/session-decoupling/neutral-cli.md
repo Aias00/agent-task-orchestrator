@@ -6,7 +6,7 @@ index and app-server are unnecessary. The existing `session_router`,
 `interaction` question ledger and `message_bus` remain the only authorities.
 This checkout is an isolated candidate; these instructions do not install it or
 change the currently configured global hub. The complete six-step objective and
-remaining delivery qualification are preserved in [task.md](task.md).
+remaining delivery qualification are preserved in [task.md](../history/session-decoupling/task.md).
 
 ## Provisioning and binding
 
@@ -148,7 +148,7 @@ or write a bounded private CLI actor file with this exact neutral envelope:
 
 ```python
 from dataclasses import asdict
-from local_session_adapter import private_create
+from ato_adapters.local_session_adapter import private_create
 private_create(private_actor_path, dict(version=2, reference=origin_reference,
     workflow_id=str(workflow_directory), proof=asdict(origin_proof)))
 ```

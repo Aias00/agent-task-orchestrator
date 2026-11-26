@@ -11,9 +11,10 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-import pi_acp_compat as compat
-import pi_session_profile
-from scripts import derive_pi_acp, prepare_acp_process_candidate, prepare_session_candidate
+from ato_pi import pi_acp_compat as compat
+from ato_pi import pi_session_profile
+from scripts import derive_pi_acp
+from scripts.history import prepare_acp_process_candidate, prepare_session_candidate
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = {
@@ -168,18 +169,20 @@ class CompatibilityTests(unittest.TestCase):
         self.assertIn('compatibility contract rejected', rejected.stderr)
 
     def test_compat_has_no_business_imports_or_scattered_transformations(self):
-        tree = ast.parse((ROOT/'pi_acp_compat.py').read_text())
+        tree = ast.parse((ROOT/'ato_pi/pi_acp_compat.py').read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import): names = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom): names = [node.module]
             else: continue
-            self.assertTrue(all(n.split('.')[0] in sys.stdlib_module_names | {'pi_toolchain'} for n in names), names)
-        for name in ('pi_session_profile.py', 'pi_acp_worker.py', 'scripts/derive_pi_acp.py'):
+            self.assertTrue(all(n.split('.')[0] in sys.stdlib_module_names
+                                or n == 'ato_pi.pi_toolchain' for n in names), names)
+        for name in ('ato_pi/pi_session_profile.py', 'ato_pi/pi_acp_worker.py', 'scripts/derive_pi_acp.py'):
             tree = ast.parse((ROOT/name).read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     self.assertNotEqual(node.func.id, 'replace_once', name)
-        code = 'import sys;sys.path.insert(0,'+repr(str(ROOT))+');import pi_acp_compat;assert "agents" not in sys.modules'
+        code = ('import sys; sys.path.insert(0, '+repr(str(ROOT))+'); '
+                'from ato_pi import pi_acp_compat; assert "ato_adapters.agents" not in sys.modules')
         empty = self.base/'empty'; empty.mkdir()
         result = subprocess.run([sys.executable, '-I', '-c', code], cwd=empty,
             env=dict(HOME=str(empty), PATH=''), capture_output=True, text=True, timeout=10)
@@ -188,14 +191,15 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_toolchain_modules_and_registry_are_distributed_and_indexed(self):
         data = tomllib.loads((ROOT/'pyproject.toml').read_text())['tool']['setuptools']
-        for name in ('pi_toolchain', 'pi_acp_compat'):
-            self.assertIn(name, data['py-modules'])
-            self.assertIn(name+'.py', (ROOT/'docs/source-map.md').read_text())
-            self.assertIn(name+'.py', prepare_acp_process_candidate.FILES)
+        self.assertIn('ato_pi', data['packages'])
+        for path in ('ato_pi/pi_toolchain.py', 'ato_pi/pi_acp_compat.py'):
+            self.assertTrue((ROOT/path).is_file())
+            self.assertIn(path, (ROOT/'docs/source-map.md').read_text())
+            self.assertIn(path, prepare_acp_process_candidate.FILES)
         self.assertIn('integrations/pi-acp/compatibility.json',
             data['data-files']['share/agent-task-orchestrator/integrations/pi-acp'])
         for name in ('prepare_acp_process_candidate.py', 'prepare_agent_candidate.py',
                      'prepare_recovery_candidate.py', 'prepare_session_candidate.py'):
-            self.assertIn('compatibility.json', (ROOT/'scripts'/name).read_text())
-        for name in ('pi_toolchain.py', 'pi_acp_compat.py', 'integrations/pi-acp/compatibility.json'):
+            self.assertIn('compatibility.json', (ROOT/'scripts/history'/name).read_text())
+        for name in ('ato_pi/pi_toolchain.py', 'ato_pi/pi_acp_compat.py', 'integrations/pi-acp/compatibility.json'):
             self.assertIn(name, prepare_session_candidate.files(ROOT))

@@ -16,13 +16,13 @@ import sys
 import time
 import uuid
 
-import session_router
+from ato_workflow import session_router
 import runner as core
-from ato_core import now, read, save, digest, process_identity, Halt, locked, alive
-from ato_core import pid_alive as _pid_alive
+from ato_common.ato_core import now, read, save, digest, process_identity, Halt, locked, alive
+from ato_common.ato_core import pid_alive as _pid_alive
 
-import execution_state
-from execution_state import ACTIVE, REPAIR, REPORT, ALERT_STATES
+from ato_workflow import execution_state
+from ato_workflow.execution_state import ACTIVE, REPAIR, REPORT, ALERT_STATES
 WATCH_FAILURE_LIMIT = 5
 EVENT_BLOCK_BYTES = 64 * 1024
 _LINE_BOUNDARY = re.compile(rb'\r\n|[\n\r\v\f\x1c-\x1e]|\xc2\x85|\xe2\x80[\xa8\xa9]')
@@ -125,7 +125,7 @@ def enable(directory, source, max_requests=3, same_blocker_limit=2,
                             response_seconds=response_seconds, requests=[], status='watching')
         core.save(path, recovery)
     # Observation is separate from bounded business recovery; it adds no grants.
-    import control
+    from ato_workflow import control
     try:
         control.register(d)
     except (ValueError, OSError, KeyError) as exc:
@@ -181,7 +181,7 @@ def execution_available(directory, state, bus, *, explicit_run=False):
     A repository flock is still required by the caller. Lease expiry fences a
     credential; it does not prove that native host work or orphan children ended.
     """
-    import workflow_closure
+    from ato_workflow import workflow_closure
     d = Path(directory).resolve()
     if ((d/'STOP').exists() or (d/'user-closure.json').exists()
             or (state.get('status') in ('completed', 'stopped') and not explicit_run)):
@@ -221,7 +221,7 @@ def execution_owner(directory, state, *, role='worker', explicit_run=False):
     fence excludes stale origin/worker/session-host renewals after a crash.
     Nested stage workers inherit their workflow's ownership and parent guard.
     """
-    import transport
+    from ato_workflow import transport
     d = Path(directory).resolve()
     bus = transport.managed_bus()
     if explicit_run and role != 'worker':
@@ -256,7 +256,7 @@ def execution_owner(directory, state, *, role='worker', explicit_run=False):
 
 def origin_lease(d, state, request, *, release=False):
     """Retain origin work across CLI calls without sharing its secret with models."""
-    import transport
+    from ato_workflow import transport
     resource = execution_resource(state['repo'])
     bus = transport.managed_bus()
     name = core.digest([str(d), request['id']])
@@ -283,7 +283,7 @@ def origin_lease(d, state, request, *, release=False):
 
 
 def current_execution_owner(state):
-    import transport
+    from ato_workflow import transport
     bus = transport.managed_bus()
     lease = bus.execution_lease(execution_resource(state['repo']))
     return lease if lease and lease['state'] == 'active' and lease['lease_until'] > bus.clock() else None
@@ -316,7 +316,7 @@ def handler_status(directory, state, origin):
     Unknown activity remains unknown. A dead/expired request is history, not an
     effective handler; unknown delivery is never permission to replay work.
     """
-    import workflow_closure
+    from ato_workflow import workflow_closure
     d = Path(directory).resolve()
     if (d/'STOP').exists() or state.get('status') == 'stopped':
         return 'stopped'
@@ -349,7 +349,7 @@ def handler_status(directory, state, origin):
 
 
 def message(d, r, request, state, reason):
-    import interaction
+    from ato_workflow import interaction
     hub = interaction.config()
     input_route = ('用户已指定统一交互会话 '+hub['thread_id']+'；needs_input 会自动转送那里。'
                    '请给出具体问题和推荐方案，不要求用户回执行会话回答。' if hub else '在本会话向用户集中追问。')
@@ -407,7 +407,7 @@ def takeover_status(directory, request_id, *, check_repo_lock=True):
         delivery = request.get('delivery') or {}
         if delivery.get('authority') == 'managed_mailbox':
             try:
-                import transport
+                from ato_workflow import transport
                 bus = transport.managed_bus()
                 bus.recover()
                 envelope = bus.message(delivery['mailbox_id'])
@@ -428,7 +428,7 @@ def takeover_status(directory, request_id, *, check_repo_lock=True):
         reasons.append('contract_changed')
     if alive(current.get('owner_pid')):
         reasons.append('owner_active')
-    import workflow_closure
+    from ato_workflow import workflow_closure
     if current.get('active_run') and workflow_closure.active_execution(
             core.read(Path(current['active_run'])/'state.json')):
         reasons.append('stage_active')
@@ -503,7 +503,7 @@ def takeover(directory, request_id, state, note, evidence=None, recommendation='
             core.save(d/'recovery.json', r)
     result = summary(d)
     if state == 'needs_input':
-        import interaction
+        from ato_workflow import interaction
         try:
             result['interaction'] = interaction.ask(d, note, recommendation,
                                                     context='接管 '+request_id+' 需要用户输入', request_id=request_id)
@@ -522,7 +522,7 @@ def tick(directory):
             r['updated_at'] = core.now()
             core.save(d/'recovery.json', r)
             if status in ALERT_STATES and r['requests'] and not r['requests'][-1].get('notification'):
-                import interaction
+                from ato_workflow import interaction
                 request = r['requests'][-1]
                 try:
                     result = interaction.supervision_alert(d, request['id'])
@@ -635,7 +635,7 @@ def tick(directory):
                 if 'event_cursor' in checkpoint:
                     request['event_cursor'] = checkpoint['event_cursor']
                 request['message'] = message(d, r, request, state, reason)
-                import transport
+                from ato_workflow import transport
                 if session_router.managed_delivery_supported(r['thread_id']):
                     request['delivery'] = transport.prepare_managed(r['thread_id'], request['message'],
                         canonical_id=request['id'], phase='recovery', task_id=str(d),

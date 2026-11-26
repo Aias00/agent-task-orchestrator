@@ -7,16 +7,16 @@ import time
 import unittest
 from unittest.mock import patch
 
-import agents
-import control
-import delegation
-import interaction
-import notifications
-import progress
+from ato_adapters import agents
+from ato_workflow import control
+from ato_workflow import delegation
+from ato_workflow import interaction
+from ato_workflow import notifications
+from ato_workflow import progress
 import recovery
 import runner
-import session_router
-import workflow
+from ato_workflow import session_router
+from ato_workflow import workflow
 import test_agent_neutral_e2e as fixture
 
 
@@ -74,8 +74,8 @@ class LifecycleContract(unittest.TestCase):
         self.assertEqual(len((self.repo/'sent.jsonl').read_text().splitlines()), 1)
 
     def test_same_registered_transport_serves_durable_mailbox(self):
-        from message_bus import MessageBus
-        from transport import dispatch_registered
+        from ato_workflow.message_bus import MessageBus
+        from ato_workflow.transport import dispatch_registered
         bus = MessageBus(Path(self.tmp.name)/'mailbox.sqlite')
         sender = bus.register_endpoint('sender', kind='codex', session_id='hub',
                                        project=self.repo, source='fixture hub')
@@ -172,7 +172,7 @@ class LifecycleContract(unittest.TestCase):
         runner.save(plan, dict(objective='fixture delegation', scope='isolated target',
                               authorization='local fixture', memory=False,
                               acceptance=[dict(id='x', description='fixture', checks=[['true']])]))
-        with patch.dict(os.environ, {'FIXTURE_ACTOR': 'hub:opaque'}), patch('delegation.start_bridge'):
+        with patch.dict(os.environ, {'FIXTURE_ACTOR': 'hub:opaque'}), patch('ato_workflow.delegation.start_bridge'):
             first = delegation.delegate(target, plan, 'fixture', 'explicit fixture delegation',
                                         session_kind=fixture.FixtureAdapter.kind)
             again = delegation.delegate(target, plan, 'fixture', 'explicit fixture delegation',

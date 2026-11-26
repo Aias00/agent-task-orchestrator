@@ -39,7 +39,7 @@ local credentials under the operator's authority. It starts no sessions.
 The host writes JSON files under `$ATO_HOME/unified-v1/host`. Use owner-only
 directories and mode `0600` files. Preserve exact Task, Run, repository and
 generation values from the ledger for scoped grants. An adapter integration can
-call [Host](../ato_host.py) to compose the same services as the CLI.
+call [Host](../ato_task/ato_host.py) to compose the same services as the CLI.
 
 - `profile.json` contains `worker_executable`, `worker_home`, `proof_roots`, and
   `review_tools` as an array of `[kind, executable, home]` triples. Use
@@ -78,7 +78,7 @@ call [Host](../ato_host.py) to compose the same services as the CLI.
 The authenticated user's explicit invocation is the event for ordinary answers
 and acceptance. Privileged answers require the host's exact correlated event
 receipt in `event-<digest>.json` with `grant_ref` and `performed`. Use the
-verifier in [ato_host.py](../ato_host.py) for the digest and
+verifier in [ato_host.py](../ato_task/ato_host.py) for the digest and
 authority fields. A binding/reviewer transition additionally requires
 `decision-<evidence SHA-256>.json`, with the actual user's credential
 `actor_id`, `operation`, and `source_ref`. These host receipts describe

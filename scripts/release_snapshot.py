@@ -28,7 +28,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ato_release_lib import (
+from ato_release.support import (
     LEGACY, MANIFEST, PATH, SURFACE, ObserverProbe, Refused, command, file_record, host_tool,
     inventory, is_legacy_observer, launcher_bytes, mailbox, mailbox_copy, mailbox_exists,
     observer_argv, read, read_private, release_lock, require, safe_record, same_observer,
@@ -371,7 +371,7 @@ class System(ObserverProbe):
             record(dict(matching[0], pid_identity=birth, surface='legacy'))
 
     def _start_unified(self, source, env, record, intent):
-        import ato_process
+        from ato_task import ato_process
         rd, wr = os.pipe()
         try:
             parent = os.getpid()
@@ -422,7 +422,9 @@ def active_tasks(paths, system, sources):
     """Fence unresolved execution while retaining idle tasks and their sealed source."""
     prefixes = [str(Path(row['root'])/name) for row in sources.values()
                 for name in ('runner.py', 'ato.py', 'ato_runtime.py', 'hub_cli.py', 'coordination.py',
-                             'pi_coordinator_exec.py', 'pi_production_exec.py', 'pi_acp_exec.py', 'pi_acp_worker.py')]
+                             'pi_coordinator_exec.py', 'pi_production_exec.py', 'pi_acp_exec.py', 'pi_acp_worker.py',
+                             'ato_pi/pi_coordinator_exec.py', 'ato_pi/pi_production_exec.py',
+                             'ato_pi/pi_acp_exec.py', 'ato_pi/pi_acp_worker.py')]
     active = [row for row in system.processes() if any(path in row['command'] for path in prefixes)
               and not row['command'].endswith(('runner.py _controller', 'ato_runtime.py observe'))]
     blockers = ['selected runtime has active commands'] if active else []
@@ -472,8 +474,8 @@ def active_tasks(paths, system, sources):
 
 
 def _unified_blockers(paths):
-    from ato_host import Host
-    from ato_task_store import TaskError, TaskStore
+    from ato_task.ato_host import Host
+    from ato_task.ato_task_store import TaskError, TaskStore
 
     store = TaskStore(paths['ato_home'], native_home=paths['codex_home'])
     try:

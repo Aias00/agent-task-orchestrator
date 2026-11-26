@@ -6,8 +6,9 @@ import shutil
 import subprocess
 import sys
 
+from ato_common.ato_core import ensure_private_dir
 from scripts import release_snapshot as release
-from ato_core import ensure_private_dir
+from scripts.check_architecture import runtime_sources
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,12 +55,13 @@ def snapshot(root, *, legacy=False, executable=False, commit=None, legacy_delive
         for name in ('runner.py', 'coordination.py', 'hub_cli.py'):
             write(root, name)
     elif executable:
-        for source in ROOT.glob('*.py'):
+        for source in runtime_sources(ROOT):
+            relative = source.relative_to(ROOT)
             body = source.read_text()
-            if legacy_delivery_outcome and source.name == 'ato_execution.py':
+            if legacy_delivery_outcome and relative.as_posix() == 'ato_task/ato_execution.py':
                 body = body.replace('return "completed"', 'return "needs_acceptance"')
-            write(root, source.name, body)
-        for name in ('ato_cli/__init__.py', 'scripts/install.py', 'scripts/release_snapshot.py', 'scripts/ato_host_setup.py',
+            write(root, relative, body)
+        for name in ('scripts/install.py', 'scripts/release_snapshot.py', 'scripts/ato_host_setup.py',
                      'skills/ato/SKILL.md', 'integrations/pi-acp/compatibility.json'):
             write(root, name, (ROOT/name).read_text())
     else:

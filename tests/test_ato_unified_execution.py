@@ -14,15 +14,15 @@ import time
 import unittest
 from unittest.mock import patch
 
-import ato_core
-import ato_execution as execution
-import ato_execution_host
-import ato_config
-import ato_process
-import ato_product
-from ato_task_store import InitialBinding, SubmissionGrant, TaskError, TaskStore
+from ato_common import ato_core
+from ato_task import ato_execution as execution
+from ato_task import ato_execution_host
+from ato_common import ato_config
+from ato_task import ato_process
+from ato_task import ato_product
+from ato_task.ato_task_store import InitialBinding, SubmissionGrant, TaskError, TaskStore
 import recovery
-import transport
+from ato_workflow import transport
 
 
 _WORKER = r"""
@@ -517,7 +517,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         profile = execution.HostProfile(self.service.profile.worker_executable, str(self.worker_home))
         manifest = self.root / ".release-manifest.json"
         manifest.write_text(json.dumps({"tools": {"node": {"path": "/fixture/node", "sha256": "a" * 64}}}))
-        with patch.object(ato_execution_host, "__file__", str(self.root / "ato_execution_host.py")):
+        with patch.object(ato_execution_host, "__file__", str(self.root / "ato_task/ato_execution_host.py")):
             for operation, error in (("safe_record", OSError("read")),
                                      ("verify_tools", ValueError("digest changed")),
                                      ("trusted_path", ValueError("invalid path"))):

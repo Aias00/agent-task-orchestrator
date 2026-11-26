@@ -115,7 +115,7 @@ the transaction journal for rollback. Fixture qualification and source
 installation leave real activation and provider verification pending.
 
 The installer, release script and runtime share snapshot, mailbox and
-launcher verification through `ato_release_lib.py`. See the
+launcher verification through `ato_release/support.py`. See the
 [host setup guide](ato-host-setup.md) for authorized delivery reconciliation
 and the [module map](source-map.md) for the public and private runtime
 boundaries.

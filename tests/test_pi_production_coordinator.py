@@ -12,12 +12,12 @@ import unittest
 from unittest.mock import patch
 
 import agent_registry as registry
-from ato_core import digest
-import session_router
-from pi_production_profile import ProductionPiProfile
-from pi_session_coordinator import PiCoordinator,PiSessionAdapter
-from pi_session_profile import Launch
-from pi_toolchain import locate
+from ato_common.ato_core import digest
+from ato_workflow import session_router
+from ato_pi.pi_production_profile import ProductionPiProfile
+from ato_pi.pi_session_coordinator import PiCoordinator,PiSessionAdapter
+from ato_pi.pi_session_profile import Launch
+from ato_pi.pi_toolchain import locate
 from test_pi_production_profile import configuration,reviewed
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -99,8 +99,8 @@ let callback;guard({on(name,fn){if(name==='tool_call')callback=fn;}});
 const result=await callback({toolName:process.env.FIXTURE_TOOL,input:{path:'safe.txt'}});
 console.log(JSON.stringify({blocked:result?.block===true}));
 """
-        from pi_session_coordinator import control_socket
-        from pi_toolchain import production_sandbox
+        from ato_pi.pi_session_coordinator import control_socket
+        from ato_pi.pi_toolchain import production_sandbox
         env=dict(HOME=str(self.root),PATH='/usr/bin:/bin',CTASK_PI_RUNTIME=str(self.host.runtime),
             CTASK_AGENT_REPO=str(self.project),CTASK_AGENT_SANDBOX='read-only',FIXTURE_TOOL=tool,
             ATO_PI_PROFILE_HASH=profile or self.host.profile.fingerprint,
@@ -217,9 +217,9 @@ console.log(JSON.stringify({blocked:result?.block===true}));
                 PiCoordinator(p,self.project,kind='pi_acp_production',production_owner=Owner(directory))
 
     async def test_production_provisioning_rejects_prepared_local_before_native_creation(self):
-        from pi_session_profile import LocalPiProfile
-        from pi_session_coordinator import provision_path
-        from transport import _private_save
+        from ato_pi.pi_session_profile import LocalPiProfile
+        from ato_pi.pi_session_coordinator import provision_path
+        from ato_workflow.transport import _private_save
         models=dict(providers={'fixture':dict(baseUrl='http://127.0.0.1:19321',apiKey='ato-local-dummy',
             api='openai-completions',models=[{'id':'scripted'}])})
         local=PiCoordinator(LocalPiProfile(models,'fixture/scripted'),self.project)

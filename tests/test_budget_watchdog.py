@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
-import budget
-import control
+from ato_workflow import budget
+from ato_workflow import control
 import runner
 import recovery
 
@@ -65,7 +65,7 @@ class BudgetControllerTests(unittest.TestCase):
         runner.save(self.d/'state.json',s);control.register(self.d)
 
     def tick(self):
-        with patch('control.subprocess.run',side_effect=self.transport): control.tick()
+        with patch('ato_workflow.control.subprocess.run',side_effect=self.transport): control.tick()
 
     def budget_actions(self):
         return [x for x in control.rows(True) if x['kind']=='budget_watchdog']
@@ -104,7 +104,7 @@ class BudgetControllerTests(unittest.TestCase):
 
     def test_unknown_delivery_not_blindly_retried(self):
         self.prepare(status='limit')
-        with patch('control.subprocess.run',side_effect=subprocess.TimeoutExpired('queue',25)) as send:
+        with patch('ato_workflow.control.subprocess.run',side_effect=subprocess.TimeoutExpired('queue',25)) as send:
             control.tick();control.tick()
             self.assertEqual(send.call_count,1)
         self.assertEqual(self.budget_actions()[0]['notice']['state'],'delivery_unknown')
@@ -158,7 +158,7 @@ class BudgetControllerTests(unittest.TestCase):
         a=dict(baseline_generation=[0,0])
         self.assertFalse(control.resumed(a,self.d,s,[1,1]))
         log.write_text('more output')
-        with patch('control.recovery.alive',return_value=False):
+        with patch('ato_workflow.control.recovery.alive',return_value=False):
             self.assertFalse(control.resumed(a,self.d,s,[1,1]))
         self.assertNotIn('resume_probe',a)
 

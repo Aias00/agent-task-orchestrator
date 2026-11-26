@@ -7,14 +7,14 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import control
+from ato_workflow import control
 import coordination
-import failure_attention
-import failure_notice
-import notifications
+from ato_workflow import failure_attention
+from ato_workflow import failure_notice
+from ato_workflow import notifications
 import recovery
 import runner
-import transport
+from ato_workflow import transport
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
 
@@ -37,7 +37,7 @@ class CompactFailureTests(unittest.TestCase):
         self.key = 'followup:'+self.action['id']+':0'
 
     def send(self, body='FULL_PRIVATE_FAILURE_MATERIAL_'*500):
-        with patch('control.subprocess.run', side_effect=self.transport) as send:
+        with patch('ato_workflow.control.subprocess.run', side_effect=self.transport) as send:
             result = control.send(self.key, HUB, body, workflow=str(self.d))
         return result, send
 
@@ -124,7 +124,7 @@ class CompactFailureTests(unittest.TestCase):
         with self.assertRaises(ValueError):failure_notice.prepare(self.key,HUB,str(self.d),'different')
 
     def test_acquiring_handler_at_dispatch_barrier_cancels_without_send(self):
-        from message_bus import MessageBus
+        from ato_workflow.message_bus import MessageBus
         self.prepare()
         state=runner.read(self.d/'state.json')
         projection=transport.prepare_managed(HUB,'short',canonical_id=self.key,phase='followup',
@@ -134,7 +134,7 @@ class CompactFailureTests(unittest.TestCase):
         handler=['unhandled']
         def race(bus,*args,**kwargs):
             result=original(bus,*args,**kwargs);handler[0]='origin_active';return result
-        with patch('recovery.handler_status',side_effect=lambda *a:handler[0]),patch.object(MessageBus,'begin_dispatch',race),patch('control.subprocess.run') as sent:
+        with patch('recovery.handler_status',side_effect=lambda *a:handler[0]),patch.object(MessageBus,'begin_dispatch',race),patch('ato_workflow.control.subprocess.run') as sent:
             with self.assertRaises(ValueError):transport.dispatch_managed(projection)
         sent.assert_not_called()
         self.assertEqual(transport.managed_bus().message(projection['mailbox_id'])['state'],'cancelled')

@@ -8,18 +8,18 @@
 
 | 已落地模块与基线行号 | 当前事实 | 对 W2-1 的约束 |
 | --- | --- | --- |
-| [pi_session_profile.py](../pi_session_profile.py) L35–73、L75–120 | `LocalPiProfile` 仅接受 HTTP 回环端点和 `ato-local-dummy`；创建隔离 native home，写入合成模型配置 | 保持校验、调用方式、默认值和本地 fixture 行为不变；生产配置走独立类型 |
-| [pi_session_coordinator.py](../pi_session_coordinator.py) L155–165、L217–258 | `pi_acp` 只允许精确的 `LocalPiProfile` 类型；持久化 creating 后才启动，身份不能重复占用 | 显式增加生产身份分支；不能把原精确类型检查改为任意 duck typing |
-| [pi_toolchain.py](../pi_toolchain.py) L87–132、L166–171、L266–285 | 可信绝对工具路径、owner/祖先权限、精确 Pi 包指纹、稳定 Node ≥24；环境重建；有限版本探测 | 完整复用，不采用任务 PATH、环境 registry 或未审查 CLI；版本探测不加载用户认证 |
-| [pi_toolchain.py](../pi_toolchain.py) L304–368 | `write_launch`/`load_launch` 固定同一 Node/Pi 和 adapter 指纹；`write_exclusions` 排除 trusted、adapter 和 runtime 根替换 | 生产 launcher 仍须经过这些校验，不能另造宽松启动器 |
-| [pi_acp_compat.py](../pi_acp_compat.py) L23–28、L52–152、L155–193、L234–278 | 精确 backend/capabilities、9+5 个命名变换、输入/输出哈希、原子禁止覆盖发布 | 继续使用 coordinator backend，禁止 profile 自行字符串补丁、接受任意版本或就地改 node_modules |
+| [pi_session_profile.py](../ato_pi/pi_session_profile.py) L35–73、L75–120 | `LocalPiProfile` 仅接受 HTTP 回环端点和 `ato-local-dummy`；创建隔离 native home，写入合成模型配置 | 保持校验、调用方式、默认值和本地 fixture 行为不变；生产配置走独立类型 |
+| [pi_session_coordinator.py](../ato_pi/pi_session_coordinator.py) L155–165、L217–258 | `pi_acp` 只允许精确的 `LocalPiProfile` 类型；持久化 creating 后才启动，身份不能重复占用 | 显式增加生产身份分支；不能把原精确类型检查改为任意 duck typing |
+| [pi_toolchain.py](../ato_pi/pi_toolchain.py) L87–132、L166–171、L266–285 | 可信绝对工具路径、owner/祖先权限、精确 Pi 包指纹、稳定 Node ≥24；环境重建；有限版本探测 | 完整复用，不采用任务 PATH、环境 registry 或未审查 CLI；版本探测不加载用户认证 |
+| [pi_toolchain.py](../ato_pi/pi_toolchain.py) L304–368 | `write_launch`/`load_launch` 固定同一 Node/Pi 和 adapter 指纹；`write_exclusions` 排除 trusted、adapter 和 runtime 根替换 | 生产 launcher 仍须经过这些校验，不能另造宽松启动器 |
+| [pi_acp_compat.py](../ato_pi/pi_acp_compat.py) L23–28、L52–152、L155–193、L234–278 | 精确 backend/capabilities、9+5 个命名变换、输入/输出哈希、原子禁止覆盖发布 | 继续使用 coordinator backend，禁止 profile 自行字符串补丁、接受任意版本或就地改 node_modules |
 | [compatibility.json](../integrations/pi-acp/compatibility.json) L3–15、L18–39 | Node ≥24、Pi 1.5.2、pi-acp 0.0.34 和两个角色输出指纹是代码拥有的契约 | 源码/依赖升级必须重新评审，release archive 审核不等于真实 Provider 资格 |
-| [pi_coordinator_exec.py](../pi_coordinator_exec.py) L12–25 | 仅 read 或 read/edit/write；禁 MCP/skills/context/外部扩展，只装固定 guard；当前环境由 `native_environment()` 重建 | 无 Shell/Web/MCP；生产凭据不能靠继承整个宿主环境实现 |
-| [acp_bridge.py](../acp_bridge.py) L25–46、L71–108 | worker bridge 的 SDK 日志脱敏按 source pathname 匹配，私有 stderr 仍可保留原始子进程字节 | 生产不能直接复用“私有就可保存原始 stderr”的规则；需检验路径别名、异常和 SDK logger 的脱敏覆盖 |
+| [pi_coordinator_exec.py](../ato_pi/pi_coordinator_exec.py) L12–25 | 仅 read 或 read/edit/write；禁 MCP/skills/context/外部扩展，只装固定 guard；当前环境由 `native_environment()` 重建 | 无 Shell/Web/MCP；生产凭据不能靠继承整个宿主环境实现 |
+| [acp_bridge.py](../ato_adapters/acp_bridge.py) L25–46、L71–108 | worker bridge 的 SDK 日志脱敏按 source pathname 匹配，私有 stderr 仍可保留原始子进程字节 | 生产不能直接复用“私有就可保存原始 stderr”的规则；需检验路径别名、异常和 SDK logger 的脱敏覆盖 |
 | [pi-coordinator-guard.mjs](../pi-coordinator-guard.mjs) L7–41 | 每个 `tool_call` 检查私有 turn、STOP、合约/代次和 origin/events 指纹，再判路径 | **当前没有预算校验，也不是任意宿主 action 的统一入口**；生产实施必须补齐，不能将其描述为现有保障 |
-| [pi_session_coordinator.py](../pi_session_coordinator.py) L108–141、L360–386、L417–483、L498–550 | envelope、origin、租约和 generation 校验；发送前持久 possible-effect 边界；cancel 后关闭自有进程组 | 保留 unknown/no-replay；生产需补慢请求期间的持续守卫及子进程/后代退出证明 |
-| [budget.py](../budget.py) L384–417；[runner.py](../runner.py) L105–119、L141–189 | W1 在软 deadline 重新核对进展；有界 `Popen.wait` 随子进程退出唤醒；STOP/清理仍保留 | 复用预算语义，不把 W1 Runner 的修复误称为已经自动覆盖 async Pi host |
-| [pi_session_coordinator.py](../pi_session_coordinator.py) L603–617 | `session.load_resume=unsupported`，即使上游宣称 load | Production 同样 unsupported；W2-2 才单独设计 native load/resume |
+| [pi_session_coordinator.py](../ato_pi/pi_session_coordinator.py) L108–141、L360–386、L417–483、L498–550 | envelope、origin、租约和 generation 校验；发送前持久 possible-effect 边界；cancel 后关闭自有进程组 | 保留 unknown/no-replay；生产需补慢请求期间的持续守卫及子进程/后代退出证明 |
+| [budget.py](../ato_workflow/budget.py) L384–417；[runner.py](../runner.py) L105–119、L141–189 | W1 在软 deadline 重新核对进展；有界 `Popen.wait` 随子进程退出唤醒；STOP/清理仍保留 | 复用预算语义，不把 W1 Runner 的修复误称为已经自动覆盖 async Pi host |
+| [pi_session_coordinator.py](../ato_pi/pi_session_coordinator.py) L603–617 | `session.load_resume=unsupported`，即使上游宣称 load | Production 同样 unsupported；W2-2 才单独设计 native load/resume |
 | [release_snapshot.py](../scripts/release_snapshot.py) L183–238、L256–291、L322–366 | 固定 commit/archive/tree，全量离线资格、只读封存、inventory/工具哈希复验 | 从已审查快照定位代码；seal 是运行封存，不是抵御 owner 主动 chmod 的权限边界 |
 
 ## 2. 显式 opt-in 与严格身份隔离
@@ -64,10 +64,10 @@
 2. 新叶模块 `pi_production_credentials.py` 只读打开被选 provider 的 auth 文件（O_RDONLY/O_NOFOLLOW、fstat、owner、0600、常规文件、单链接、大小≤64 KiB、祖先权限及路径排除）；内存解析拒绝重复 key、所选项未知 schema、OAuth/命令/多源歧义。原生文件可以保留其他 provider 的合法项，但不得解析、输出或选用其凭据。原生格式解析器只在这个 Pi adapter 叶模块内，并用固定版本的合成 auth fixtures 证明兼容。
 3. 不把原生 home 指向 native Pi 子进程；不复制 auth/models/settings 文件。新 runtime 的 models 配置只由审查表生成，凭据字段只能是该固定 Pi 版本已验证的**环境变量引用**，绝不能是解析后的 key，也不能是会缺失回退为字面值的未验证表达式。确切引用语法必须在 pinned Pi 1.5.2 离线测试中确认，不能从另一个开发版 Pi 的文档推断。
 4. 秘密只存在宿主内存和确需认证的可信 ACP/Pi 进程最小环境中。宿主使用不可序列化、repr 脱敏的 `SecretLease`；在最终 Popen/exec 前才构造临时 env。`Launch.environment`、provenance、state 和通用 runner event 只持非敏感字段；不能把 SecretLease 交给 dataclass/asdict、trace 或异常 formatter。当前 `PiCoordinator.start()` 直接传 `launch.environment`（L223–229）需要独立生产启动分支，不能将秘密先写入可打印的 Launch 对象。
-5. 当前 [native_environment](../pi_toolchain.py) L383–391 不传 provider key；保持本地行为，拟新增的 `pi_production_exec.py` 先复用 clean/native environment，再仅合并审查表允许的一个认证变量。真实 key 通过进程内 env 构造和 exec 环境传递，**不通过 argv、命令文本、临时文件、ACP 帧或 stdin prompt**。可信 ACP 进程会继承并传递该 env，必须纳入保密 TCB，不能声称只有最末端 Pi 进程能看到 key。
+5. 当前 [native_environment](../ato_pi/pi_toolchain.py) L383–391 不传 provider key；保持本地行为，拟新增的 `pi_production_exec.py` 先复用 clean/native environment，再仅合并审查表允许的一个认证变量。真实 key 通过进程内 env 构造和 exec 环境传递，**不通过 argv、命令文本、临时文件、ACP 帧或 stdin prompt**。可信 ACP 进程会继承并传递该 env，必须纳入保密 TCB，不能声称只有最末端 Pi 进程能看到 key。
 6. launch 成功/失败、cancel、EOF、超时和关闭均清除宿主 SecretLease 引用；不刷新、不写回原生认证。禁止 core dump、调试 attach/export、环境 dump 和子进程继承无关句柄。Python/Node GC 和 OS swap 不提供可验证的内存零化，因此不宣称密码学级擦除；同 UID 宿主/管理员属于可信边界。若要求连受管进程环境也不得持 key，须另行设计凭据代理，不能偷偷改为落盘。
 
-不得将真实 key、Authorization header、cookie、OAuth token 或原始环境复制进 `runtime/`、task 目录、日志、trace、checkpoint、release manifest/transaction 或 subprocess argv。错误只保留审查过的错误码、阶段与请求关联 ID；不得记录原始 HTTP request/header、异常 message 或原生 stderr。对外返回与事件 journal 也须经过 secret sentinel 防泄漏测试。环境只保留 [clean_environment](../pi_toolchain.py) L166–171 的基础项、已有 runtime/model locators、固定证书/出口 locators 和上述单个认证变量；排除 NODE_OPTIONS/NODE_PATH、PYTHONPATH、LD_*/DYLD_*、ambient proxy、SSH/cloud/actor/session 凭据。不存在供模型使用的 env-read 或认证文件工具。
+不得将真实 key、Authorization header、cookie、OAuth token 或原始环境复制进 `runtime/`、task 目录、日志、trace、checkpoint、release manifest/transaction 或 subprocess argv。错误只保留审查过的错误码、阶段与请求关联 ID；不得记录原始 HTTP request/header、异常 message 或原生 stderr。对外返回与事件 journal 也须经过 secret sentinel 防泄漏测试。环境只保留 [clean_environment](../ato_pi/pi_toolchain.py) L166–171 的基础项、已有 runtime/model locators、固定证书/出口 locators 和上述单个认证变量；排除 NODE_OPTIONS/NODE_PATH、PYTHONPATH、LD_*/DYLD_*、ambient proxy、SSH/cloud/actor/session 凭据。不存在供模型使用的 env-read 或认证文件工具。
 
 ## 4. 受信任快照、启动物与 OS 边界
 
@@ -118,14 +118,14 @@ host actions（create/bind/send/Provider 请求准入、外部 completion 的接
 
 ### 5.2 慢响应、取消与退出语义
 
-W1 `a2c84a6` 的 [Runner.command](../runner.py) L141–154 使用有限 `Popen.wait`，子进程一退出即唤醒，仍在≤150ms 的轮询边界检查守卫；[budget.poll](../budget.py) L390–417 修复跨软 deadline 的过期判定。生产 async host 要实现等价的事件等待：同时等待 owned child exit、ACP response、STOP/fence 变化和 monotonic hard deadline，守卫检查间隔目标≤150ms（宿主正常调度下），不能只等网络超时、仅等 stdout 或固定长 sleep。慢网络不算已授权 external_wait，也不暂停 STOP/成本/硬超时。
+W1 `a2c84a6` 的 [Runner.command](../runner.py) L141–154 使用有限 `Popen.wait`，子进程一退出即唤醒，仍在≤150ms 的轮询边界检查守卫；[budget.poll](../ato_workflow/budget.py) L390–417 修复跨软 deadline 的过期判定。生产 async host 要实现等价的事件等待：同时等待 owned child exit、ACP response、STOP/fence 变化和 monotonic hard deadline，守卫检查间隔目标≤150ms（宿主正常调度下），不能只等网络超时、仅等 stdout 或固定长 sleep。慢网络不算已授权 external_wait，也不暂停 STOP/成本/硬超时。
 
 | 时点/事件 | 收尾与持久语义 |
 | --- | --- |
 | 尚未写 prompt/发请求就准入失败 | 记明确 no-native-effect，不发网络，不启动另一个 profile |
 | 已持久化 dispatching、写入状态未知、HTTP 已发而未获确认 | 保留 `delivery_unknown`/未决费用与原 message/turn ID；断连不是安全重试依据 |
 | STOP、合约/代次变化、超时、代理断连、宿主退出 | 先撤销新工具/Provider 准入，取消请求并发送有界 ACP cancel；无论 pipe 是否损坏都进入 owned-group cleanup |
-| TERM/KILL 清理 | 沿用 [cancel/close](../pi_session_coordinator.py) L498–550 的 TERM→2s→KILL→2s 思路，但生产必须给 cancel write/drain 本身设上限，并核实持有的进程对象/启动身份及 PGID；不从磁盘旧 PID 杀进程 |
+| TERM/KILL 清理 | 沿用 [cancel/close](../ato_pi/pi_session_coordinator.py) L498–550 的 TERM→2s→KILL→2s 思路，但生产必须给 cancel write/drain 本身设上限，并核实持有的进程对象/启动身份及 PGID；不从磁盘旧 PID 杀进程 |
 | 直接子进程已退出，但后代/出口仍在 | 立即唤醒并核查自有组/出口的退出，不依赖 `proc.returncode is None` 才清理；当前 close 的该条件是生产需补的缺口。禁止扫杀他人进程，无法证明清理则 `cleanup_blocked`、不自动重建 |
 | 迟到模型响应/成功 stop | 必须在接受前复核相同 profile/turn/fence；不能覆盖 cancel、unknown、native error 或据此完成 workflow；框架 receipt 与用户/业务验收分开 |
 

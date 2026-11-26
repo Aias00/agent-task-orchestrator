@@ -7,10 +7,10 @@ import re
 import shlex
 import sys
 
-import interaction
+from ato_workflow import interaction
 import recovery
-import ato_core as core
-from ato_config import reader_command
+from ato_common import ato_core as core
+from ato_common.ato_config import reader_command
 
 MARKER = 'host-handoff:'
 MAX_BYTES = 2 * 1024 * 1024
@@ -70,7 +70,7 @@ def prepare(directory, state, contract, target, key, material):
             if path.is_symlink() or path.stat().st_mode & 0o077 or core.read(path) != record:
                 raise ValueError('immutable handoff material changed')
         else:
-            from ato_core import private_save
+            from ato_common.ato_core import private_save
             private_save(path, record)
     # Retain the exact correlation marker, not task/authorization/host prose.
     return notice
@@ -78,7 +78,7 @@ def prepare(directory, state, contract, target, key, material):
 
 def read(identifier_value):
     if re.fullmatch(r'failure-[0-9a-f]{20}', identifier_value):
-        import failure_notice
+        from ato_workflow import failure_notice
         return failure_notice.read(identifier_value)
     if not re.fullmatch(r'host-handoff-[0-9a-f]{20}', identifier_value):
         raise ValueError('invalid handoff identifier')

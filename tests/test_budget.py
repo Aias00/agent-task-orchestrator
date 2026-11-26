@@ -7,10 +7,10 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import budget
-import host_budget
+from ato_workflow import budget
+from ato_workflow import host_budget
 import runner
-import workflow
+from ato_workflow import workflow
 import test_workflow as fixtures
 from legacy_support import LEGACY_CLI
 
@@ -240,7 +240,7 @@ class BudgetTests(unittest.TestCase):
 class BudgetControllerTests(unittest.TestCase):
     def test_origin_review_is_deduplicated_and_does_not_grant_repair_or_ask_user_again(self):
         import test_control as fixtures
-        import control
+        from ato_workflow import control
         fixture=fixtures.ControlTests()
         fixture.setUp()
         try:

@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import test_interaction as fixtures
 from test_interaction import ORIGIN,HUB
-import control
-import failure_attention
+from ato_workflow import control
+from ato_workflow import failure_attention
 import runner
 
 

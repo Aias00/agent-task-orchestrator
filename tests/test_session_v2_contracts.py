@@ -9,10 +9,10 @@ from unittest.mock import patch
 import uuid
 
 import agent_registry
-import agents
-import ato_config
+from ato_adapters import agents
+from ato_common import ato_config
 import runner
-import session_router
+from ato_workflow import session_router
 
 
 class ContractAdapter:

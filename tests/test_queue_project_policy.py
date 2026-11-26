@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 import test_hub_queue_gate as fixtures
 from test_interaction import HUB
-import interaction
-import notifications
+from ato_workflow import interaction
+from ato_workflow import notifications
 import runner
-import control
+from ato_workflow import control
 
 gate = fixtures.gate
 
@@ -21,7 +21,7 @@ class ProjectPolicyGateTests(unittest.TestCase):
 
     def question(self):
         self.enable()
-        with patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             return interaction.ask(self.d, 'A real fixture decision?')
 
     def test_project_mute_blocks_a_canonical_pending_question_without_answering_it(self):

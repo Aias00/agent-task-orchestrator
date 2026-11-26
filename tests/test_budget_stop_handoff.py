@@ -8,11 +8,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-import budget
-import control
-import interaction
+from ato_workflow import budget
+from ato_workflow import control
+from ato_workflow import interaction
 import runner
-import workflow
+from ato_workflow import workflow
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
 from legacy_support import LEGACY_CLI
@@ -29,7 +29,7 @@ class BudgetStopHandoffTests(unittest.TestCase):
             c['acceptance'].append(dict(id='human',description='Actual user acceptance',kind='manual'))
             runner.save(self.repo/'manual.json',c)
             self.d=workflow.create(self.repo,self.repo/'manual.json',ORIGIN)
-        with patch('interaction.subprocess.run',side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run',side_effect=self.transport):
             q=interaction.ask(self.d,'Approve up to 50 more active minutes for this exact goal?',
                               'Use a task-specific bounded envelope; preserve all prior charges')
             with patch.dict(os.environ,CODEX_THREAD_ID=HUB):
@@ -141,7 +141,7 @@ class BudgetStopHandoffTests(unittest.TestCase):
         self.prepare(manual=True);self.accept();self.grant();(self.repo/'result').write_text('Actual fixture output')
         with patch.dict(os.environ,CODEX_THREAD_ID=HUB):control.enable('Actual fixture continuous hub follow-up')
         control.register(self.d)
-        with patch('control.subprocess.run',side_effect=self.transport):control.tick()
+        with patch('ato_workflow.control.subprocess.run',side_effect=self.transport):control.tick()
         self.assertEqual(next(a for a in control.rows(True) if a['id']==self.q['id'])['state'],'stopped')
         result=subprocess.run([sys.executable,str(LEGACY_CLI),'resume',str(self.d),
                               '--accepted-answer',self.q['id'],'--retry-failed'],
@@ -157,7 +157,7 @@ class BudgetStopHandoffTests(unittest.TestCase):
         self.assertGreater(s['elapsed_seconds'],7200)
         self.assertFalse((self.d/'STOP').exists())
         self.assertEqual(runner.read(self.d/'launch.json')['approved_budget_answer'],self.q['id'])
-        with patch('control.subprocess.run',side_effect=self.transport):control.tick()
+        with patch('ato_workflow.control.subprocess.run',side_effect=self.transport):control.tick()
         # A fast ended run is not falsely labelled live recovery.
         self.assertEqual(next(a for a in control.rows(True) if a['id']==self.q['id'])['state'],'awaiting_execution')
 

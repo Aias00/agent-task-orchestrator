@@ -12,8 +12,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
-import interaction
-import notifications
+from ato_workflow import interaction
+from ato_workflow import notifications
 import runner
 
 spec = importlib.util.spec_from_file_location('hub_queue_gate', Path(__file__).resolve().parents[1]/'hub_queue_gate.py')
@@ -64,7 +64,7 @@ class QueueGateTests(unittest.TestCase):
 
     def test_actual_pending_question_and_its_followup_are_allowed(self):
         self.enable()
-        with patch('interaction.subprocess.run',side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run',side_effect=self.transport):
             q=interaction.ask(self.d,'Need an actual user decision?')
         for text in ['[ctask-question id='+q['id']+']\nNeed an actual user decision?',
                      '[ctask-followup id='+q['id']+' reminder=1]\nActual pending question']:
@@ -72,7 +72,7 @@ class QueueGateTests(unittest.TestCase):
 
     def test_answered_stopped_or_stale_questions_cannot_be_replayed(self):
         self.enable()
-        with patch('interaction.subprocess.run',side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run',side_effect=self.transport):
             q=interaction.ask(self.d,'Real decision?')
         options=self.options(text='[ctask-question id='+q['id']+']\nReal decision?')
         (self.d/'STOP').touch()
@@ -94,7 +94,7 @@ class QueueGateTests(unittest.TestCase):
 
     def test_supervision_alert_is_not_mistaken_for_actual_user_question(self):
         self.enable()
-        with patch('interaction.subprocess.run',side_effect=self.transport):q=interaction.ask(self.d,'Operational alert')
+        with patch('ato_workflow.interaction.subprocess.run',side_effect=self.transport):q=interaction.ask(self.d,'Operational alert')
         q['kind']='supervision_alert';runner.save(interaction.question_path(q['id']),q)
         self.assertIsNotNone(gate.suppression(self.options(text='[ctask-question id='+q['id']+']\nOperational alert')))
 

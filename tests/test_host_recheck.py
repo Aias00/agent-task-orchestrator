@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import patch
 
 import runner
-import workflow
-from host_recheck import recheck
+from ato_workflow import workflow
+from ato_workflow.host_recheck import recheck
 import test_workflow as fixtures
 from legacy_support import LEGACY_CLI
 

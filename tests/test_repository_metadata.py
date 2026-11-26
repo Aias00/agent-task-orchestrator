@@ -9,9 +9,10 @@ import tempfile
 import tomllib
 import unittest
 
-from scripts import prepare_session_candidate
+from scripts.history import prepare_session_candidate
 
 ROOT = Path(__file__).resolve().parents[1]
+HISTORY = Path('scripts/history')
 SCRIPTS = ('prepare_acp_process_candidate.py', 'prepare_agent_candidate.py',
            'prepare_recovery_candidate.py', 'prepare_session_candidate.py')
 
@@ -24,10 +25,11 @@ class RepositoryMetadataTests(unittest.TestCase):
         expected = [line for line in (ROOT/'requirements-acp.lock').read_text().splitlines() if line and not line.startswith('#')]
         self.assertEqual(data['project']['optional-dependencies']['acp'], expected)
         self.assertFalse(data['project'].get('scripts'))
-        self.assertEqual(set(data['tool']['setuptools']['py-modules']), {p.stem for p in ROOT.glob('*.py')} - {'hub_cli'})
-        self.assertIn('ato_cli', data['tool']['setuptools']['packages'])
+        self.assertEqual(set(data['tool']['setuptools']['py-modules']), {p.stem for p in ROOT.glob('*.py')})
+        self.assertEqual(set(data['tool']['setuptools']['packages']),
+                         {path.parent.name for path in ROOT.glob('ato_*/__init__.py')})
 
-    def test_document_index_covers_existing_markdown_without_moving_it(self):
+    def test_document_index_covers_existing_markdown(self):
         index = (ROOT/'docs/README.md').read_text()
         for section in ('## 现行指南', '## 能力状态', '## 历史验收档案（只读参考）'):
             self.assertIn(section, index)
@@ -38,12 +40,12 @@ class RepositoryMetadataTests(unittest.TestCase):
     def test_historical_scripts_missing_private_inputs_fail_cleanly_before_any_output(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root/'scripts').mkdir()
+            (root/HISTORY).mkdir(parents=True)
             for name in SCRIPTS:
-                shutil.copyfile(ROOT/'scripts'/name, root/'scripts'/name)
+                shutil.copyfile(ROOT/HISTORY/name, root/HISTORY/name)
                 for args in ([], ['--check']):
                     with self.subTest(script=name, args=args):
-                        result = subprocess.run([sys.executable, str(root/'scripts'/name), *args],
+                        result = subprocess.run([sys.executable, str(root/HISTORY/name), *args],
                             cwd=root, capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode, 2, result.stdout+result.stderr)
                         self.assertIn('Historical internal qualification', result.stderr)
@@ -55,19 +57,19 @@ class RepositoryMetadataTests(unittest.TestCase):
     def test_historical_script_help_does_not_require_operator_evidence(self):
         for name in SCRIPTS:
             with self.subTest(script=name):
-                result = subprocess.run([sys.executable, str(ROOT/'scripts'/name), '--help'],
+                result = subprocess.run([sys.executable, str(ROOT/HISTORY/name), '--help'],
                     capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('--check', result.stdout)
 
-    def test_source_inventory_includes_cli_package_and_project_metadata(self):
+    def test_source_inventory_includes_runtime_packages_and_project_metadata(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            for name in ('runner.py', 'ato_core.py', 'ato_cli/__init__.py', 'ato_application.py',
-                         'pyproject.toml', 'requirements-acp.lock'):
+            names = {'runner.py', 'ato_common/ato_core.py', 'ato_cli/__init__.py', 'ato_task/ato_application.py',
+                     'ato_adapters/codex_session_adapter.py', 'ato_release/seal.py',
+                     'pyproject.toml', 'requirements-acp.lock'}
+            for name in names:
                 target = root/name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('synthetic portable input')
-            self.assertEqual(set(prepare_session_candidate.files(root)),
-                {'runner.py', 'ato_core.py', 'ato_cli/__init__.py', 'ato_application.py',
-                 'pyproject.toml', 'requirements-acp.lock'})
+            self.assertEqual(set(prepare_session_candidate.files(root)), names)

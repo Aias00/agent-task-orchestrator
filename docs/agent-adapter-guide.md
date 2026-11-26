@@ -34,9 +34,9 @@ A completed tool event may describe a failed tool, so qualification must inspect
 its status and independently verify artifacts. Reply/end_turn is transport
 evidence and cannot satisfy workflow criteria.
 
-Built-in examples are `codex_session_adapter.py` (vendor implementation beneath
-the original public shim), `local_session_adapter.py` (passive CLI human roles)
-and `pi_session_coordinator.py` (owned foreground ACP lifecycle). The real Pi
+Built-in examples are `ato_adapters/codex_session_adapter.py` (vendor implementation beneath
+the original public shim), `ato_adapters/local_session_adapter.py` (passive CLI human roles)
+and `ato_pi/pi_session_coordinator.py` (owned foreground ACP lifecycle). The real Pi
 profile is `LocalPiProfile`, distinct from synthetic fixture profiles and from
 the existing Pi worker. Its configuration accepts only explicit local model
 data; plans cannot supply commands, modules, endpoints or credentials. Native
@@ -47,6 +47,6 @@ and additive successor mapping without rewriting historical questions.
 See [capabilities](session-decoupling/capabilities.md),
 [Pi lifecycle](session-decoupling/pi-coordinator.md) and
 [CLI human interaction](session-decoupling/neutral-cli.md) for supported paths.
-The origin-only [host handoff](session-decoupling/operator-handoff.md) qualifies
+The origin-only [host handoff](history/session-decoupling/operator-handoff.md) qualifies
 actual CLI plus a scripted loopback model separately from offline fixtures and
 cloud inference; preparing or registering an adapter proves neither.

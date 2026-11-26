@@ -13,17 +13,18 @@ import uuid
 from unittest.mock import patch
 
 import agent_registry
-import agents
+from ato_adapters import agents
 import codex_legacy
-import codex_session_adapter as native
-import control
-import interaction
+from ato_adapters import codex_session_adapter as native
+from ato_workflow import control
+from ato_workflow import interaction
 import recovery
 import runner
-import session_router
-import workflow
-from message_bus import MessageBus, ConflictError
-from transport import DeliveryResult, dispatch_registered
+from ato_workflow import session_router
+from ato_workflow import workflow
+from ato_workflow.message_bus import MessageBus, ConflictError
+from ato_workflow.transport import DeliveryResult, dispatch_registered
+from legacy_support import core_module_path, imports_builtin_workers
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGIN = '11111111-1111-4111-8111-111111111111'
@@ -145,29 +146,29 @@ print('Queued message {RECEIPT} for thread {ORIGIN}.')
                    f'Queued message bad for thread {ORIGIN}.',
                    f'Queued message {RECEIPT} for thread {ORIGIN}.\n'*2]
         for output in samples:
-            with self.subTest(output=output), patch('codex_session_adapter.subprocess.run',
+            with self.subTest(output=output), patch('ato_adapters.codex_session_adapter.subprocess.run',
                     return_value=subprocess.CompletedProcess([], 0, output, '')):
                 self.assertEqual(session_router.send(ORIGIN, 'fixture').state, 'delivery_unknown')
-        with patch('codex_session_adapter.subprocess.run', return_value=subprocess.CompletedProcess(
+        with patch('ato_adapters.codex_session_adapter.subprocess.run', return_value=subprocess.CompletedProcess(
                 [], 1, f'Queued message {RECEIPT} for thread {ORIGIN}.', '')):
             self.assertEqual(session_router.send(ORIGIN, 'fixture').state, 'delivery_unknown')
 
     def test_no_effect_failure_is_separate_from_ambiguous_native_attempt(self):
-        with patch('codex_session_adapter.subprocess.run', side_effect=FileNotFoundError):
+        with patch('ato_adapters.codex_session_adapter.subprocess.run', side_effect=FileNotFoundError):
             self.assertEqual(session_router.send(ORIGIN, 'fixture').state, 'failed')
         for error in (subprocess.TimeoutExpired('fixture', 1), OSError('ambiguous pipe failure')):
-            with self.subTest(error=type(error).__name__), patch('codex_session_adapter.subprocess.run', side_effect=error):
+            with self.subTest(error=type(error).__name__), patch('ato_adapters.codex_session_adapter.subprocess.run', side_effect=error):
                 self.assertEqual(session_router.send(ORIGIN, 'fixture').state, 'delivery_unknown')
-        with patch('codex_session_adapter.subprocess.run') as execute:
+        with patch('ato_adapters.codex_session_adapter.subprocess.run') as execute:
             self.assertEqual(session_router.send(str(uuid.uuid4()), 'fixture').state, 'failed')
             execute.assert_not_called()
 
     def test_router_opaque_reference_sends_and_rejects_wrong_project_before_native_effect(self):
         reference = self.reference().reference
-        with patch('codex_session_adapter.subprocess.run', side_effect=self.receipt) as execute:
+        with patch('ato_adapters.codex_session_adapter.subprocess.run', side_effect=self.receipt) as execute:
             self.assertEqual(session_router.send(reference, 'fixture').external_id, RECEIPT)
             self.assertEqual(execute.call_count, 1)
-        with patch('codex_session_adapter.subprocess.run') as execute:
+        with patch('ato_adapters.codex_session_adapter.subprocess.run') as execute:
             result = self.adapter.send(dict(session_id=ORIGIN, project=str(self.root)), dict(body='fixture'))
             self.assertEqual(result.state, 'failed'); execute.assert_not_called()
 
@@ -279,14 +280,14 @@ print('Queued message {RECEIPT} for thread {ORIGIN}.')
     def test_legacy_question_controller_recovery_roundtrip_and_no_replay(self):
         directory = self.make_workflow()
         interaction.configure(HUB, 'synthetic fixture user binding')
-        with patch('interaction.subprocess.run', side_effect=self.receipt) as execute:
+        with patch('ato_workflow.interaction.subprocess.run', side_effect=self.receipt) as execute:
             question = interaction.ask(directory, 'Fixture question?', 'A')
             self.assertEqual(question['question_delivery']['state'], 'queued')
             with patch.dict(os.environ, CODEX_THREAD_ID=HUB):
                 interaction.answer(question['id'], 'A', 'synthetic fixture user chose A')
             interaction.accept(question['id'])
             self.assertEqual(execute.call_count, 2)
-        with patch('control.subprocess.run', side_effect=subprocess.TimeoutExpired('fixture', 1)) as execute:
+        with patch('ato_workflow.control.subprocess.run', side_effect=subprocess.TimeoutExpired('fixture', 1)) as execute:
             first = control.send('fixture-once', ORIGIN, 'fixture work')
             second = control.send('fixture-once', ORIGIN, 'fixture work')
             self.assertEqual(first, second); self.assertEqual(execute.call_count, 1)
@@ -310,7 +311,7 @@ print('Queued message {RECEIPT} for thread {ORIGIN}.')
             return bus.enqueue(sender, binding_id=route, target='receiver', kind='request', body=key,
                 idempotency_key=key, task_id='fixture', contract_hash='hash')
         first = enqueue('first')
-        with patch('codex_session_adapter.subprocess.run', side_effect=subprocess.TimeoutExpired('fixture',1)) as execute:
+        with patch('ato_adapters.codex_session_adapter.subprocess.run', side_effect=subprocess.TimeoutExpired('fixture',1)) as execute:
             self.assertEqual(dispatch_registered(bus, receiver, owner)['state'], 'delivery_unknown')
             enqueue('second')
             self.assertEqual(dispatch_registered(bus, receiver, owner)['state'], 'delivery_unknown')
@@ -362,13 +363,19 @@ print('Queued message {RECEIPT} for thread {ORIGIN}.')
         self.assertIsNone(dispatch_registered(bus, receiver, owner))
 
     def test_core_ast_has_no_vendor_imports_or_native_event_decoders(self):
+        forbidden = {'codex_legacy', 'appserver', 'codex_session_adapter', 'ato_adapters'}
         for name in ('control','recovery','interaction','delegation','workflow','session_router','message_bus','transport'):
-            tree = ast.parse((ROOT/(name+'.py')).read_text())
+            tree = ast.parse(core_module_path(ROOT, name).read_text())
             for node in ast.walk(tree):
+                if imports_builtin_workers(node):
+                    continue
                 if isinstance(node, ast.Import):
-                    self.assertFalse(any(a.name in ('codex_legacy','appserver','codex_session_adapter') for a in node.names), name)
-                if isinstance(node, ast.ImportFrom):
-                    self.assertNotIn(node.module, ('codex_legacy','appserver','codex_session_adapter'), name)
+                    imports = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imports = [node.module or '']
+                else:
+                    continue
+                self.assertTrue(forbidden.isdisjoint(module.split('.')[0] for module in imports), name)
         self.assertIs(codex_legacy.observe_reply, native.observe_reply)
         self.assertIs(codex_legacy.create_session, native.create_session)
 
@@ -393,7 +400,7 @@ print('Queued message {RECEIPT} for thread {ORIGIN}.')
                 return {}
         extra = self.root/'extra'; extra.mkdir(exist_ok=True)
         contract = dict(sandbox='workspace-write', permissions=dict(network_access=False, writable_roots=[str(extra)]))
-        with patch('appserver.Client', RPCFixture):
+        with patch('ato_adapters.appserver.Client', RPCFixture):
             result = self.adapter.create_session(self.repo, contract, 'fixture coordinator', 'fixture-delegation',
                                                 lambda **fields: persisted.append(fields))
         return result, calls, persisted, extra

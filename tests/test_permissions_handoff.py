@@ -7,17 +7,17 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import agents
-import control
-import permissions
+from ato_adapters import agents
+from ato_workflow import control
+from ato_workflow import permissions
 import runner
-import workflow
+from ato_workflow import workflow
 import test_interaction as interaction_fixtures
 from test_interaction import ORIGIN, HUB
 import test_workflow as workflow_fixtures
 import test_delegation as delegation_fixtures
-import appserver
-import delegation
+from ato_adapters import appserver
+from ato_workflow import delegation
 from legacy_support import LEGACY_CLI
 
 
@@ -182,7 +182,7 @@ class HandoffRoutingTests(unittest.TestCase):
 
     def test_normal_handoff_routes_once_even_without_repair_supervisor(self):
         self.prepare()
-        with patch('control.subprocess.run',side_effect=self.transport) as send:
+        with patch('ato_workflow.control.subprocess.run',side_effect=self.transport) as send:
             control.tick();control.tick()
         origin=[c for c in send.call_args_list if '--thread' in c.args[0] and c.args[0][c.args[0].index('--thread')+1]==ORIGIN]
         self.assertEqual(len(origin),1)
@@ -193,18 +193,18 @@ class HandoffRoutingTests(unittest.TestCase):
 
     def test_unknown_origin_delivery_is_not_resent_and_stop_never_routes(self):
         self.prepare()
-        with patch('control.subprocess.run',side_effect=subprocess.TimeoutExpired('queue',25)) as send:
+        with patch('ato_workflow.control.subprocess.run',side_effect=subprocess.TimeoutExpired('queue',25)) as send:
             control.tick();control.tick()
         origin=[c for c in send.call_args_list if '--thread' in c.args[0] and c.args[0][c.args[0].index('--thread')+1]==ORIGIN]
         self.assertEqual(len(origin),1)
         action=next(a for a in control.rows() if a['kind']=='host_handoff')
         self.assertIn(action['origin_delivery']['state'],['delivery_unknown','dispatching'])
         (self.d/'STOP').touch()
-        with patch('control.subprocess.run') as send:control.tick();send.assert_not_called()
+        with patch('ato_workflow.control.subprocess.run') as send:control.tick();send.assert_not_called()
 
     def test_stop_before_first_observation_prevents_any_handoff(self):
         self.prepare();(self.d/'STOP').touch()
-        with patch('control.subprocess.run') as send:control.tick();send.assert_not_called()
+        with patch('ato_workflow.control.subprocess.run') as send:control.tick();send.assert_not_called()
         self.assertFalse(any(a['kind']=='host_handoff' for a in control.rows()))
 
 
@@ -221,7 +221,7 @@ class DelegatedPermissionTests(unittest.TestCase):
         def capture(client,method,params=None):
             if method=='thread/start':seen.append(params)
             return original(client,method,params)
-        with patch('appserver.Client.request',new=capture), patch('delegation.start_bridge'):
+        with patch('ato_adapters.appserver.Client.request',new=capture), patch('ato_workflow.delegation.start_bridge'):
             result=delegation.delegate(self.repo,self.plan,'Fixture','Actual fixture user requested delegation',timeout=30)
         self.assertIn(result['state'],['queued','awaiting_acceptance'])
         self.assertTrue(seen[0]['config']['sandbox_workspace_write.network_access'])

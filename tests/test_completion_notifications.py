@@ -3,8 +3,11 @@ from pathlib import Path
 from unittest.mock import patch
 import test_interaction as fixtures
 from test_interaction import HUB
-import completion_notifications as done
-import control,interaction,notifications,recovery,runner
+from ato_workflow import completion_notifications as done
+from ato_workflow import control
+from ato_workflow import interaction
+from ato_workflow import notifications
+import recovery, runner
 
 class CompletionTests(unittest.TestCase):
  setUp=fixtures.InteractionTests.setUp
@@ -21,18 +24,18 @@ class CompletionTests(unittest.TestCase):
   with (self.d/'events.jsonl').open('a') as f:f.write(json.dumps(dict(event='workflow_finished',status='completed',time=runner.now() if at is None else at))+'\n')
   control.register(self.d)
  def tick(self):
-  with patch('control.subprocess.run',side_effect=self.transport) as send:control.tick()
+  with patch('ato_workflow.control.subprocess.run',side_effect=self.transport) as send:control.tick()
   return [c.args[0] for c in send.call_args_list]
  def result(self):return next(a for a in control.rows() if a['kind']=='workflow_result')
  def test_verified_total_completion_sends_once_then_never_reminds(self):
   self.enable();self.finish();calls=self.tick();self.assertEqual(len(calls),1)
   text=calls[0][calls[0].index('--message')+1];self.assertTrue(text.startswith('[ctask-workflow-completed id=result-'));self.assertIn('总体验收 1/1',text)
   self.assertEqual(self.tick(),[])
-  with patch('control.core.now',return_value=runner.now()+10000):self.assertEqual(self.tick(),[])
+  with patch('ato_workflow.control.core.now',return_value=runner.now()+10000):self.assertEqual(self.tick(),[])
   a=self.result();self.assertEqual(a['notice']['state'],'queued');self.assertNotIn('presented_at',a)
  def test_unknown_send_is_claimed_and_not_replayed(self):
   self.enable();self.finish()
-  with patch('control.subprocess.run',side_effect=subprocess.TimeoutExpired('fixture',1)) as send:control.tick();self.assertEqual(send.call_count,1)
+  with patch('ato_workflow.control.subprocess.run',side_effect=subprocess.TimeoutExpired('fixture',1)) as send:control.tick();self.assertEqual(send.call_count,1)
   self.assertEqual(self.result()['notice']['state'],'delivery_unknown');self.assertEqual(self.tick(),[])
  def test_historical_completion_not_backfilled_even_if_newly_registered(self):
   self.enable();self.finish(at=runner.now()-1000);self.assertEqual(self.tick(),[]);self.assertNotIn('notice',self.result())
@@ -58,12 +61,12 @@ class CompletionTests(unittest.TestCase):
   with self.assertRaises(ValueError):notifications.configure('user_input_only','Not hub',completion='once')
  def test_forged_completion_prefix_without_claim_cannot_use_transport(self):
   self.enable();self.finish()
-  with patch('codex_session_adapter.subprocess.run') as send:
+  with patch('ato_adapters.codex_session_adapter.subprocess.run') as send:
    with self.assertRaises(ValueError):done.validate_claim('followup:result-'+'0'*20+':0',HUB,'[ctask-workflow-completed fake]')
    send.assert_not_called()
  def test_wrong_claim_hash_target_and_stale_state_refused(self):
   self.enable();self.finish()
-  with patch('completion_notifications.validate_claim',side_effect=ValueError('injected mismatch')):
+  with patch('ato_workflow.completion_notifications.validate_claim',side_effect=ValueError('injected mismatch')):
    self.assertEqual(self.tick(),[])
   self.assertEqual(self.result()['notice']['state'],'delivery_unknown');self.assertEqual(self.tick(),[])
  def test_real_manual_ack_is_required(self):

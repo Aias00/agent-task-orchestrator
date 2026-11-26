@@ -12,10 +12,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import acp_bridge
-import pi_acp_worker
+from ato_adapters import acp_bridge
+from ato_pi import pi_acp_worker
 import runner
-import task_trace
+from ato_workflow import task_trace
 from pi_toolchain_support import tools_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,8 +121,8 @@ class ACPStderrTests(unittest.TestCase):
                 patch.dict(os.environ, NODE_OPTIONS='synthetic poison', NODE_PATH='synthetic poison', \
                     LD_PRELOAD='synthetic poison', DYLD_INSERT_LIBRARIES='synthetic poison'), \
                 patch.multiple(pi_acp_worker, PI=pinned, NODE=pinned, SANDBOX=pinned), \
-                patch('pi_acp_worker.prepare_toolchain', return_value=tools), \
-                patch('acp_bridge.main', side_effect=bridge), \
+                patch('ato_pi.pi_acp_worker.prepare_toolchain', return_value=tools), \
+                patch('ato_adapters.acp_bridge.main', side_effect=bridge), \
                 redirect_stderr(error), redirect_stdout(output):
             self.assertEqual(pi_acp_worker.main(), 1)
         self.assertEqual((self.runtime/'stderr.log').read_text(), SECRET)
@@ -134,7 +134,7 @@ class ACPStderrTests(unittest.TestCase):
         argv = ['pi_acp_worker', '--directory', str(self.directory), '--label', self.label,
                 '--schema', str(self.schema), '--output', str(self.output), '--sandbox', 'workspace-write']
         error = io.StringIO()
-        with patch.object(sys, 'argv', argv), patch('pi_acp_worker.invoke', side_effect=ValueError(SECRET)), redirect_stderr(error):
+        with patch.object(sys, 'argv', argv), patch('ato_pi.pi_acp_worker.invoke', side_effect=ValueError(SECRET)), redirect_stderr(error):
             self.assertEqual(pi_acp_worker.main(), 1)
         self.assertEqual(error.getvalue(), 'ACP Pi worker failed: ValueError\n')
 
@@ -142,8 +142,8 @@ class ACPStderrTests(unittest.TestCase):
         argv = ['pi_acp_worker', '--directory', str(self.directory), '--label', self.label,
                 '--schema', str(self.schema), '--output', str(self.output), '--sandbox', 'workspace-write']
         error = io.StringIO()
-        with patch.object(sys, 'argv', argv), patch('pi_acp_worker.invoke', side_effect=ValueError(SECRET)), \
-                patch('pi_acp_worker.Path.resolve', side_effect=OSError(SECRET)), redirect_stderr(error):
+        with patch.object(sys, 'argv', argv), patch('ato_pi.pi_acp_worker.invoke', side_effect=ValueError(SECRET)), \
+                patch('ato_pi.pi_acp_worker.Path.resolve', side_effect=OSError(SECRET)), redirect_stderr(error):
             self.assertEqual(pi_acp_worker.main(), 1)
         self.assertEqual(error.getvalue(), 'ACP Pi worker failed: ValueError\n')
 

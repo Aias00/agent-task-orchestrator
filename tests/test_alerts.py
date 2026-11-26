@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
-import interaction
+from ato_workflow import interaction
 import recovery
 import runner
 

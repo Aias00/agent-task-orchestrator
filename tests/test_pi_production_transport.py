@@ -15,8 +15,8 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-from pi_production_egress import EgressProxy
-from pi_toolchain import locate, production_sandbox
+from ato_pi.pi_production_egress import EgressProxy
+from ato_pi.pi_toolchain import locate, production_sandbox
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -205,10 +205,13 @@ console.log('real-node-default-deny-passed');
             self.assertEqual(p.returncode,0,p.stderr);self.assertIn('real-node-default-deny-passed',p.stdout)
 
     def test_new_production_modules_are_registered_for_distribution(self):
-        from scripts.prepare_acp_process_candidate import FILES
+        from scripts.history.prepare_acp_process_candidate import FILES
         data=tomllib.loads((ROOT/'pyproject.toml').read_text())['tool']['setuptools']
+        self.assertIn('ato_pi', data['packages'])
         for name in ('pi_production_egress','pi_production_exec'):
-            self.assertIn(name,data['py-modules']);self.assertIn(name+'.py',FILES)
+            path = 'ato_pi/'+name+'.py'
+            self.assertTrue((ROOT/path).is_file())
+            self.assertIn(path, FILES)
         self.assertIn('pi_production_transport.mjs',FILES)
 
     def test_pinned_transcript_shape_terminal_and_tool_policy(self):
@@ -229,18 +232,21 @@ console.log('transcript and terminal policy passed');
         self.assertEqual(p.returncode,0,p.stderr)
 
     def test_production_launcher_reuses_exact_toolchain_and_rejects_changed_source(self):
-        import pi_toolchain as policy
-        import pi_acp_compat as compat
+        from ato_pi import pi_toolchain as policy
+        from ato_pi import pi_acp_compat as compat
         from pi_toolchain_support import tools_fixture
         with tempfile.TemporaryDirectory() as folder:
             base=Path(folder).resolve();host=base/'installation';host.mkdir()
             runtime=base/'runtime';runtime.mkdir(mode=0o700)
             project=base/'project';project.mkdir()
             tools,data=tools_fixture(base)
-            for name in ('pi_toolchain.py','pi_acp_compat.py','pi_acp_exec.py','pi_coordinator_exec.py',
-                    'pi-path-guard.mjs','pi-coordinator-guard.mjs','pi_production_credentials.py',
-                    'pi_production_fence.py','pi_production_profile.py','pi_production_egress.py',
-                    'pi_production_exec.py','pi_production_transport.mjs'):
+            (host/'ato_pi').mkdir()
+            for name in ('ato_pi/__init__.py', 'ato_pi/pi_toolchain.py', 'ato_pi/pi_acp_compat.py',
+                    'ato_pi/pi_acp_exec.py', 'ato_pi/pi_coordinator_exec.py', 'pi-path-guard.mjs',
+                    'pi-coordinator-guard.mjs', 'ato_pi/pi_production_credentials.py',
+                    'ato_pi/pi_production_fence.py', 'ato_pi/pi_production_profile.py',
+                    'ato_pi/pi_production_egress.py', 'ato_pi/pi_production_exec.py',
+                    'pi_production_transport.mjs'):
                 shutil.copyfile(ROOT/name,host/name)
             source=host/'integrations/pi-acp/node_modules/pi-acp/dist/index.js'
             source.parent.mkdir(parents=True);shutil.copyfile(policy.SOURCE,source)
@@ -250,5 +256,5 @@ console.log('transcript and terminal policy passed');
                 launcher=policy.write_launch(runtime,project,'coordinator',tools,production=True)
                 self.assertIn('pi_production_exec.py',launcher.read_text())
                 self.assertEqual(policy.load_launch(runtime,project,'coordinator'),tools)
-                p=host/'pi_production_exec.py';p.write_text(p.read_text()+'\n# changed\n')
+                p=host/'ato_pi/pi_production_exec.py';p.write_text(p.read_text()+'\n# changed\n')
                 with self.assertRaises(ValueError):policy.load_launch(runtime,project,'coordinator')

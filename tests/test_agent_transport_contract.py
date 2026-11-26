@@ -7,8 +7,8 @@ import sqlite3
 import tempfile
 import unittest
 
-from message_bus import MessageBus, IdentityError, ConflictError, MailboxError
-from transport import DeliveryResult, TransportEvent, dispatch_one, receive_event
+from ato_workflow.message_bus import MessageBus, IdentityError, ConflictError, MailboxError
+from ato_workflow.transport import DeliveryResult, TransportEvent, dispatch_one, receive_event
 
 
 def concurrent_enqueue(path, credential, binding, barrier, output):
@@ -365,7 +365,7 @@ class MessageBusTests(unittest.TestCase):
 
     def test_unknown_delivery_not_resent(self):
         import agent_registry
-        from transport import dispatch_registered
+        from ato_workflow.transport import dispatch_registered
 
         class UnknownAdapter:
             kind = 'fixture_unknown_transport'
@@ -393,8 +393,8 @@ class MessageBusTests(unittest.TestCase):
         self.assertEqual(self.bus.message(message['id'])['state'], 'delivery_unknown')
 
     def test_registry_refusal_before_claim(self):
-        import agents
-        from transport import dispatch_registered
+        from ato_adapters import agents
+        from ato_workflow.transport import dispatch_registered
         message = self.enqueue()
         with self.assertRaisesRegex(ValueError, 'does not support transport'):
             dispatch_registered(self.bus, self.origin, self.owner)

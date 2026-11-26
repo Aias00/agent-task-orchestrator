@@ -8,13 +8,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import agents
+from ato_adapters import agents
 import agent_registry
 import runner
-import task_trace
-import workflow
-from acp_outcome import Outcome
-from message_bus import MessageBus, ConflictError, IdentityError
+from ato_workflow import task_trace
+from ato_workflow import workflow
+from ato_adapters.acp_outcome import Outcome
+from ato_workflow.message_bus import MessageBus, ConflictError, IdentityError
 
 ROOT = Path(__file__).resolve().parents[1]
 from legacy_support import LEGACY_CLI

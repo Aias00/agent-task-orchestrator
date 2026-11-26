@@ -12,12 +12,12 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-import hub_contract as contract
-import hub_ledger as ledger
-import hub_sandbox as sandbox
-import hub_worktree as worktree
-from ato_execution_host import CommandHost, HostProfile
-from codex_session_adapter import worker_config_args
+from ato_review import hub_contract as contract
+from ato_review import hub_ledger as ledger
+from ato_review import hub_sandbox as sandbox
+from ato_review import hub_worktree as worktree
+from ato_task.ato_execution_host import CommandHost, HostProfile
+from ato_adapters.codex_session_adapter import worker_config_args
 from hub_support import git,repository,runtime,spec,verdict
 
 
@@ -295,7 +295,7 @@ class HubFoundationTests(unittest.TestCase):
                  approval_policy="never", sandbox_policy={"type": "danger-full-access"})),
             dict(type="event_msg", payload=dict(model="ignored")),
         ])))
-        with patch("codex_session_adapter.session_path", return_value=str(rollout)) as verified:
+        with patch("ato_adapters.codex_session_adapter.session_path", return_value=str(rollout)) as verified:
             self.assertEqual(worker_config_args(self.root, "fixture-session"), [
                 "-c", 'model="fixture-model"', "-c", 'model_reasoning_effort="high"',
                 "-c", 'approval_policy="never"', "--sandbox", "danger-full-access",

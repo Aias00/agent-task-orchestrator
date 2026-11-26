@@ -9,13 +9,13 @@ from unittest.mock import patch
 import test_interaction as fixtures
 from test_interaction import ORIGIN,HUB
 import runner
-import workflow
-import workflow_closure
-import control
-import failure_attention
+from ato_workflow import workflow
+from ato_workflow import workflow_closure
+from ato_workflow import control
+from ato_workflow import failure_attention
 import hub_queue_gate
-import interaction
-import notifications
+from ato_workflow import interaction
+from ato_workflow import notifications
 import recovery
 
 class TaskDispositionTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class TaskDispositionTests(unittest.TestCase):
             return json.loads(con.execute('select body from workflows where path=?',(str(self.d),)).fetchone()[0])
 
     def observe(self):
-        with patch('control.send',return_value=dict(state='queued')):
+        with patch('ato_workflow.control.send',return_value=dict(state='queued')):
             control.workflow_observation(self.row())
         return [r for r in control.rows(True) if r['kind']=='failure_attention']
 
@@ -81,14 +81,14 @@ class TaskDispositionTests(unittest.TestCase):
     def test_dead_process_metadata_is_retained_without_claiming_live_execution(self):
         s=runner.read(self.d/'state.json');s['active_process']=dict(pid=99999999,argv=['historical'])
         runner.save(self.d/'state.json',s)
-        with patch('workflow_closure.recovery.alive',return_value=False), patch('workflow_closure.os.killpg',side_effect=ProcessLookupError):
+        with patch('ato_workflow.workflow_closure.recovery.alive',return_value=False), patch('ato_workflow.workflow_closure.os.killpg',side_effect=ProcessLookupError):
             self.close()
         self.assertEqual(runner.read(self.d/'state.json')['active_process']['pid'],99999999)
 
     def test_orphan_group_blocks_closure_even_after_leader_exits(self):
         s=runner.read(self.d/'state.json');s['active_process']=dict(pid=99999999,argv=['historical'])
         runner.save(self.d/'state.json',s)
-        with patch('workflow_closure.recovery.alive',return_value=False),patch('workflow_closure.os.killpg',return_value=None):
+        with patch('ato_workflow.workflow_closure.recovery.alive',return_value=False),patch('ato_workflow.workflow_closure.os.killpg',return_value=None):
             with self.assertRaisesRegex(ValueError,'active'):self.close()
 
     def test_closed_task_cannot_resume_or_receive_late_question(self):
@@ -172,14 +172,14 @@ class TaskDispositionTests(unittest.TestCase):
 
     def test_reconstructed_controller_does_not_resend(self):
         self.configure()
-        with patch('control.send',return_value=dict(state='queued',message_id='fixture')) as send:
+        with patch('ato_workflow.control.send',return_value=dict(state='queued',message_id='fixture')) as send:
             control.tick();control.tick()
             notices=[c for c in send.call_args_list if c.args[0].startswith('followup:failure-')]
         self.assertEqual(len(notices),1)
 
     def test_user_closure_closes_failure_and_host_followups_truthfully(self):
         self.configure();a=self.observe()[0];self.close()
-        with patch('control.send',return_value=dict(state='queued')):control.tick()
+        with patch('ato_workflow.control.send',return_value=dict(state='queued')):control.tick()
         a=next(r for r in control.rows(True) if r['id']==a['id'])
         self.assertEqual(a['state'],'completed')
         self.assertEqual(a['delivery']['completion_basis'],'user_acceptance')

@@ -16,15 +16,15 @@ import time
 import unittest
 from unittest.mock import patch
 
-import ato_binding
-import ato_config
-import ato_execution
-import ato_process
-from ato_binding import BindingDecision, BindingGrant, BindingService, committed_binding_changes, read_binding
-from ato_task_store import InitialBinding, SubmissionGrant, TaskError, TaskStore, canonical_json, new_id
-from hub_contract import HubAgentSpec
+from ato_task import ato_binding
+from ato_common import ato_config
+from ato_task import ato_execution
+from ato_task import ato_process
+from ato_task.ato_binding import BindingDecision, BindingGrant, BindingService, committed_binding_changes, read_binding
+from ato_task.ato_task_store import InitialBinding, SubmissionGrant, TaskError, TaskStore, canonical_json, new_id
+from ato_review.hub_contract import HubAgentSpec
 import recovery
-import transport
+from ato_workflow import transport
 
 
 WORKER = """
@@ -393,11 +393,12 @@ class UnifiedHandoffTests(unittest.TestCase):
         # The production driver still checks the bootstrap identity and uses
         # its real inherited pipe, Repo flock and kernel lease.
         entry = self.root / "fixture_runtime.py"
-        source = Path(ato_execution.__file__).resolve().parent
+        source = Path(ato_execution.__file__).resolve().parents[1]
         entry.write_text(
             "from functools import partial\nfrom pathlib import Path\nimport sys\n"
             f"sys.path.insert(0, {str(source)!r})\n"
-            "import ato_execution, ato_runtime\nfrom ato_binding import read_binding\n"
+            "import ato_runtime\nfrom ato_task import ato_execution\n"
+            "from ato_task.ato_binding import read_binding\n"
             "ato_execution._ENTRY = Path(__file__).resolve()\n"
             "ato_runtime.runtime_hooks = lambda store: ato_execution.ExecutionHooks("
             "binding=partial(read_binding, store))\n"

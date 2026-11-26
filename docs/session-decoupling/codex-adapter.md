@@ -1,6 +1,6 @@
 # Trusted Codex session compatibility
 
-The built-in `agents._CodexAdapter` composes its existing worker methods with `CodexSessionAdapter`. The registry is code-owned. Core callers go through `session_router`; native database, CLI receipt, app-server and rollout formats are confined to `codex_session_adapter.py`. `codex_legacy` remains a forwarding public API, and `recovery.session_path(home, thread)` remains callable by inherited consumers.
+The built-in `agents._CodexAdapter` composes its worker methods with `CodexSessionAdapter`. The registry is code-owned. Core callers go through `session_router`. The native database, CLI receipt, app-server and rollout formats are handled by `ato_adapters/codex_session_adapter.py`. `codex_legacy` remains a forwarding public API, and `recovery.session_path(home, thread)` remains callable by inherited consumers.
 
 Raw UUID workflows retain their identities, directories, question IDs, recovery limits and historical counters. New opaque references require an exact native ID plus project verification. A legacy header with no cwd stays usable for the old interface but cannot satisfy v2 project verification. Legacy actor checks remain compatibility guards, not v2 authentication; environment locators cannot manufacture a user principal. Native load/resume is explicitly unsupported and cancellation is unknown.
 

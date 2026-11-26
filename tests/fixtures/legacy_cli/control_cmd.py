@@ -3,11 +3,11 @@ import json
 
 def handle(args, core):
     if args.command == 'operational-disposition':
-        import control
+        from ato_workflow import control
         print(json.dumps(control.operational_disposition(args.identifier, args.category, args.blocker, args.tried, args.evidence, args.recommendation, args.source), ensure_ascii=False, indent=2))
         return
     if args.command == 'notification-policy':
-        import notifications
+        from ato_workflow import notifications
         if args.action in ('mute', 'unmute'):
             if not args.repo:
                 raise ValueError('project notification preference requires --repo')
@@ -18,7 +18,7 @@ def handle(args, core):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command in ('control', 'followups', 'presented', 'followup-link', '_controller'):
-        import control
+        from ato_workflow import control
         if args.command == '_controller':
             control.watch()
             return 0
@@ -44,9 +44,9 @@ def handle(args, core):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command == 'watch':
-        import control
-        import interaction
-        import workflow_closure
+        from ato_workflow import control
+        from ato_workflow import interaction
+        from ato_workflow import workflow_closure
         d, _, _, origin = interaction.binding(args.directory, require_open=False)
         workflow_closure.actor(origin)
         if not args.source.strip():
@@ -55,7 +55,7 @@ def handle(args, core):
         print(json.dumps(dict(workflow=str(d), observation_only=True, source=args.source)))
         return 0
     if args.command == 'failure-alerts':
-        import notifications
+        from ato_workflow import notifications
         print(json.dumps(notifications.configure_failure_alerts(args.source), ensure_ascii=False))
         return 0
     raise ValueError('command outside control_cmd domain')

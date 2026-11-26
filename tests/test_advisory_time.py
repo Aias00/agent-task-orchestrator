@@ -7,9 +7,9 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import budget
+from ato_workflow import budget
 import runner
-import workflow
+from ato_workflow import workflow
 import test_workflow as fixtures
 import test_budget_watchdog as watch_fixtures
 from test_interaction import HUB
@@ -54,7 +54,7 @@ class AdvisoryTimeTests(unittest.TestCase):
 
     def test_policy_is_durable_idempotent_and_conflicting_or_tampered_retries_fail(self):
         self.advisory()
-        import interaction
+        from ato_workflow import interaction
         p=interaction.directory()/'time-policy.json';before=p.read_bytes()
         self.advisory();self.assertEqual(p.read_bytes(),before)
         with self.assertRaises(ValueError):budget.set_time_policy('enforced','Changed','advisory-v1')
@@ -135,7 +135,7 @@ class AdvisoryControllerTests(unittest.TestCase):
     update = watch_fixtures.BudgetControllerTests.update
 
     def test_advisory_forecast_deduplicates_notifies_origin_and_never_requests_budget(self):
-        import control
+        from ato_workflow import control
         self.prepare(used=1001,status='limit')
         with patch.dict(os.environ,CODEX_THREAD_ID=HUB):
             budget.set_time_policy('advisory','User removed elapsed-time stops','policy-v1')

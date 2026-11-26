@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import agents
+from ato_adapters import agents
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,8 +109,8 @@ Path('src/code.py').write_text('allowed')
 
     def test_doctor_explains_legacy_native_write_grants_without_claiming_acp_equivalence(self):
         fake = subprocess.CompletedProcess([], 0, '{"loggedIn":false}', '')
-        with patch('agents.executable', return_value='/synthetic/agent'), \
-                patch('agents.subprocess.run', return_value=fake), patch('agents.Path.home', return_value=self.base/'home'):
+        with patch('ato_adapters.agents.executable', return_value='/synthetic/agent'), \
+                patch('ato_adapters.agents.subprocess.run', return_value=fake), patch('ato_adapters.agents.Path.home', return_value=self.base/'home'):
             rows = {row['kind']: row for row in agents.doctor()}
         for kind in ('claude', 'pi'):
             self.assertIn('OS-writable', rows[kind]['worker_guard'])

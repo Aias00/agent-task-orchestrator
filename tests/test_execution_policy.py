@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import permissions
+from ato_workflow import permissions
 import runner
-import workflow
+from ato_workflow import workflow
 from legacy_support import LEGACY_CLI
 
 

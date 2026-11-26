@@ -9,9 +9,9 @@ from unittest.mock import patch
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
 import test_alerts
-import control
-import interaction
-import notifications
+from ato_workflow import control
+from ato_workflow import interaction
+from ato_workflow import notifications
 import recovery
 import runner
 from legacy_support import LEGACY_CLI
@@ -28,7 +28,7 @@ class NotificationPolicyTests(unittest.TestCase):
             control.enable('Existing fixture observation authorization', 60, 2)
 
     def tick(self):
-        with patch('control.subprocess.run', side_effect=self.transport) as send:
+        with patch('ato_workflow.control.subprocess.run', side_effect=self.transport) as send:
             control.tick()
         return [c.args[0] for c in send.call_args_list]
 
@@ -49,7 +49,7 @@ class NotificationPolicyTests(unittest.TestCase):
     def test_generic_status_is_silent_but_still_visible_and_not_resolved(self):
         self.enable(); control.register(self.d)
         self.assertEqual(self.tick(), [])
-        with patch('control.core.now', return_value=runner.now()+10000):
+        with patch('ato_workflow.control.core.now', return_value=runner.now()+10000):
             self.assertEqual(self.tick(), [])
         action = next(a for a in control.rows() if a['kind'] == 'workflow')
         self.assertEqual(action['state'], 'unpresented')
@@ -83,7 +83,7 @@ class NotificationPolicyTests(unittest.TestCase):
 
     def test_real_question_answer_and_acceptance_survive_quiet_policy(self):
         self.enable()
-        with patch('interaction.subprocess.run', side_effect=self.transport) as send:
+        with patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport) as send:
             q = interaction.ask(self.d, 'Approve this exact new permission?', 'Keep old permissions')
             self.assertEqual(send.call_args.args[0][3], HUB)
             with patch.dict(os.environ, CODEX_THREAD_ID=HUB):
@@ -97,14 +97,14 @@ class NotificationPolicyTests(unittest.TestCase):
 
     def test_pending_question_keeps_bounded_reminders_and_stop_suppresses_them(self):
         self.enable()
-        with patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             q = interaction.ask(self.d, 'Which actual user option?')
         calls = self.tick()
         self.assertTrue(calls)
         self.assertTrue(all(x[x.index('--thread')+1] == HUB for x in calls))
         self.assertEqual(runner.read(interaction.question_path(q['id']))['state'], 'pending')
         (self.d/'STOP').touch()
-        with patch('control.core.now', return_value=runner.now()+10000):
+        with patch('ato_workflow.control.core.now', return_value=runner.now()+10000):
             self.assertEqual(self.tick(), [])
         self.assertTrue((self.d/'STOP').exists())
 
@@ -114,7 +114,7 @@ class NotificationPolicyTests(unittest.TestCase):
         control.register(self.d); self.tick()
         old = next(a for a in control.rows() if a['kind'] == 'workflow')
         self.enable()
-        with patch('control.core.now', return_value=runner.now()+10000):
+        with patch('ato_workflow.control.core.now', return_value=runner.now()+10000):
             self.assertEqual(self.tick(), [])
         a = next(a for a in control.rows() if a['id'] == old['id'])
         self.assertEqual(a['notice'], old['notice'])
@@ -122,7 +122,7 @@ class NotificationPolicyTests(unittest.TestCase):
 
     def test_origin_status_reply_is_retained_without_chat_delivery(self):
         self.enable()
-        with patch('interaction.subprocess.run', side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run', side_effect=self.transport):
             q = interaction.ask(self.d, 'Actual choice?')
             with patch.dict(os.environ, CODEX_THREAD_ID=HUB):
                 interaction.answer(q['id'], 'A', 'Actual user')

@@ -15,10 +15,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from release_support import CURRENT, FakeSystem, legacy_entry, seal, snapshot, unseal, write
-from ato_core import ensure_private_dir
-import ato_release_lib
-import ato_seal
-from ato_task_store import TaskError
+from ato_common.ato_core import ensure_private_dir
+from ato_release import support as ato_release_lib
+from ato_release import seal as ato_seal
+from ato_task.ato_task_store import TaskError
 from scripts import release_snapshot as release
 
 
@@ -549,7 +549,7 @@ class ProcessSafetyTests(unittest.TestCase):
         with patch.object(ato_release_lib, 'read_private', return_value=row), \
                 patch.object(system, 'processes', return_value=[dict(pid=77, command='new process')]):
             for disposition in ('reused', 'absent', 'live', 'unknown'):
-                with patch('ato_process.disposition', return_value=disposition) as identity:
+                with patch('ato_task.ato_process.disposition', return_value=disposition) as identity:
                     if disposition in ('reused', 'absent'):
                         self.assertIsNone(system.observer(Path('/fixture-state'), source))
                     else:
@@ -594,7 +594,7 @@ class ProcessSafetyTests(unittest.TestCase):
             source = dict(root=str(base), python='/fixture/python', surface=release.SURFACE, seal='test-seal')
             env = release.environment(base/'state', base/'native', home=base/'home')
             with patch.dict(os.environ, CTASK_QUEUE_BIN=str(queue)), \
-                    patch('ato_process.identity', return_value='birth'), \
+                    patch('ato_task.ato_process.identity', return_value='birth'), \
                     patch.object(release.subprocess, 'Popen', return_value=Mock(pid=77)) as launch:
                 release.System()._start_unified(source, env, Mock(), {})
             child = launch.call_args.kwargs['env']

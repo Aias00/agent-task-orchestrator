@@ -40,4 +40,4 @@ rebound during migration. Additive mailbox schema v2 preserves v1 IDs, bodies,
 fingerprints and history, but an old schema reader must not be pointed at a new
 store or a restored snapshot used to erase new writes. The detailed stage
 contract, compatibility limitations and local evidence are recorded in
-[the transport checkpoint](session-decoupling/transport-checkpoint.md).
+[the transport checkpoint](history/session-decoupling/transport-checkpoint.md).

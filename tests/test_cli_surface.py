@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 
 import ato_cli
-from ato_task_store import TaskError
+from ato_task.ato_task_store import TaskError
 
 
 BASELINE = json.loads((Path(__file__).parent/'fixtures/cli-surface.json').read_text())

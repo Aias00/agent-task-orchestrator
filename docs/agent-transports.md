@@ -2,8 +2,8 @@
 
 ATO owns workflow authority, attempts, STOP and independent acceptance. An
 adapter owns the vendor-specific invocation or conversation protocol.
-`agent_registry.py` declares code-owned capabilities; `session_router.py`
-resolves registered identities; `message_bus.py` durably records bounded
+`agent_registry.py` declares code-owned capabilities; `ato_workflow/session_router.py`
+resolves registered identities; `ato_workflow/message_bus.py` durably records bounded
 messages and receipts. No title, directory name or model reply grants authority.
 
 Legacy Codex identity requires exact native proof. Managed local CLI actors

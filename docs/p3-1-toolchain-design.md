@@ -26,13 +26,13 @@ STOP、未知投递隔离、累计历史和既有沙箱强度。
 
 | 位置 | 当前行为 | 实施必须覆盖的边界 |
 | --- | --- | --- |
-| [pi_acp_worker.py](../pi_acp_worker.py) | 写死 nvm Node 路径与 `~/.local/bin/pi`；通过派生脚本启动 ACP | 外层与 native 子进程必须使用同一工具链 |
-| [pi_acp_exec.py](../pi_acp_exec.py) | 直接执行 Pi 脚本，Node 选择受 shebang/PATH 影响 | 显式使用已验证 Node 执行已验证 Pi 入口，禁止 shell 拼接 |
-| [pi_session_profile.py](../pi_session_profile.py) | 固定 Node、Pi `1.5.2`、adapter `0.0.34`；校验 adapter 源码 SHA；记录 Pi 入口 SHA | Pi 当前只校验版本并记录 SHA，尚无 Pi 哈希准入；不能描述为已有完整供应链校验 |
-| [pi_coordinator_exec.py](../pi_coordinator_exec.py) | 从 profile 导入固定 Node/Pi；限制 RPC argv、session 路径 | 更换解析方式，同时保留 RPC 与 session 路径限制 |
+| [pi_acp_worker.py](../ato_pi/pi_acp_worker.py) | 写死 nvm Node 路径与 `~/.local/bin/pi`；通过派生脚本启动 ACP | 外层与 native 子进程必须使用同一工具链 |
+| [pi_acp_exec.py](../ato_pi/pi_acp_exec.py) | 直接执行 Pi 脚本，Node 选择受 shebang/PATH 影响 | 显式使用已验证 Node 执行已验证 Pi 入口，禁止 shell 拼接 |
+| [pi_session_profile.py](../ato_pi/pi_session_profile.py) | 固定 Node、Pi `1.5.2`、adapter `0.0.34`；校验 adapter 源码 SHA；记录 Pi 入口 SHA | Pi 当前只校验版本并记录 SHA，尚无 Pi 哈希准入；不能描述为已有完整供应链校验 |
+| [pi_coordinator_exec.py](../ato_pi/pi_coordinator_exec.py) | 从 profile 导入固定 Node/Pi；限制 RPC argv、session 路径 | 更换解析方式，同时保留 RPC 与 session 路径限制 |
 | [scripts/derive_pi_acp.py](../scripts/derive_pi_acp.py) | 9 处 `replace_once`，校验原始 bundle SHA 与版本 | 保持未知 bundle 拒绝；为每个变换命名并验证最终输出指纹 |
-| [pi_session_profile.py](../pi_session_profile.py) 的 `derive_coordinator` | 基础派生后另有 5 处替换 | worker/coordinator 共用注册表，分别维护输出 SHA 与能力声明 |
-| [acp_bridge.py](../acp_bridge.py) | 使用固定版本 ACP SDK 启动，另有私有有界 stderr | SDK 会合并 HOME/PATH 等默认环境；只传少量 env 不等于完全清空环境 |
+| [pi_session_profile.py](../ato_pi/pi_session_profile.py) 的 `derive_coordinator` | 基础派生后另有 5 处替换 | worker/coordinator 共用注册表，分别维护输出 SHA 与能力声明 |
+| [acp_bridge.py](../ato_adapters/acp_bridge.py) | 使用固定版本 ACP SDK 启动，另有私有有界 stderr | SDK 会合并 HOME/PATH 等默认环境；只传少量 env 不等于完全清空环境 |
 
 当前 ACP 原始 bundle SHA256 为
 `324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2`，

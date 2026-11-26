@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-import task_trace as trace
+from ato_workflow import task_trace as trace
 
 ROOT = Path(__file__).resolve().parents[1]
 class TraceTests(unittest.TestCase):

@@ -16,7 +16,7 @@
    - `delivery_unknown` 隔离且绝不自动重发/换 ID 重试；
    - 累计尝试次数、阶段数、预算账本和已投递历史不可重置或改写。
 3. **保留既有架构与分发测试硬约束**：
-   - `tests/test_codex_session_adapter.py::test_core_ast_has_no_vendor_imports_or_native_event_decoders` 强制要求 8 个核心模块（`control`、`recovery`、`interaction`、`delegation`、`workflow`、`session_router`、`message_bus`、`transport`）留在仓库根路径（或保持被检文件名）且**不得**导入 `codex_legacy`、`appserver`、`codex_session_adapter`；
+   - `tests/test_codex_session_adapter.py::test_core_ast_has_no_vendor_imports_or_native_event_decoders` 检查 `recovery.py` 及 `ato_workflow/` 下的 `control`、`interaction`、`delegation`、`workflow`、`session_router`、`message_bus`、`transport`。这八个核心模块通过注册表和会话路由访问适配能力，禁止直接导入原生适配器。
    - `tests/test_source_distribution.py` 强制要求分发脚本中不得出现 本机用户目录或挂载目录的绝对路径；
    - `tests/test_compact_handoff.py` 强制要求紧凑宿主交接通知长度 `< 260` 且包含 `ato-read-handoff <id>`；
    - 禁止静默 skip 测试；离线 fixture 通过不得宣称为真实 CLI 或云端模型验收通过。

@@ -15,10 +15,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-import ato_config
-import ato_core
-import ato_task_store as ato
-import workflow
+from ato_common import ato_config
+from ato_common import ato_core
+from ato_task import ato_task_store as ato
+from ato_workflow import workflow
 
 
 def git(repo, *args, env=None):

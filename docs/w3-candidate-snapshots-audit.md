@@ -33,7 +33,7 @@
 
 ## 3. 共同架构差距：为何不能直接 cherry-pick/覆盖
 
-当前基线以 [ato_core.py](../ato_core.py)、[ato_cli](../tests/fixtures/legacy_cli/parser.py)、[源码图](source-map.md) 分离公共原语、CLI 分发和运行机制。按当前 [check_architecture.py](../scripts/check_architecture.py) 同一 AST 算法（包含函数内 import，仅分析，不 import 快照模块）得到：
+当前基线以 [ato_core.py](../ato_common/ato_core.py)、[ato_cli](../tests/fixtures/legacy_cli/parser.py)、[源码图](source-map.md) 分离公共原语、CLI 分发和运行机制。按当前 [check_architecture.py](../scripts/check_architecture.py) 同一 AST 算法（包含函数内 import，仅分析，不 import 快照模块）得到：
 
 | 树 | 全部文件 | manifest 发布源码项 | 根 Python 模块 | `test_*.py` 文件 | 根/全运行图双向依赖对 | 对照 main 的八核心 AST |
 |---|---:|---:|---:|---:|---:|---|
@@ -58,7 +58,7 @@ main 的八对是 `agents–permissions`、`budget–runner`、`control–recove
 | 当前 main 机制 | 已覆盖范围 | 不能据此宣称已覆盖 |
 |---|---|---|
 | [W1 release_snapshot](runtime-upgrade.md)、`verify_snapshot`/`inspect`/`idle_boundary` | commit/tree、封存清单、三入口混合诊断、精确 observer/pid_identity、mailbox 门禁、显式切换、仅可执行入口/observer 回滚 | 每个任务跨不同入口重启仍绑定原版本；旧任务迁移、旧快照宿主资格 |
-| [P3-1 工具链](p3-1-toolchain-design.md)、[compat](../pi_acp_compat.py) | 固定 Node/Pi/backend、派生输出 SHA、保护启动物和父子复验 | Codex worker warm resume、acpx 依赖资格或 AGY 原生身份 |
+| [P3-1 工具链](p3-1-toolchain-design.md)、[compat](../ato_pi/pi_acp_compat.py) | 固定 Node/Pi/backend、派生输出 SHA、保护启动物和父子复验 | Codex worker warm resume、acpx 依赖资格或 AGY 原生身份 |
 | [W2-1 离线实现](w2-1-offline-implementation.md) | 独立 production Pi opt-in、凭据/fence/出口、受控请求与有界原生组清理 | 真实 Provider、native load/resume、通用 Codex/acpx transport 资格 |
 
 旧 packager 的 hash/provenance 只能说明其版本自身；不得将旧 `OPERATOR_*` 换成本机路径后运行，让历史授权或验收“复活”。本轮没有调用任何发布工具的真实 dry-run/stage/activate/rollback。
@@ -75,11 +75,11 @@ main 的八对是 `agents–permissions`、`budget–runner`、`control–recove
 
 | 能力及快照实现事实 | main 对应事实 | 覆盖结论 |
 |---|---|---|
-| [workspace `_git/_proof/validated`][T-workspace] 只接受所选 workspace 的直接子仓库，绑定原生 header、home、精确 origin/hub/contract/generation、Git inode；拒绝 linked worktree 的无证明扩展，提供 inspect/register/revoke | [Codex `bind_legacy_origin`](../codex_session_adapter.py#L295) 遇已知 cwd≠project 仍拒绝；v2 精确 project 校验不可放宽 | **真实缺失**：显式、限 workflow 的 legacy 观察关联。旧代码本身也不支持任意祖先或任意 linked worktree |
-| [approved `_base/_authority_delta/_projection`][T-approved] 校验已实际 accepted 的问题/answer source、独立 delivery 合约、完整证据、实际权限 delta 与 approved/deferred criteria；保持旧 raw status | [workflow_lineage `_validate`](../workflow_lineage.py#L45) 要求 `permission_expanded=false`、权限字段相同、原 acceptance 全量映射；closure 是另一种有真实依据的处置 | **部分覆盖**：一般同权限后继和关闭已覆盖；“同一 accepted 批准下另行扩权交付、仍保留旧残余”的关系真实缺失，不能伪装成普通 lineage |
-| [internal `submit/read_report/assign`][T-internal] 把安全 artifact/hash 与规范 mailbox 绑定，区分提交、读取、有限认领；`inbox` 明报 `wakeup=unsupported` | [coordination](../coordination.py) 和 [f84fe37 failure_notice](../failure_notice.py) 已将宿主/失败长材料私存，发送紧凑 locator；canonical 问答/actor/mailbox 已有 | **部分覆盖**：紧凑通知和基础传递不再是增量；任意内部材料的 read/assign 工作流回执仍缺。旧实现也没有“自动隐形唤醒” |
+| [workspace `_git/_proof/validated`][T-workspace] 只接受所选 workspace 的直接子仓库，绑定原生 header、home、精确 origin/hub/contract/generation、Git inode；拒绝 linked worktree 的无证明扩展，提供 inspect/register/revoke | [Codex `bind_legacy_origin`](../ato_adapters/codex_session_adapter.py#L295) 遇已知 cwd≠project 仍拒绝；v2 精确 project 校验不可放宽 | **真实缺失**：显式、限 workflow 的 legacy 观察关联。旧代码本身也不支持任意祖先或任意 linked worktree |
+| [approved `_base/_authority_delta/_projection`][T-approved] 校验已实际 accepted 的问题/answer source、独立 delivery 合约、完整证据、实际权限 delta 与 approved/deferred criteria；保持旧 raw status | [workflow_lineage `_validate`](../ato_workflow/workflow_lineage.py#L45) 要求 `permission_expanded=false`、权限字段相同、原 acceptance 全量映射；closure 是另一种有真实依据的处置 | **部分覆盖**：一般同权限后继和关闭已覆盖；“同一 accepted 批准下另行扩权交付、仍保留旧残余”的关系真实缺失，不能伪装成普通 lineage |
+| [internal `submit/read_report/assign`][T-internal] 把安全 artifact/hash 与规范 mailbox 绑定，区分提交、读取、有限认领；`inbox` 明报 `wakeup=unsupported` | [coordination](../coordination.py) 和 [f84fe37 failure_notice](../ato_workflow/failure_notice.py) 已将宿主/失败长材料私存，发送紧凑 locator；canonical 问答/actor/mailbox 已有 | **部分覆盖**：紧凑通知和基础传递不再是增量；任意内部材料的 read/assign 工作流回执仍缺。旧实现也没有“自动隐形唤醒” |
 | [responsibility `claim/handler/dispose/diagnostic`][T-responsibility] 绑定 failure episode、证据、角色与 ≤900 秒认领，不把聊天忙碌当任务处理；区分 disposition 与业务恢复 | [recovery `handler_status`](../recovery.py#L313) 已辨 owner/worker/recovery/unknown，但普通 origin active 仍只给会话级处理分类；failure_attention 有稳定失败 episode 用于通知 | **部分覆盖**：基础故障/once 通知已有；任务级有界认领、处置凭据、具体 reason code 与责任投影仍缺 |
-| [completion `identity/_operation`][T-completion] 从兼容 lineage 或双方原有共享 operation receipt 计算同一次交付身份；未知旧发送 claim 是去重屏障 | [completion_notifications](../completion_notifications.py) 是按 `workflow_result`/canonical claim 的 once；可验证同权限 lineage 存在，但没有跨 workflow 的同一物理交付 identity 账 | **真实缺失**：跨后继去重身份。不能由“同仓库/相同测试结果/类似文案”推出同一交付 |
+| [completion `identity/_operation`][T-completion] 从兼容 lineage 或双方原有共享 operation receipt 计算同一次交付身份；未知旧发送 claim 是去重屏障 | [completion_notifications](../ato_workflow/completion_notifications.py) 是按 `workflow_result`/canonical claim 的 once；可验证同权限 lineage 存在，但没有跨 workflow 的同一物理交付 identity 账 | **真实缺失**：跨后继去重身份。不能由“同仓库/相同测试结果/类似文案”推出同一交付 |
 
 `approved_delivery` 和 `completion_delivery` 是两种关系：前者承认独立授权下某 approved scope 已交付，后者证明两个完成记录对应同一次实际 operation；二者不能互相代替。`task_responsibility.py` 与 efficiency 有重叠，也不能双份导入。
 
@@ -110,12 +110,12 @@ main 的八对是 `agents–permissions`、`budget–runner`、`control–recove
 | 能力及快照事实 | main 对应事实 | 覆盖结论 |
 |---|---|---|
 | [runtime `pin/load/route`][E-runtime] 为新任务/父子阶段记录可信 runner/python/source 和外部 receipt；从另一入口启动仍转回绑定版本，历史无绑定明确 legacy | main `runtime_command` 固定**当前进程**的 runner/interpreter；[release_snapshot](runtime-upgrade.md) 封存/切换运行目录，文档明确任务级 pinning 仍属旧候选 | **部分覆盖**：源码封存/进程选择已有；持久化的逐任务版本绑定、跨入口重启及 parent 传递仍缺 |
-| [accounting `validate/begin/finish`][E-accounting] 使用 `execution_policy.version=2` 区分 invocation/continue/wait/yield/failure，幂等终态记账 | main budget/advisory、累计 attempts 和有限重试存在；[bee82ee execution_policy](../execution_policy.py) 同名字段现在表示副作用 `source/instructions/actions/required_actions`，拒绝 version/max_continuations 等 | **真实缺失且协议冲突**：不能把旧 accounting policy 当新版 execution_policy。必须另命名并设计兼容，绝不可覆盖 worker 动作归属策略 |
+| [accounting `validate/begin/finish`][E-accounting] 使用 `execution_policy.version=2` 区分 invocation/continue/wait/yield/failure，幂等终态记账 | main budget/advisory、累计 attempts 和有限重试存在；[bee82ee execution_policy](../ato_workflow/execution_policy.py) 同名字段现在表示副作用 `source/instructions/actions/required_actions`，拒绝 version/max_continuations 等 | **真实缺失且协议冲突**：不能把旧 accounting policy 当新版 execution_policy。必须另命名并设计兼容，绝不可覆盖 worker 动作归属策略 |
 | `capacity.py` durable endpoint admission，interactive reserve、无抢占、无 TTL 回收，精确 receipt+confirmed cleanup 才释放 | main 仓库 flock、execution lease、mailbox 单 turn 槽已防并发；没有跨项目 endpoint 容量池 | **部分覆盖**：执行独占不是 endpoint 配额；容量/优先级/饥饿投影仍缺，不能用新队列替换现有 owner |
 | [worker `preflight/execute`][E-worker] 绑定任务、profile、native/turn，unknown 隔离；`codex_worker_session.py` 按精确 ID `exec resume`，每 turn 仍重启 CLI | main 有 registry/session capability、Pi 协调端与显式 checkpoint reconstruction；默认 Codex worker 仍按轮调用，W2-1 生产 Pi load/resume unsupported | **真实缺失**：任务专属 Codex warm context；旧 capability 文本也承认安装 CLI 尚未 origin-qualified，不是常驻进程或通用 native resume |
 | [checkpoint `publish/preflight`][E-checkpoint] 保存 host-validated 文件/check/native/profile/counters，放在 worker grant 外；[cache `fingerprint/lookup`][E-cache] 仅支持严格识别的 Python argv、声明输入/依赖/toolchain/env、完整证据 | main 有 worker输出 checkpoint、canonical checks/evidence、独立最终复查；没有 verification_policy/cache/checkpoint_policy 入口 | **部分覆盖**：安全基线已有，宿主可验证增量 receipt 和有限缓存仍缺。快照会对未知依赖走原 argv uncached，final/full/manual/external 必须 fresh，不是任意命令缓存 |
-| [metrics `project`][E-metrics] 对闭区间取并集，最深 phase 归类，并发/缺数据显式 unknown；profile_evidence 仅 bounded labels/hash/enums | main 有 [task_trace](../task_trace.py)、运行事件和预算时间，无同等阶段重叠分摊与 profile 字段差异协议 | **部分覆盖**：日志与累计时间已有；可比较的分项指标仍缺。CLI command 时间不能冒充模型/网络时间 |
-| [延迟边界补救][E-remediation] 在 enforcement 时再 `budget.poll(force=True)`，另修 v2 无 checkpoint_policy 时 timeout 的 failure 记账 | main [W1 Runner](../runner.py#L105) 已用 ≤150ms exit-aware wait，[budget.poll](../budget.py#L384) 已在 soft 边界绕过周期节流；但 guard 仍在 poll 后另读时钟，没有 force 参数/二次重检 | **部分覆盖**：W1 已替代旧固定睡眠及主要 polling 缺陷；“poll 后跨界”的更细竞态仍是可独立评审差异。v2 failure 记账依赖旧 accounting，不能直接套 main |
+| [metrics `project`][E-metrics] 对闭区间取并集，最深 phase 归类，并发/缺数据显式 unknown；profile_evidence 仅 bounded labels/hash/enums | main 有 [task_trace](../ato_workflow/task_trace.py)、运行事件和预算时间，无同等阶段重叠分摊与 profile 字段差异协议 | **部分覆盖**：日志与累计时间已有；可比较的分项指标仍缺。CLI command 时间不能冒充模型/网络时间 |
+| [延迟边界补救][E-remediation] 在 enforcement 时再 `budget.poll(force=True)`，另修 v2 无 checkpoint_policy 时 timeout 的 failure 记账 | main [W1 Runner](../runner.py#L105) 已用 ≤150ms exit-aware wait，[budget.poll](../ato_workflow/budget.py#L384) 已在 soft 边界绕过周期节流；但 guard 仍在 poll 后另读时钟，没有 force 参数/二次重检 | **部分覆盖**：W1 已替代旧固定睡眠及主要 polling 缺陷；“poll 后跨界”的更细竞态仍是可独立评审差异。v2 failure 记账依赖旧 accounting，不能直接套 main |
 | task_view/责任闭环展示 observed/raw/full goal、进程/剩余验收/认领，查询不启动 work | main status/list 已有 overall/stage、observed/effective status、remaining/recovery/独立 lineage；handler 仍非任务级认领 | **部分覆盖**：基础投影已覆盖；合并容量、细账、任务级责任的完整只读视图仍缺，依赖前述数据协议 |
 
 ### 5.3 架构、资格差距与处置
@@ -170,7 +170,7 @@ main 的八对是 `agents–permissions`、`budget–runner`、`control–recove
 
 | 旧能力与实现事实 | main 覆盖/替代机制 | 结论 |
 |---|---|---|
-| [mailbox_routes][L-routes] 注册 `managed:claude/pi:UUID`、保存 endpoint capability，旧 JSON 决策账本独立，send/pump/ack/invalidate | [message_bus](../message_bus.py)、[transport](../transport.py)、[session_router](../session_router.py)、[registry](../agent_registry.py) 已分离路由/身份/actor/能力，具备 v2 fencing/租约/unknown 隔离；local_cli 和 Pi managed 另有适配器 | **核心目标已覆盖且结构更清晰**；旧 `origin_endpoint_id`、环境 token/旧 record 格式不是要自动兼容导入的状态 |
+| [mailbox_routes][L-routes] 注册 `managed:claude/pi:UUID`、保存 endpoint capability，旧 JSON 决策账本独立，send/pump/ack/invalidate | [message_bus](../ato_workflow/message_bus.py)、[transport](../ato_workflow/transport.py)、[session_router](../ato_workflow/session_router.py)、[registry](../agent_registry.py) 已分离路由/身份/actor/能力，具备 v2 fencing/租约/unknown 隔离；local_cli 和 Pi managed 另有适配器 | **核心目标已覆盖且结构更清晰**；旧 `origin_endpoint_id`、环境 token/旧 record 格式不是要自动兼容导入的状态 |
 | [CodexQueueAdapter/NativeAdapter][L-adapters] exact queue receipt、pending no replay、原生 session state、Claude/Pi 回合与工具约束 | main 已有 Codex adapter、受管 Pi ACP 和 worker，P3-1/W1/W2-1 增加固定工具链/清理/凭据出口；generic Claude coordinator/native resume 未据此获资格 | **部分覆盖**：Claude 管理会话是诚实保留的缺口，但这份旧实现不是已经满足当前 ABI/授权/工具链的增量；需要时另立新设计，不恢复旧环境传参或协议 |
 | 旧 mixed-agent tests 与传统 CLI 宣传中的 mailbox-register/mailbox-pump | main 以 session-register/local-session-create/origin-ref 和 v2 actor 分发；Batch 1–3 已纠正主 README 的旧接口 | **已替代**：不能恢复旧命令名来“对齐”历史 README，不能因测试文件改名就说缺了 mixed routing |
 | [upgrade_runtime `assess/stage/restore`][L-upgrade] 为明确 offline 临时根作字节快照/restore，sidecar 存在则拒绝，源不含依赖/测试 | [现行 release_snapshot](runtime-upgrade.md) 以 Git commit/tree、封存资格、只读 mailbox/observer 门禁、逐入口备份与可执行路径回滚替代发布；明确不恢复业务/SQLite | **发布目标已替代**：旧状态 restore 不是应补进 release_snapshot 的功能，也不是激活前置；保留作历史离线演练参考 |

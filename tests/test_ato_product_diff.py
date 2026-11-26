@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-import ato_product as product
+from ato_task import ato_product as product
 from test_ato_unified_task_store import git
 
 

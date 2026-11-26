@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import agents
+from ato_adapters import agents
 import fixture_adapter
 fixture_adapter.register()
 import agent_registry

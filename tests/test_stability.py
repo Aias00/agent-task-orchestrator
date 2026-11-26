@@ -5,9 +5,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import budget
+from ato_workflow import budget
 import runner
-import workflow
+from ato_workflow import workflow
 import test_budget as budgets
 import test_runner as runners
 

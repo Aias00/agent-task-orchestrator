@@ -10,13 +10,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import ato_config
-import control
-import interaction
+from ato_common import ato_config
+from ato_workflow import control
+from ato_workflow import interaction
 import recovery
 import runner
-import transport
-from scripts import prepare_session_candidate as candidate
+from ato_workflow import transport
+from scripts.history import prepare_session_candidate as candidate
 from scripts import verify_pi_session_local as smoke
 
 
@@ -97,7 +97,7 @@ class QualificationTests(unittest.TestCase):
         fixture.setUp()
         try:
             fixture.configure()
-            with patch('session_router.activity', return_value='unknown'):
+            with patch('ato_workflow.session_router.activity', return_value='unknown'):
                 action = fixture.observe()[0]
                 self.assertEqual(action['handler_status'], 'activity_unknown')
                 self.assertIn('未知', action['question'])
@@ -106,7 +106,7 @@ class QualificationTests(unittest.TestCase):
                 with patch.dict(os.environ, CODEX_THREAD_ID=old.HUB):
                     control.record(action['id'], state='presented', note='synthetic user presentation')
                 self.assertEqual(len(fixture.observe()), 1)
-                import failure_attention
+                from ato_workflow import failure_attention
                 self.assertFalse(failure_attention.pending(control.rows(True)[0]))
                 runner.save(fixture.d/'recovery.json', dict(requests=[dict(state='delivery_unknown')]))
                 self.assertFalse(failure_attention.current(action))
@@ -116,7 +116,7 @@ class QualificationTests(unittest.TestCase):
     def skeleton(self):
         repo = self.root/'source'; repo.mkdir()
         for name, text in [('runtime.py', 'pass\n'), ('tests/test_old.py', '# protected\n'),
-                ('docs/session-decoupling/migration.md', '# candidate\n'),
+                ('docs/history/session-decoupling/migration.md', '# candidate\n'),
                 ('scripts/example.py', '# source\n'), ('README.md', '# readme\n')]:
             path=repo/name; path.parent.mkdir(exist_ok=True,parents=True);path.write_text(text)
         base = self.root/'baseline.json'
@@ -145,7 +145,7 @@ class QualificationTests(unittest.TestCase):
         self.assertIn('tests/test_new.py',manifest['files'])
         self.assertIn('runtime.py',manifest['actual_live_to_candidate_delta'])
         self.assertIsNone(manifest['qualification_stage_delta']['tests/test_new.py']['seeded_sha256'])
-        self.assertIn('docs/session-decoupling/migration.md',manifest['files'])
+        self.assertIn('docs/history/session-decoupling/migration.md',manifest['files'])
         self.assertEqual(manifest['qualification']['cloud_model'],'not_tested')
 
     def test_candidate_rejects_symlinked_source_and_omits_private_state_dependencies(self):
@@ -211,12 +211,12 @@ class StaleFollowupTests(unittest.TestCase):
     transport=fixtures.InteractionTests.transport
 
     def test_stale_controller_followup_is_recorded_without_rebinding_or_native_send(self):
-        with patch('interaction.subprocess.run',side_effect=self.transport):
+        with patch('ato_workflow.interaction.subprocess.run',side_effect=self.transport):
             q=interaction.ask(self.d,'Synthetic original question?')
         path=interaction.question_path(q['id']);before=path.read_bytes()
         state=runner.read(self.d/'state.json');state['execution_revision']=1;runner.save(self.d/'state.json',state)
         key='followup:'+q['id']+':0'
-        with patch('control.subprocess.run',side_effect=AssertionError('stale native send forbidden')):
+        with patch('ato_workflow.control.subprocess.run',side_effect=AssertionError('stale native send forbidden')):
             record=control.send(key,q['hub_thread'],'stale synthetic message',workflow=str(self.d))
             self.assertEqual(record['state'],'recorded_only')
             self.assertEqual(control.send(key,q['hub_thread'],'duplicate',workflow=str(self.d)),record)

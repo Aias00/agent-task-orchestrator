@@ -9,17 +9,17 @@
 ## 统一入口与隔离边界
 
 `bin/ato` 选择封存源码。公开命令由 `ato.py`、`ato_cli/__init__.py`
-和 `ato_application.py` 处理。`ato_runtime.py` 承接经验证的私有运行、
+和 `ato_task/ato_application.py` 处理。`ato_runtime.py` 承接经验证的私有运行、
 Observer 和交接读取。用户用 `ato agent binding` 查询控制端、交互端、
 Reviewer 与实际 Run owner，用 `ato agent handoff` 在授权后更新绑定。
 
 | 层 | 职责 |
 | --- | --- |
-| `ato_task_store.py`、`ato_execution.py` | 把不可变规格、Git 工作树、Run、STOP 和原生 Workflow 代次绑定到同一任务 |
-| `ato_host.py`、`ato_binding.py`、`ato_acceptance.py` | 检查当前端点、凭据作用域和授权证据，记录交接、答复与精确产物验收 |
-| `ato_execution_host.py`、`hub_sandbox.py`、`hub_worktree.py` | 隔离 Worker 和 Reviewer，保护私有路径，运行独立检查并回收进程组 |
-| `ato_product.py`、`ato_application.py` | 验真被接受的产物，在任务分支保留精确提交后移除完成的工作树 |
-| `ato_observer.py`、`ato_release_lib.py` | 观察相关投递、维护端点租约、检查切换门禁和封存快照 |
+| `ato_task/ato_task_store.py`、`ato_task/ato_execution.py` | 把不可变规格、Git 工作树、Run、STOP 和原生 Workflow 代次绑定到同一任务 |
+| `ato_task/ato_host.py`、`ato_task/ato_binding.py`、`ato_task/ato_acceptance.py` | 检查当前端点、凭据作用域和授权证据，记录交接、答复与精确产物验收 |
+| `ato_task/ato_execution_host.py`、`ato_review/hub_sandbox.py`、`ato_review/hub_worktree.py` | 隔离 Worker 和 Reviewer，保护私有路径，运行独立检查并回收进程组 |
+| `ato_task/ato_product.py`、`ato_task/ato_application.py` | 验真被接受的产物，在任务分支保留精确提交后移除完成的工作树 |
+| `ato_task/ato_observer.py`、`ato_release/` | 观察相关投递、维护端点租约、检查切换门禁和封存快照 |
 
 旧运行内核仍支撑阶段执行、独立 checks 和受管 Mailbox。下列章节描述
 内核的职责和历史命令语义。当前公开命令以统一契约为准。
@@ -50,18 +50,18 @@ flowchart TD
 
 | 模块 | 责任 | 不承担的责任 |
 | --- | --- | --- |
-| `ato_core.py` | 标准库基础原语、原子读写、锁、PID 身份与共享 Halt 类型 | 不导入业务模块，不注册适配器或启动服务 |
+| `ato_common/ato_core.py` | 标准库基础原语、原子读写、锁、PID 身份与共享 Halt 类型 | 不导入业务模块，不注册适配器或启动服务 |
 | `ato_cli/` | 校验统一命令参数，调用应用层并输出结构化结果 | 不从计划加载代码，不改变验收或权限 |
 | `runner.py` | 校验 DAG、阶段 worker、重试、进程组清理、仓库锁、宿主 checks | 不从 worker 的自述推断通过 |
-| `workflow.py` | 完整合约、最终验收、阶段规划与累计预算、人工条件 | 不把新阶段当新总目标；不自行批准人工验收 |
+| `ato_workflow/workflow.py` | 完整合约、最终验收、阶段规划与累计预算、人工条件 | 不把新阶段当新总目标；不自行批准人工验收 |
 | `recovery.py` | 有来源的有限接管、回复观察、证据登记与恢复 | 不无限修复或重置预算 |
-| `interaction.py` | hub/origin 绑定、问题/答复 outbox、接收确认 | 不替用户决策，不迁移会话绑定 |
-| `control.py` | 持久化待办、有限提醒、精确回复回传、结果待报告 | 不直接修改业务、不发放预算、不冒充已读 |
-| `progress.py` | CLI 工具事件归一化、重复调用/无进展信号 | 不把告警等同于业务失败或自动取消依据 |
-| `agents.py`、`pi-path-guard.mjs` | 第三方 CLI 协议、结果校验、受限文件工具 | 不管理任意已有第三方聊天窗口 |
-| `delegation.py`、`appserver.py` | 显式新建持久化 origin 会话，接受后启动绑定 workflow | 不根据工程路径猜原会话或绕过已有处理者 |
+| `ato_workflow/interaction.py` | hub/origin 绑定、问题/答复 outbox、接收确认 | 不替用户决策，不迁移会话绑定 |
+| `ato_workflow/control.py` | 持久化待办、有限提醒、精确回复回传、结果待报告 | 不直接修改业务、不发放预算、不冒充已读 |
+| `ato_workflow/progress.py` | CLI 工具事件归一化、重复调用/无进展信号 | 不把告警等同于业务失败或自动取消依据 |
+| `ato_adapters/agents.py`、`pi-path-guard.mjs` | 第三方 CLI 协议、结果校验、受限文件工具 | 不管理任意已有第三方聊天窗口 |
+| `ato_workflow/delegation.py`、`appserver.py` | 显式新建持久化 origin 会话，接受后启动绑定 workflow | 不根据工程路径猜原会话或绕过已有处理者 |
 
-`control_store.py`、`notification_state.py` 与 `execution_state.py` 把已有账本存取、只读通知策略和持久化执行代次读取从主动控制逻辑中分开，继续使用原文件路径和 SQLite 表。`host_budget.py` 通过显式传入的预算接口执行既有宿主命令，不创建第二套预算或验收。`runner` 与 `recovery` 保留基础原语公共名称；`recovery.pid_alive` 的薄门面还保留旧的 alive/identity 注入点。8 个受保护核心模块仍位于仓库根目录，原生适配器导入禁令保持不变。
+`ato_workflow/control_store.py`、`ato_workflow/notification_state.py` 与 `ato_workflow/execution_state.py` 分别负责账本存取、只读通知策略和持久化执行代次读取，沿用原来的状态路径和 SQLite 表。`ato_workflow/host_budget.py` 通过传入的预算接口执行宿主命令。`runner` 与 `recovery` 提供基础原语的兼容名称，`recovery.pid_alive` 提供旧的 alive/identity 注入点。八个受保护核心模块中，`recovery.py` 位于根目录，其余七个位于 `ato_workflow/`。架构检查核对原始 AST 指纹，比较时还原迁移产生的导入路径，并独立检查原生适配器导入边界。
 
 ## 三层任务状态
 

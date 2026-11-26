@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import test_interaction
 import runner
-import workflow
-import workflow_lineage as lineage
+from ato_workflow import workflow
+from ato_workflow import workflow_lineage as lineage
 
 
 class LineageTests(unittest.TestCase):
@@ -103,18 +103,18 @@ class LineageTests(unittest.TestCase):
         self.assertEqual(before, (self.f.d/'state.json').read_bytes())
 
     def test_controller_retains_stopped_action_and_attaches_delivery(self):
-        import control
-        import notifications
+        from ato_workflow import control
+        from ato_workflow import notifications
         import os
         with patch.dict(os.environ, CODEX_THREAD_ID=test_interaction.HUB):
             control.enable('fixture control', 60, 0)
             notifications.configure('user_input_only', 'fixture quiet')
         control.register(self.f.d)
-        with patch('control.send', return_value={'state':'queued'}): control.tick()
+        with patch('ato_workflow.control.send', return_value={'state':'queued'}): control.tick()
         (self.f.d/'STOP').touch()
-        with patch('control.send', return_value={'state':'queued'}): control.tick()
+        with patch('ato_workflow.control.send', return_value={'state':'queued'}): control.tick()
         self.link()
-        with patch('control.send', return_value={'state':'queued'}): control.tick()
+        with patch('ato_workflow.control.send', return_value={'state':'queued'}): control.tick()
         action = next(a for a in control.rows(True) if a['kind'] == 'workflow')
         self.assertEqual(action['state'], 'stopped')
         self.assertEqual(action['delivery']['effective_status'], 'completed')

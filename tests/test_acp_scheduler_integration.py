@@ -9,7 +9,7 @@ import time
 import unittest
 
 import runner
-import task_trace
+from ato_workflow import task_trace
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT/'tests/fixtures/acp_fixture_cli.py'
@@ -55,17 +55,17 @@ class ACPIntegrationTests(unittest.TestCase):
         self.assertFalse(task_trace.query(directory)['summary']['available'])
 
     def test_production_profile_is_registered_without_plan_commands(self):
-        import agents
+        from ato_adapters import agents
         self.assertIn('acp_pi', agents.registry.kinds())
         with self.assertRaises(ValueError):
             agents.validate({'kind': 'acp_pi', 'command': '/tmp/attacker'})
         request = agents.registry.ExecutionRequest({'agent': {'kind': 'acp_pi'}}, self.root,
             'task-attempt-1-abcdef', self.root/'schema', self.root/'output', 'workspace-write', False)
         argv = agents.registry.get('acp_pi', 'worker').command(request)
-        self.assertEqual(Path(argv[1]), ROOT/'pi_acp_worker.py')
+        self.assertEqual(Path(argv[1]), ROOT/'ato_pi/pi_acp_worker.py')
 
     def test_live_status_rejects_reused_process_identity(self):
-        import control
+        from ato_workflow import control
         process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])
         self.addCleanup(lambda: (process.terminate(), process.wait()) if process.poll() is None else None)
         state = {'status': 'running', 'owner_pid': os.getpid(),

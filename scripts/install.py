@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ato_core import ensure_private_dir
+from ato_common.ato_core import ensure_private_dir
 
 from release_snapshot import (
     ENTRIES, PUBLIC, SURFACE, Refused, atomic_entry, atomic_bytes, entry_set,

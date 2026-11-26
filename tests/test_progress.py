@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import progress
+from ato_workflow import progress
 import runner
 
 

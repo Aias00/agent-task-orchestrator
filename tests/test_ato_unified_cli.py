@@ -15,16 +15,16 @@ import unittest
 from unittest.mock import Mock, patch
 
 import agent_registry
-import ato_config
+from ato_common import ato_config
 import ato_cli
-from ato_application import Application, project_diff
-from ato_execution import HostProfile
-from ato_host import Host
-from ato_config import private_runtime_command
-from ato_private import read_handoff, render_notice
-from ato_task_store import TaskError, TaskStore
-from ato_observer import tick
-from message_bus import MessageBus
+from ato_task.ato_application import Application, project_diff
+from ato_task.ato_execution import HostProfile
+from ato_task.ato_host import Host
+from ato_common.ato_config import private_runtime_command
+from ato_task.ato_private import read_handoff, render_notice
+from ato_task.ato_task_store import TaskError, TaskStore
+from ato_task.ato_observer import tick
+from ato_workflow.message_bus import MessageBus
 from scripts import release_snapshot as release
 
 from release_support import CURRENT, ROOT, FakeSystem, fake_env, legacy_entry, snapshot, unseal, write
@@ -44,7 +44,7 @@ class PublicCLI(unittest.TestCase):
         interaction.task_status.return_value = complete
         app = Application(SimpleNamespace(execution=execution, interaction=interaction))
         proof = object()
-        with patch("ato_application.time.sleep") as sleep:
+        with patch("ato_task.ato_application.time.sleep") as sleep:
             self.assertEqual(app.wait(proof, complete["task_id"], Mock(side_effect=KeyboardInterrupt)),
                              complete)
             sleep.assert_not_called()
@@ -110,7 +110,7 @@ class PublicCLI(unittest.TestCase):
                                   (ValueError("git failed"), "BINDING_CHANGED"),
                                   (subprocess.TimeoutExpired("git", 30), "BINDING_CHANGED"),
                                   (TaskError("PRODUCT_CHANGED"), "PRODUCT_CHANGED")):
-            with self.subTest(failure=failure), patch("ato_product.collect_diff", side_effect=failure):
+            with self.subTest(failure=failure), patch("ato_task.ato_product.collect_diff", side_effect=failure):
                 with self.assertRaises(TaskError) as caught:
                     project_diff(host, object(), task_id)
                 self.assertEqual((caught.exception.exit_code, caught.exception.code, caught.exception.task_id),
@@ -135,7 +135,7 @@ class PublicCLI(unittest.TestCase):
 
     def test_batch4_system_status_retries_observer_record_replacement(self):
         app = self.app()
-        with patch("ato_application.host_record", side_effect=[TaskError("BUSY"), FileNotFoundError]) as read:
+        with patch("ato_task.ato_application.host_record", side_effect=[TaskError("BUSY"), FileNotFoundError]) as read:
             code, response = self.invoke("system", "status", app=app)
         self.assertEqual(code, 0, response)
         self.assertEqual(response["data"]["observer"]["state"], "absent")

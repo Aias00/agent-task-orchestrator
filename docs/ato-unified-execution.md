@@ -24,7 +24,7 @@ snapshot, generation, host profile, STOP epoch and binding revision. The
 private child verifies an inherited one-use capability and publishes its
 process birth identity and the kernel fence before dispatch. Background
 returns after a verified startup or settlement receipt. Foreground waits
-on that child. [Execution service](../ato_execution.py) · [Private bootstrap](../ato_runtime.py)
+on that child. [Execution service](../ato_task/ato_execution.py) · [Private bootstrap](../ato_runtime.py)
 
 On STOP the driver terminates its verified process groups and records
 cleanup. Run admission after STOP retires only the matching epoch and kernel
@@ -35,7 +35,7 @@ already prepared terminal receipt for the same Run after verifying its
 owner exited, the group is absent, and the exact kernel generation and
 lease still match. It starts no work. Without that correlated receipt,
 PID absence or reuse still leaves the Run unresolved.
-[Process identity](../ato_process.py)
+[Process identity](../ato_task/ato_process.py)
 
 Each declared stage must complete before the workflow can deliver its product.
 Shared checks may already pass before later stages execute. The `stage` summary
@@ -44,7 +44,7 @@ stages projects as `blocked` with `STAGES_INCOMPLETE`. An explicit `ato resume`
 continues from the first unfinished declared stage in the existing worktree.
 The original Run and its check receipts remain in history. Completion retains
 content-addressed check receipts and a product manifest, which are verified
-before use. [Product evidence](../ato_product.py)
+before use. [Product evidence](../ato_task/ato_product.py)
 
 ## Shared calls for T4 and T5
 

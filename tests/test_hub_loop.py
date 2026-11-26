@@ -1,7 +1,6 @@
 import ast
 from contextlib import redirect_stdout, redirect_stderr
 import io
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,18 +12,19 @@ import time
 import unittest
 from unittest.mock import patch
 
-import hub_cli
-import budget
-from hub_contract import HubAgentSpec, HubError
-from hub_ledger import HubLedger
-from hub_loop import GuardedWorkflow, HubLoop
-from hub_registry import HubRegistry
-from hub_adapter_agy import AgyHubAdapter
-from hub_adapter_claude import ClaudeHubAdapter
-from hub_adapter_codex import CodexHubAdapter
-import hub_worktree
+from fixtures import hub_cli
+from ato_workflow import budget
+from ato_review.hub_contract import HubAgentSpec, HubError
+from ato_review.hub_ledger import HubLedger
+from ato_review.hub_loop import GuardedWorkflow, HubLoop
+from ato_adapters.hub_registry import HubRegistry
+from ato_adapters.hub_adapter_agy import AgyHubAdapter
+from ato_adapters.hub_adapter_claude import ClaudeHubAdapter
+from ato_adapters.hub_adapter_codex import CodexHubAdapter
+from ato_review import hub_worktree
 import runner
 from hub_support import repository,spec,verdict,git
+from legacy_support import core_module_path, legacy_core_digest
 from test_hub_adapters import adapter_fixture
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -74,7 +74,7 @@ class HubLoopTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):self.assertEqual(hub_cli.main(['hub-list','--repo',str(alias)]),2)
 
     def test_hub_list_invalid_repository_metadata_does_not_expose_nested_secrets(self):
-        from hub_ledger import save
+        from ato_review.hub_ledger import save
         row=self.ledger.hub();row['repo']={'credential':self.secret}
         save(self.ledger.root/'hub.json',row);stream=io.StringIO()
         with redirect_stdout(stream):self.assertEqual(hub_cli.main(['hub-list']),2)
@@ -216,7 +216,7 @@ class HubLoopTests(unittest.TestCase):
         frozen=json.dumps(self.state(),sort_keys=True)
         with patch.object(self.loop,'worker',side_effect=AssertionError('must not run worker')),patch.object(
                 codex,'run_turn',side_effect=AssertionError('must not run reviewer')),patch(
-                'hub_worktree.provision',side_effect=AssertionError('must not provision')):
+                'ato_review.hub_worktree.provision',side_effect=AssertionError('must not provision')):
             for review_only in (False,True,True):
                 self.assertEqual(self.loop.run('task-one',review_only=review_only),state)
                 self.assertEqual(json.dumps(self.state(),sort_keys=True),frozen)
@@ -273,10 +273,10 @@ class HubLoopTests(unittest.TestCase):
 
     def test_O6_interrupted_saved_operation_does_not_replay(self):
         self.create();state=self.state();state['status']='running_worker';self.ledger.update_task('task-one',state)
-        with patch('hub_worktree.provision',side_effect=AssertionError('must not replay')):
+        with patch('ato_review.hub_worktree.provision',side_effect=AssertionError('must not replay')):
             state=self.loop.run('task-one')
         self.assertEqual(state['code'],'INTERRUPTED_OPERATION');self.assertIsNone(state['worktree'])
-        with patch('hub_worktree.provision',side_effect=AssertionError('must not replay via review-only')):
+        with patch('ato_review.hub_worktree.provision',side_effect=AssertionError('must not replay via review-only')):
             self.assertEqual(self.loop.run('task-one',review_only=True)['code'],'INTERRUPTED_OPERATION')
 
     def test_O6_unknown_reviewer_cleanup_cannot_be_replayed_via_review_only(self):
@@ -414,7 +414,7 @@ class HubLoopTests(unittest.TestCase):
         self.assertEqual(json.loads((Path(state['active_workflow_dir'])/'state.json').read_text())['stages'],[])
 
     def verification_workflow(self, script, *, runtime=5, check=4):
-        import workflow
+        from ato_workflow import workflow
         contract=spec(self.repo)['worker_contract'];contract['stages']=[]
         contract['acceptance'][0]['checks']=[[sys.executable,'-c',script]]
         contract['limits']=dict(runtime_seconds=runtime,check_seconds=check)
@@ -488,15 +488,15 @@ class HubLoopTests(unittest.TestCase):
 
     def test_O10_core_AST_vendor_imports_and_frozen_CLI_bytes(self):
         fixture=json.loads((ROOT/'tests/fixtures/w2-core-ast.json').read_text())
-        # Existing fixture format is intentionally not rewritten by H1.
         for name in ('control','recovery','interaction','delegation','workflow','session_router','message_bus','transport'):
-            tree=ast.parse((ROOT/(name+'.py')).read_text())
-            self.assertEqual(hashlib.sha256(ast.dump(tree,include_attributes=False).encode()).hexdigest(),fixture[name])
+            tree=ast.parse(core_module_path(ROOT, name).read_text())
+            self.assertEqual(legacy_core_digest(tree),fixture[name])
             for node in ast.walk(tree):
                 imported=[a.name for a in node.names] if isinstance(node,ast.Import) else [node.module or ''] if isinstance(node,ast.ImportFrom) else []
-                self.assertFalse(any(value.startswith('hub_adapter_') for value in imported),name)
+                self.assertFalse(any(value.startswith(('hub_adapter_', 'ato_adapters.hub_'))
+                                     for value in imported),name)
 
 
 def workflow_type():
-    import workflow
+    from ato_workflow import workflow
     return workflow.Workflow

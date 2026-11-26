@@ -9,11 +9,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import ato_core
-import control
+from ato_common import ato_core
+from ato_workflow import control
 import recovery
 import runner
-from scripts.check_architecture import report
+from scripts.check_architecture import report, runtime_sources
+from legacy_support import core_module_path
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIMITIVES = ('now', 'read', 'save', 'digest', 'process_identity', 'Halt', 'locked', 'alive', 'pid_alive')
@@ -23,13 +24,14 @@ class ArchitectureStructureTests(unittest.TestCase):
     def test_foundational_modules_import_only_standard_library_and_private_directory_primitive(self):
         for name in ('ato_core', 'ato_config', 'agent_registry'):
             with self.subTest(module=name):
-                tree = ast.parse((ROOT/(name+'.py')).read_text())
+                package = ROOT if name == 'agent_registry' else ROOT/'ato_common'
+                tree = ast.parse((package/(name+'.py')).read_text())
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Import):
                         modules = [alias.name for alias in node.names]
                     elif isinstance(node, ast.ImportFrom):
                         self.assertEqual(node.level, 0)
-                        if (name, node.module) == ('ato_config', 'ato_core'):
+                        if (name, node.module) == ('ato_config', 'ato_common.ato_core'):
                             self.assertEqual([alias.name for alias in node.names], ['ensure_private_dir'])
                             continue
                         modules = [node.module]
@@ -38,8 +40,8 @@ class ArchitectureStructureTests(unittest.TestCase):
                     self.assertTrue(all(module.split('.')[0] in sys.stdlib_module_names for module in modules), modules)
 
     def test_runtime_never_imports_release_scripts(self):
-        for source in (*ROOT.glob('*.py'), *(ROOT/'ato_cli').glob('*.py')):
-            with self.subTest(source=source.name):
+        for source in runtime_sources(ROOT):
+            with self.subTest(source=source.relative_to(ROOT)):
                 tree = ast.parse(source.read_text())
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Import):
@@ -56,10 +58,12 @@ class ArchitectureStructureTests(unittest.TestCase):
         self.assertEqual(baseline['count'], 31)
         self.assertLessEqual(current['root_mutual_count'], 8)
         self.assertLessEqual(current['runtime_mutual_count'], 8)
-        self.assertTrue(set(map(tuple, current['runtime_mutual_pairs'])) <= set(map(tuple, baseline['mutual_pairs'])))
+        current_pairs = {tuple(sorted(name.rsplit('.', 1)[-1] for name in pair))
+                         for pair in current['runtime_mutual_pairs']}
+        self.assertTrue(current_pairs <= set(map(tuple, baseline['mutual_pairs'])))
         self.assertIn('ato_cli', current['graph']['ato'])
-        self.assertIn('ato_application', current['graph']['ato_cli'])
-        self.assertIn('ato_execution', current['graph']['ato_application'])
+        self.assertIn('ato_task.ato_application', current['graph']['ato_cli'])
+        self.assertIn('ato_task.ato_execution', current['graph']['ato_task.ato_application'])
 
     def test_legacy_modules_export_the_complete_primitive_api(self):
         for name in PRIMITIVES:
@@ -75,8 +79,8 @@ class ArchitectureStructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             command = ('import sys; sys.path.insert(0, '+repr(str(ROOT))+'); '
-                       'import ato_core, ato_config, agent_registry; '
-                       'assert "runner" not in sys.modules and "agents" not in sys.modules; '
+                       'import agent_registry; from ato_common import ato_core, ato_config; '
+                       'assert "runner" not in sys.modules and "ato_adapters.agents" not in sys.modules; '
                        'assert not agent_registry.kinds()')
             result = subprocess.run([sys.executable, '-I', '-c', command], cwd=root,
                 env=dict(HOME=str(root/'home'), ATO_HOME=str(root/'ato'), CODEX_HOME=str(root/'native'), PATH=os.defpath),
@@ -84,11 +88,11 @@ class ArchitectureStructureTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(root.iterdir()), [])
 
-    def test_legacy_runner_has_no_cli_facade_and_core_paths_are_preserved(self):
+    def test_legacy_runner_has_no_cli_facade_and_protected_core_is_present(self):
         tree = ast.parse((ROOT/'runner.py').read_text())
         self.assertFalse(any(isinstance(node, ast.FunctionDef) and node.name == 'main' for node in tree.body))
         for name in ('control', 'recovery', 'interaction', 'delegation', 'workflow', 'session_router', 'message_bus', 'transport'):
-            self.assertTrue((ROOT/(name+'.py')).is_file())
+            self.assertTrue(core_module_path(ROOT, name).is_file())
 
     def test_hub_switch_checks_pid_identity_and_preserves_legacy_guard(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -99,8 +103,8 @@ class ArchitectureStructureTests(unittest.TestCase):
                 with self.subTest(identity=identity, enabled=enabled):
                     runner.save(directory/'config.json', dict(enabled=enabled, hub_thread='old', created_at=1))
                     runner.save(directory/'process.json', dict(pid=123, **identity))
-                    with patch('control.directory', return_value=directory), \
-                            patch('interaction.config', return_value={'thread_id': 'new'}), patch('interaction.actor'), \
+                    with patch('ato_workflow.control.directory', return_value=directory), \
+                            patch('ato_workflow.interaction.config', return_value={'thread_id': 'new'}), patch('ato_workflow.interaction.actor'), \
                             patch('recovery.alive', return_value=True), patch('runner.process_identity', return_value='current'):
                         if allowed:
                             self.assertEqual(control.enable('synthetic hub rebind')['hub_thread'], 'new')

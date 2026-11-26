@@ -1,7 +1,6 @@
 """O1/O2/O3/O9: synthetic credentials and private workflows only."""
 import ast
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,11 +10,12 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-from ato_core import digest
-from pi_production_credentials import acquire, private_json, SecretLease
-from pi_production_fence import ProductionFence
-from pi_production_profile import ProductionPiProfile
-from scripts import prepare_acp_process_candidate
+from ato_common.ato_core import digest
+from ato_pi.pi_production_credentials import acquire, private_json, SecretLease
+from ato_pi.pi_production_fence import ProductionFence
+from ato_pi.pi_production_profile import ProductionPiProfile
+from scripts.history import prepare_acp_process_candidate
+from legacy_support import core_module_path, imports_builtin_workers, legacy_core_digest
 
 ROOT = Path(__file__).resolve().parents[1]
 SENTINEL = 'synthetic-key-never-persisted'
@@ -51,7 +51,7 @@ class ProductionProfileTests(unittest.TestCase):
         return p
 
     def test_explicit_profile_is_distinct_and_no_launch_until_transport_exists(self):
-        from pi_session_profile import LocalPiProfile
+        from ato_pi.pi_session_profile import LocalPiProfile
         p = self.profile()
         self.assertNotIsInstance(p, LocalPiProfile)
         self.assertFalse(p.native_load_verified)
@@ -151,18 +151,24 @@ class ProductionProfileTests(unittest.TestCase):
             with self.assertRaises(ValueError):SecretLease(secret)
 
     def test_module_distribution_and_generic_vendor_free_core_ast(self):
-        modules=tomllib.loads((ROOT/'pyproject.toml').read_text())['tool']['setuptools']['py-modules']
+        packages=tomllib.loads((ROOT/'pyproject.toml').read_text())['tool']['setuptools']['packages']
+        self.assertIn('ato_pi', packages)
         for name in ('pi_production_credentials','pi_production_fence','pi_production_profile'):
-            self.assertIn(name,modules);self.assertIn(name+'.py',prepare_acp_process_candidate.FILES)
+            path = 'ato_pi/'+name+'.py'
+            self.assertTrue((ROOT/path).is_file())
+            self.assertIn(path, prepare_acp_process_candidate.FILES)
         expected=json.loads((ROOT/'tests/fixtures/w2-core-ast.json').read_text())
         for name,sha in expected.items():
-            tree=ast.parse((ROOT/(name+'.py')).read_text())
-            self.assertEqual(hashlib.sha256(ast.dump(tree).encode()).hexdigest(),sha,name)
+            tree=ast.parse(core_module_path(ROOT, name).read_text())
+            self.assertEqual(legacy_core_digest(tree),sha,name)
             for node in ast.walk(tree):
+                if imports_builtin_workers(node):
+                    continue
                 if isinstance(node,ast.Import):names=[x.name for x in node.names]
                 elif isinstance(node,ast.ImportFrom):names=[node.module or '']
                 else:continue
-                self.assertFalse(any(x.startswith(('pi_','codex_','appserver','acp.','anthropic','openai')) for x in names),name)
+                self.assertFalse(any(x.startswith(('pi_','ato_pi','codex_','appserver',
+                    'ato_adapters','acp.','anthropic','openai')) for x in names),name)
 
 
 class ProductionFenceTests(unittest.TestCase):
@@ -212,9 +218,9 @@ class ProductionFenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):self.fence().authorize('fixture',request=True,cost_microusd=cost)
 
     def test_real_workflow_owner_rechecks_progress_and_preserves_original_budget_ledger(self):
-        import budget
+        from ato_workflow import budget
         import runner
-        import workflow
+        from ato_workflow import workflow
         from test_budget import BudgetTests
         fixture=BudgetTests('test_legacy_tasks_keep_their_fixed_limits')
         fixture.setUp();self.addCleanup(fixture.tearDown)

@@ -3,7 +3,7 @@ import json
 
 def handle(args, core):
     if args.command == 'budget-policy':
-        import budget
+        from ato_workflow import budget
         if args.action == 'set':
             if not args.mode or not args.source or (not args.request):
                 raise ValueError('budget-policy set requires --mode --source --request')
@@ -13,7 +13,7 @@ def handle(args, core):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command in ('budget-estimate', 'budget-configure', 'budget-reforecast', 'budget-charge', 'budget-run'):
-        import budget
+        from ato_workflow import budget
         if args.command == 'budget-estimate':
             result = budget.estimate(core.read(args.estimate))
         elif args.command == 'budget-configure':

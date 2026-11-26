@@ -7,10 +7,10 @@ import unittest
 from unittest.mock import patch
 
 import runner
-import workflow
-import control
+from ato_workflow import workflow
+from ato_workflow import control
 import coordination
-import transport
+from ato_workflow import transport
 import recovery
 import test_interaction as fixtures
 from test_interaction import ORIGIN, HUB
@@ -37,7 +37,7 @@ class CompactHandoffTests(unittest.TestCase):
 
     def test_only_short_notice_is_queued_full_material_is_retained_for_origin(self):
         self.prepare()
-        with patch('control.subprocess.run',side_effect=self.transport) as sent:
+        with patch('ato_workflow.control.subprocess.run',side_effect=self.transport) as sent:
             control.tick();control.tick()
         calls=[c.args[0][-1] for c in sent.call_args_list if '--thread' in c.args[0] and c.args[0][c.args[0].index('--thread')+1]==ORIGIN]
         self.assertEqual(len(calls),1)
@@ -65,7 +65,7 @@ class CompactHandoffTests(unittest.TestCase):
     def test_legacy_followup_type_cannot_dispatch_after_completion(self):
         self.prepare();projection=self.envelope()
         s=runner.read(self.d/'state.json');s['status']='completed';runner.save(self.d/'state.json',s)
-        with patch('control.subprocess.run') as sent:
+        with patch('ato_workflow.control.subprocess.run') as sent:
             with self.assertRaises(ValueError):transport.dispatch_managed(projection)
             sent.assert_not_called()
         self.assertEqual(transport.managed_bus().message(projection['mailbox_id'])['state'],'cancelled')
@@ -80,26 +80,26 @@ class CompactHandoffTests(unittest.TestCase):
                 elif changed=='different_request':s['host_handoff']['tasks']['overall']['next_step']='new host request'
                 else:s['status']=changed
                 runner.save(self.d/'state.json',s)
-                with patch('control.subprocess.run') as sent:
+                with patch('ato_workflow.control.subprocess.run') as sent:
                     with self.assertRaises(ValueError):transport.dispatch_managed(projection)
                     sent.assert_not_called()
                 self.assertEqual(transport.managed_bus().message(projection['mailbox_id'])['state'],'cancelled')
 
     def test_completion_between_dispatch_barrier_and_send_cancels_without_queue(self):
-        from message_bus import MessageBus
+        from ato_workflow.message_bus import MessageBus
         self.prepare();projection=self.envelope();original=MessageBus.begin_dispatch
         def race(bus,*args,**kwargs):
             result=original(bus,*args,**kwargs)
             s=runner.read(self.d/'state.json');s['status']='completed';runner.save(self.d/'state.json',s)
             return result
-        with patch.object(MessageBus,'begin_dispatch',race),patch('control.subprocess.run') as sent:
+        with patch.object(MessageBus,'begin_dispatch',race),patch('ato_workflow.control.subprocess.run') as sent:
             with self.assertRaises(ValueError):transport.dispatch_managed(projection)
             sent.assert_not_called()
         self.assertEqual(transport.managed_bus().message(projection['mailbox_id'])['state'],'cancelled')
 
     def test_valid_legacy_notice_still_dispatches_once(self):
         self.prepare();projection=self.envelope()
-        with patch('control.subprocess.run',side_effect=self.transport) as sent:
+        with patch('ato_workflow.control.subprocess.run',side_effect=self.transport) as sent:
             first=transport.dispatch_managed(projection);transport.dispatch_managed(projection)
         self.assertEqual(sent.call_count,1);self.assertEqual(first['state'],'queued')
 

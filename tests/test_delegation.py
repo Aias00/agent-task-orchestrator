@@ -17,12 +17,12 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import appserver
-import delegation
-import interaction
+from ato_adapters import appserver
+from ato_workflow import delegation
+from ato_workflow import interaction
 import recovery
 import runner
-import workflow
+from ato_workflow import workflow
 from test_workflow import PLANNER
 
 HUB = '11111111-1111-4111-8111-000000000002'
@@ -139,7 +139,7 @@ print('Queued message '+thread+' for thread '+thread+'.')
         return delegation.delegate(self.repo,self.plan,'Fixture execution conversation','Explicit user request: create a new coordinator',**kw)
 
     def test_create_binds_new_persistent_thread_and_full_workflow(self):
-        with patch('delegation.start_bridge'):r=self.create()
+        with patch('ato_workflow.delegation.start_bridge'):r=self.create()
         self.assertEqual(r['state'],'queued');self.assertNotEqual(r['origin_thread'],HUB)
         w=Path(r['workflow_dir']);self.assertEqual(runner.read(w/'state.json')['status'],'created')
         self.assertEqual(runner.read(w/'origin.json')['origin_thread_id'],r['origin_thread'])
@@ -150,7 +150,7 @@ print('Queued message '+thread+' for thread '+thread+'.')
             with self.assertRaises(ValueError):delegation.accept(r['directory'])
 
     def test_repeating_same_request_does_not_create_or_dispatch_twice(self):
-        with patch('delegation.start_bridge'):
+        with patch('ato_workflow.delegation.start_bridge'):
             first=self.create();second=self.create()
         self.assertEqual(first['origin_thread'],second['origin_thread'])
         self.assertEqual(len(self.server.threads),1)
@@ -163,7 +163,7 @@ print('Queued message '+thread+' for thread '+thread+'.')
         self.assertEqual(len(self.server.threads),1);self.assertFalse((self.root/'queue-calls').exists())
 
     def test_unknown_queue_receipt_retains_one_identity_and_message(self):
-        with patch.dict(os.environ,TEST_QUEUE_UNKNOWN='1'),patch('delegation.start_bridge'):
+        with patch.dict(os.environ,TEST_QUEUE_UNKNOWN='1'),patch('ato_workflow.delegation.start_bridge'):
             first=self.create();second=self.create()
         self.assertEqual(first['state'],'delivery_unknown');self.assertEqual(second['origin_thread'],first['origin_thread'])
         self.assertEqual(len((self.root/'queue-calls').read_text().splitlines()),1)
@@ -171,7 +171,7 @@ print('Queued message '+thread+' for thread '+thread+'.')
             self.assertEqual(delegation.accept(first['directory'])['state'],'accepted')
 
     def test_changed_request_and_pending_other_task_are_rejected(self):
-        with patch('delegation.start_bridge'):self.create(request_id='one')
+        with patch('ato_workflow.delegation.start_bridge'):self.create(request_id='one')
         with self.assertRaises(ValueError):delegation.delegate(self.repo,self.plan,'Other task','Different intent',request_id='one')
         with self.assertRaises(ValueError):self.create(request_id='two')
         self.assertEqual(len(self.server.threads),1)
@@ -194,7 +194,7 @@ print('Queued message '+thread+' for thread '+thread+'.')
         self.assertFalse((self.root/'queue-calls').exists())
 
     def test_accept_checks_target_stop_deadline_and_contract(self):
-        with patch('delegation.start_bridge'):r=self.create()
+        with patch('ato_workflow.delegation.start_bridge'):r=self.create()
         with self.assertRaises(ValueError):delegation.accept(r['directory'])
         w=Path(r['workflow_dir']);(w/'STOP').touch()
         with patch.dict(os.environ,CODEX_THREAD_ID=r['origin_thread']):
@@ -221,7 +221,7 @@ print('Queued message '+thread+' for thread '+thread+'.')
         start=delegation.start_bridge
         def capture(d):
             proc=start(d);self.children.append(proc);return proc
-        with patch.dict(os.environ,TEST_ACCEPT='1'),patch('delegation.start_bridge',side_effect=capture):
+        with patch.dict(os.environ,TEST_ACCEPT='1'),patch('ato_workflow.delegation.start_bridge',side_effect=capture):
             r=self.create()
         d=Path(r['directory']);w=Path(r['workflow_dir']);limit=time.monotonic()+30
         while time.monotonic()<limit:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only static dependency report, including delayed imports and CLI modules."""
+"""Read-only static dependency report, including delayed imports and runtime packages."""
 import ast
 import importlib.util
 import json
@@ -8,9 +8,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def runtime_sources(root=ROOT):
+    yield from root.glob('*.py')
+    for marker in root.glob('ato_*/__init__.py'):
+        yield from marker.parent.rglob('*.py')
+
+
 def module_graph(root=ROOT):
-    sources = {path.stem: path for path in root.glob('*.py')}
-    for path in (root/'ato_cli').rglob('*.py'):
+    sources = {}
+    for path in runtime_sources(root):
         parts = list(path.relative_to(root).with_suffix('').parts)
         if parts[-1] == '__init__':
             parts.pop()

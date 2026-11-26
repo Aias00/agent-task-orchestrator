@@ -6,6 +6,10 @@
 
 ## 实现与使用入口
 
+以下入口与安装命令适用于原 H1 候选源码。当前仓库通过统一的
+[`ato` CLI](../README.md#quick-start) 提供公开入口，H1 解析器保存在
+[离线测试 fixture](../tests/fixtures/hub_cli.py) 中。
+
 10 个根模块形成单向依赖图，八核心与原有 55 命令 CLI 保持不变。
 `hub_cli.py` 是独立 argparse 入口；可从选定源码 checkout 使用，也可显式安装 `ato-hub`。
 本次日常可用性补丁是独立候选，尚待评审，不表示安装或运行态已经更新。

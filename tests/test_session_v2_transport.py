@@ -17,13 +17,13 @@ import uuid
 from unittest.mock import patch
 
 import agent_registry
-import interaction
-from message_bus import MessageBus, IdentityError, ConflictError
+from ato_workflow import interaction
+from ato_workflow.message_bus import MessageBus, IdentityError, ConflictError
 import runner
-import session_router
-from transport import DeliveryResult, TransportEvent, dispatch_one, receive_event
-import transport
-import workflow
+from ato_workflow import session_router
+from ato_workflow.transport import DeliveryResult, TransportEvent, dispatch_one, receive_event
+from ato_workflow import transport
+from ato_workflow import workflow
 
 
 class RecordingTransport:
@@ -90,7 +90,7 @@ class DurableTransportTests(unittest.TestCase):
         message = self.enqueue()
         # A genuine process exits after committing each requested crash window.
         code = '''import json,os,sys
-from message_bus import MessageBus,EndpointCredential
+from ato_workflow.message_bus import MessageBus,EndpointCredential
 path,credential,owner,point,effect=sys.argv[1:]
 bus=MessageBus(path,clock=lambda:100)
 receiver=EndpointCredential(**json.loads(credential))
@@ -520,7 +520,7 @@ class CanonicalMailboxIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.effects), 1)
 
     def test_followup_projection_is_mailbox_owned_and_unknown_never_replayed(self):
-        import control
+        from ato_workflow import control
         with patch.dict(os.environ, CTASK_SESSION_REF=self.hub, SYNTHETIC_ACTOR='hub-fixture'):
             control.enable('synthetic fixture follow-up authorization', max_reminders=0)
         self.crash_after_effect = True
@@ -634,7 +634,7 @@ class CanonicalMailboxIntegrationTests(unittest.TestCase):
             contract_hash=state['contract_hash'], generation=recovery.generation(self.directory, state),
             role='origin', owner='synthetic-origin', source='synthetic authenticated takeover', lease_seconds=5)
         bus.clock = lambda: 106
-        with patch('transport.managed_bus', return_value=bus):
+        with patch('ato_workflow.transport.managed_bus', return_value=bus):
             for activity in ('active', 'unknown'):
                 self.activity = activity
                 with self.subTest(activity=activity), self.assertRaisesRegex(ValueError, 'active or unknown'):
@@ -658,7 +658,7 @@ class CanonicalMailboxIntegrationTests(unittest.TestCase):
             owner='prior-origin', source='synthetic authenticated origin', lease_seconds=5)
         bus.clock = lambda: 106
         self.activity = {'origin-fixture': 'active', 'hub-fixture': 'idle'}
-        with patch('transport.managed_bus', return_value=bus):
+        with patch('ato_workflow.transport.managed_bus', return_value=bus):
             with recovery.locked(self.repo/'.codex/tasks/.worker.lock'):
                 with self.assertRaisesRegex(ValueError, 'active or unknown'):
                     with recovery.execution_owner(successor, new_state):

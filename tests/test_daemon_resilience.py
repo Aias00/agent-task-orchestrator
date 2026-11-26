@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-import control
+from ato_workflow import control
 import recovery
 import runner
 import test_recovery as fixtures
@@ -41,8 +41,8 @@ class DaemonResilienceTests(unittest.TestCase):
                     ({'pid_identity': 'reused'}, True, True), ({}, False, True)):
                 with self.subTest(module=module.__name__, stored=stored, alive=alive), ExitStack() as stack:
                     runner.save(path, dict(pid=123, **stored))
-                    stack.enter_context(patch('control.directory', return_value=self.controller))
-                    stack.enter_context(patch('control.status', return_value={}))
+                    stack.enter_context(patch('ato_workflow.control.directory', return_value=self.controller))
+                    stack.enter_context(patch('ato_workflow.control.status', return_value={}))
                     stack.enter_context(patch('recovery.alive', return_value=alive))
                     stack.enter_context(patch('runner.process_identity', return_value='current'))
                     stack.enter_context(patch('runner.runtime_command', return_value=['synthetic-never-executed']))
@@ -63,7 +63,7 @@ class DaemonResilienceTests(unittest.TestCase):
                 states.append(dict(value))
             return save(target, value)
         with ExitStack() as stack:
-            stack.enter_context(patch('control.directory', return_value=self.controller))
+            stack.enter_context(patch('ato_workflow.control.directory', return_value=self.controller))
             stack.enter_context(patch('runner.process_identity', return_value='fixture-start'))
             stack.enter_context(patch('runner.save', side_effect=record))
             stack.enter_context(patch('recovery.signal.signal'))
@@ -102,8 +102,8 @@ class DaemonResilienceTests(unittest.TestCase):
 
     def test_status_and_summary_use_identity_fenced_liveness(self):
         runner.save(self.controller/'process.json', dict(pid=123, pid_identity='reused'))
-        with patch('control.directory', return_value=self.controller), patch('control.settings', return_value=None), \
-                patch('control.rows', return_value=[]), patch('recovery.alive', return_value=True), \
+        with patch('ato_workflow.control.directory', return_value=self.controller), patch('ato_workflow.control.settings', return_value=None), \
+                patch('ato_workflow.control.rows', return_value=[]), patch('recovery.alive', return_value=True), \
                 patch('runner.process_identity', return_value='current'):
             self.assertFalse(control.status()['process_alive'])
 
@@ -117,10 +117,10 @@ class DaemonResilienceTests(unittest.TestCase):
                 failed = True
                 raise OSError('temporary heartbeat IO failure')
             return save(target, value)
-        with patch('control.directory', return_value=self.controller), \
+        with patch('ato_workflow.control.directory', return_value=self.controller), \
                 patch('runner.save', side_effect=write), patch('runner.process_identity', return_value='fixture'), \
                 patch('recovery.signal.signal'), patch('recovery.time.sleep') as sleep, \
-                patch('control.tick', side_effect=[True, False]) as tick:
+                patch('ato_workflow.control.tick', side_effect=[True, False]) as tick:
             control.watch(interval=0)
         self.assertEqual(tick.call_count, 2)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [1])
@@ -152,7 +152,7 @@ class UnknownDeliveryRetryTests(unittest.TestCase):
             if calls == 1:
                 raise OSError('observation interrupted after unknown receipt')
             return calls < 3
-        with patch('session_router.send', side_effect=subprocess.TimeoutExpired('synthetic queue', 1)) as send, \
+        with patch('ato_workflow.session_router.send', side_effect=subprocess.TimeoutExpired('synthetic queue', 1)) as send, \
                 patch('recovery.tick', side_effect=tick), patch('recovery.signal.signal'), \
                 patch('recovery.time.sleep'), patch('runner.process_identity', return_value='fixture'):
             recovery.watch(self.d, interval=0)

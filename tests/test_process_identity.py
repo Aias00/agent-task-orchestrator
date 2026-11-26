@@ -12,11 +12,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-import ato_core
-import ato_process
-import ato_release_lib
-import hub_sandbox
-import pi_session_coordinator
+from ato_common import ato_core
+from ato_task import ato_process
+from ato_release import support as ato_release_lib
+from ato_review import hub_sandbox
+from ato_pi import pi_session_coordinator
 import recovery
 from scripts import release_snapshot as release
 

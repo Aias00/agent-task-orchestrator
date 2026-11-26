@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-import agents
+from ato_adapters import agents
 import runner
-import workflow
+from ato_workflow import workflow
 
 FAKE='''#!/usr/bin/env python3
 import json,sys,os,time
@@ -150,7 +150,7 @@ class AdapterTests(unittest.TestCase):
   with patch.dict(os.environ,CTASK_PI_BIN='/does-not-exist'):
    with self.assertRaises(ValueError):agents.executable('pi')
   d=self.create('pi');runtime=d/'checkpoints'
-  with patch('agents.Path.is_file',return_value=False):
+  with patch('ato_adapters.agents.Path.is_file',return_value=False):
    from argparse import Namespace
    with self.assertRaisesRegex(ValueError,'sandbox-exec'):
     agents.invoke(Namespace(directory=str(d),output=str(runtime/'a.json'),sandbox='workspace-write'))

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import sys
 
-import pi_toolchain as policy
+from ato_pi import pi_toolchain as policy
 
 
 def tools_fixture(base):

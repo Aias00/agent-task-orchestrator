@@ -3,7 +3,7 @@ import argparse
 import json
 import sys
 
-from ato_task_store import TaskError, _identifier, result_envelope
+from ato_task.ato_task_store import TaskError, _identifier, result_envelope
 
 
 class Parser(argparse.ArgumentParser):
@@ -93,7 +93,7 @@ def main(argv=None, *, application=None):
             if hasattr(args, field + "_id"):
                 _identifier(getattr(args, field + "_id"), field)
         if application is None:
-            from ato_application import Application
+            from ato_task.ato_application import Application
             application = Application()
         data = application.dispatch(args)
         result, code = result_envelope(data=data), 0
