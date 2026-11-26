@@ -17,7 +17,12 @@ operations.
    configuration even when AGY inherited a Codex thread ID. Use the Task ID
    for status updates in AGY.
 2. Read `ato status TASK_ID` to check execution, independent checks, pending
-   decisions and the next action. Use `ato list --repo PATH` for the project.
+   decisions and the next action. Its `completion_notification` shows the
+   submission source, whether its session was verified at submission (null
+   when no origin was recorded), and the visible delivery state. AGY reports
+   `unsupported`; an unverified Codex origin reports `unbound`.
+   `no_delivery_record` means no task completion notice is visible yet.
+   `delivery_unknown` means delivery could not be confirmed. Use `ato list --repo PATH` for the project.
 3. Use `ato inbox` from the verified interaction endpoint. Relay the actual
    request to the user. The enrolled user records their decision using
    `ato answer REQUEST_ID --answer TEXT`.

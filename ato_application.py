@@ -79,7 +79,10 @@ class Application:
         if operation == "list":
             return host.store.list_tasks(proof, getattr(args, "repo", None))
         if operation == "status":
-            return api.task_status(proof, args.task_id)
+            status = api.task_status(proof, args.task_id)
+            origin = host.store.submission_origin(args.task_id)
+            status["completion_notification"] = completion_notification(status, origin)
+            return status
         if operation == "stop":
             result = host.execution.request_stop(proof, args.task_id)
             return api.task_status(proof, result["task_id"])
@@ -208,6 +211,22 @@ def notification_policy(host, repo):
     return dict(mode=policy["mode"], configured=policy["configured"],
                 completion=policy.get("completion", "silent"), muted=muted,
                 disposition="recorded_only" if muted or not policy["configured"] else policy["mode"])
+
+
+def completion_notification(status, origin):
+    """Summarize only completion notices already visible to this caller."""
+    source = origin.kind if origin else "unknown"
+    verified = bool(origin.session_id) if origin else None
+    state = next((row["state"] for row in status["delivery"]
+                  if row["phase"] == "completion" and row["request_id"] is None), None)
+    if state is None:
+        if source == "agy":
+            state = "unsupported"
+        elif verified is False:
+            state = "unbound"
+        else:
+            state = "no_delivery_record"
+    return dict(source=source, session_verified_at_submission=verified, state=state)
 
 
 def system_status(host):

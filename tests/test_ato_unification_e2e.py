@@ -113,6 +113,17 @@ print(json.dumps(dict(type="thread.started", thread_id="private-fixture-review-s
 '''
 
 
+class CompletionNotificationSummary(unittest.TestCase):
+    def test_legacy_source_reports_only_task_completion_delivery(self):
+        rows = [dict(phase="question", request_id="q", state="queued"),
+                dict(phase="completion", request_id="q", state="failed")]
+        expected = dict(source="unknown", session_verified_at_submission=None, state="no_delivery_record")
+        self.assertEqual(ato_application.completion_notification({"delivery": rows}, None), expected)
+        rows.append(dict(phase="completion", request_id=None, state="delivered"))
+        expected["state"] = "delivered"
+        self.assertEqual(ato_application.completion_notification({"delivery": rows}, None), expected)
+
+
 class InstalledATO(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(TemporaryDirectory(prefix="ato-e2e-"))).resolve()
@@ -811,6 +822,10 @@ class InstalledATO(unittest.TestCase):
             self.assertEqual(ato_execution._worker_controller_args(self.store, task_ids[0]), ["inherited"])
             config.assert_called_once_with(self.store.native_home, sessions[0])
 
+        self.assertEqual(self.cli("status", task_ids[0])["completion_notification"], dict(
+            source="codex", session_verified_at_submission=True, state="no_delivery_record"))
+        self.assertEqual(list(self.host.folder.glob("acceptance-origin-*.json")), [])
+
         agy_tasks = []
         self.env["CODEX_THREAD_ID"] = sessions[0]
         for marker in ("ANTIGRAVITY_CONVERSATION_ID", "ATO_SUBMISSION_KIND"):
@@ -860,10 +875,17 @@ class InstalledATO(unittest.TestCase):
             result = self.cli("status", task_id)
             self.assertEqual(result["acceptance"]["disposition"], "not_recorded")
             self.assertEqual([row["state"] for row in result["delivery"]], ["delivery_unknown"])
+            self.assertEqual(result["completion_notification"], dict(
+                source="codex", session_verified_at_submission=True, state="delivery_unknown"))
         self.assertEqual(attempts[task_ids[0]][0][1]["target"], legacy["target"]["endpoint_id"])
         self.assertEqual(self.host.acceptance_notifications(), legacy)
         for task_id in [task_ids[2], *agy_tasks]:
-            self.assertEqual(self.cli("status", task_id)["delivery"], [])
+            result = self.cli("status", task_id)
+            self.assertEqual(result["delivery"], [])
+            agy = task_id in agy_tasks
+            self.assertEqual(result["completion_notification"], dict(
+                source="agy" if agy else "codex", session_verified_at_submission=False,
+                state="unsupported" if agy else "unbound"))
 
     def test_installed_host_enrollment_and_scoped_question_without_fixture_grants(self):
         self.install()
