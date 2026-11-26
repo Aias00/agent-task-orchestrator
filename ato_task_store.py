@@ -48,6 +48,7 @@ _ERRORS = {
         "BINDING_CHANGED": "The stored binding could not be verified.",
         "DECISION_CONFLICT": "A different decision is already recorded.",
         "PRODUCT_CHANGED": "The bound product changed.",
+        "GUARDRAIL_VIOLATION": "The product violated a declared specification guardrail.",
         "CHECKS_REQUIRED": "Current independent checks are required.",
         "LAUNCH_FAILED": "The run failed to start.",
         "CLEANUP_BLOCKED": "Execution cleanup could not be verified.",
@@ -596,13 +597,34 @@ class NormalizedSpec:
                     spec_sha256=self.spec_sha256)
 
 
+def _guardrails(raw):
+    fields = ("protected_paths", "forbid_delete_paths")
+    _fields(raw, (), fields, code="INVALID_SPEC")
+    result = {}
+    for key in fields:
+        paths = raw.get(key, [])
+        _require(isinstance(paths, list) and len(paths) <= 128, "INVALID_SPEC")
+        normalized = []
+        for path in paths:
+            _require(isinstance(path, str) and path.strip() and len(path.encode()) <= 1024
+                     and all(ord(c) >= 32 and ord(c) != 127 for c in path), "INVALID_SPEC")
+            path = path.removesuffix("/")
+            hub_contract.relative(path, maximum=1024)
+            _require(".git" not in path.split("/") and path != ".codex/tasks"
+                     and not path.startswith(".codex/tasks/"), "INVALID_SPEC")
+            normalized.append(path)
+        _require(len(set(normalized)) == len(normalized), "INVALID_SPEC")
+        result[key] = sorted(normalized)
+    return result
+
+
 def normalize_spec(repo, spec_file, *, home=None, native_homes=None):
     path, data = read_input_file(spec_file)
     value = _strict_json(data, "INVALID_JSON")
     _require("schema_version" in value and type(value["schema_version"]) is int, "INVALID_SPEC")
     _require(value["schema_version"] == 1, "UNSUPPORTED_VERSION")
     _fields(value, ("schema_version", "repo", "base_ref", "worker_contract"),
-            ("reviewer", "worktree"), code="INVALID_SPEC")
+            ("reviewer", "worktree", "guardrails"), code="INVALID_SPEC")
     repository = normalize_repository(repo)
     try:
         spec_repo = path.parent / _text(value["repo"], 4096)
@@ -623,6 +645,9 @@ def normalize_spec(repo, spec_file, *, home=None, native_homes=None):
         value.update(repo=repository.root, repo_key=repository.key, base_ref=base)
         value["worker_contract"] = _worker(value["worker_contract"])
         value["reviewer"] = _reviewer(value.get("reviewer"), root, base)
+        rules = value.pop("guardrails", None)
+        if rules is not None:
+            value["guardrails"] = _guardrails(rules)
         worktree = value.setdefault("worktree", {})
         _fields(worktree, (), ("shared_env_links",), code="INVALID_SPEC")
         names = worktree.setdefault("shared_env_links", [])

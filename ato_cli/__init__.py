@@ -54,6 +54,7 @@ def build_parser():
     project = command(daily, "project", "Repository and worktree operations.")
     project = project.add_subparsers(dest="subcommand", required=True)
     spec(command(project, "validate", "Preview a normalized specification."))
+    option(command(project, "diff", "Inspect repository changes for a task.", "task_id"), "stat", flag=True)
     command(project, "trace", "Read a bounded task timeline.", "task_id")
     option(command(project, "recheck", "Recheck the existing product.", "task_id"), "checks-only", flag=True)
     option(command(project, "cleanup", "Retain accepted changes and remove an eligible worktree.", "task_id"),

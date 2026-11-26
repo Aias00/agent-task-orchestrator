@@ -18,6 +18,7 @@ import ato_execution as execution
 import ato_execution_host
 import ato_config
 import ato_process
+import ato_product
 from ato_task_store import InitialBinding, SubmissionGrant, TaskError, TaskStore
 import recovery
 import transport
@@ -209,6 +210,27 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertEqual((Path(status["product"]["worktree"]) / "delivery.txt").read_text(), "implemented\n")
         self.assertFalse((self.repo / "delivery.txt").exists())
         self.assert_error("NOT_RESUMABLE", self.service.resume, self.actor, task)
+
+    def test_legacy_product_digest_and_frozen_guardrail_reverification(self):
+        task_id = self.create()
+        status = self.service.start(self.actor, task_id, foreground=True)
+        task = self.store.load_task(task_id)
+        spec = self.store.load_spec(task_id)
+        run, receipts = execution._current(self.store, task)
+        last = receipts[-1][1]
+        evidence = execution._evidence(self.store, task_id, last)
+        manifest = ato_product.measure(task)
+        self.assertEqual(status["product"]["product_id"],
+                         "product-" + ato_product._sha(ato_product.canonical_json(manifest)))
+        product = evidence["product"]
+        product.pop("diff_summary")
+        def verify(frozen):
+            return ato_product.read_delivery(self.store, task, run, last["generation"], frozen, evidence, 1)
+        self.assertEqual(verify(spec)[0], product)
+        rules = {"protected_paths": ["delivery.txt"], "forbid_delete_paths": []}
+        self.assert_error("GUARDRAIL_VIOLATION", verify, dict(spec, guardrails=rules))
+        product["diff_summary"] = {"base": "wrong"}
+        self.assert_error("STATE_CORRUPT", verify, spec)
 
     def test_green_shared_check_still_executes_every_declared_stage(self):
         task = self.create(followup=True)

@@ -36,7 +36,7 @@ release machinery outside this table is host code.
 
 | Group | Exact operations |
 | --- | --- |
-| `project` | `validate --repo PATH --spec FILE` validates and previews the normalized repository, base commit and structural digest without creating state. `trace TASK_ID` returns bounded, redacted execution and delivery summaries. `recheck TASK_ID [--checks-only]` performs a foreground technical recheck of the already bound product under existing execution fences. `cleanup TASK_ID --confirm` retains the verified product of a completed Task on its branch and removes the eligible worktree. A stopped Task requires a clean worktree. |
+| `project` | `validate --repo PATH --spec FILE` validates and previews the normalized repository, base commit and structural digest without creating state. `diff TASK_ID [--stat]` inspects changes against the frozen base before or after cleanup. Patch output is limited to 256 KiB. `trace TASK_ID` returns bounded, redacted execution and delivery summaries. `recheck TASK_ID [--checks-only]` performs a foreground technical recheck of the already bound product under existing execution fences. `cleanup TASK_ID --confirm` retains the verified product of a completed Task on its branch and removes the eligible worktree. A stopped Task requires a clean worktree. |
 | `agent` | `doctor [--probe-versions]` returns installed Worker, Reviewer and session capabilities. The optional probe checks versions locally under a read-only sandbox. It reports probe evidence and readiness separately from real-provider qualification. `binding TASK_ID` returns the scoped controller, interaction, Reviewer and actual Run owner summary. `handoff TASK_ID --to SESSION_REF [--interaction SESSION_REF] --evidence FILE` performs the binding transition below. `reviewer TASK_ID --kind KIND [--model MODEL] [--effort EFFORT] --evidence FILE` selects a permitted Reviewer for subsequent technical review. `ask TASK_ID --kind KIND --question TEXT --reason REASON [--continuation OP] [--purpose-ref REF]` records a canonical request under the current controller's scoped grant. |
 | `system` | `status` reports schema and release, observer identity, health and transport readiness, mailbox state, and the namespace's `advisory` or `enforced` time policy. `notification-policy [--repo PATH]` reports effective policy and its disposition for the optional repository. Both are read-only and redact private locators. |
 
@@ -122,7 +122,7 @@ as well.
 | 0 | Operation succeeded or repeated an identical authorized decision. For foreground `run`, settled successfully in `completed`. A recorded STOP or human answer can return 0 with unresolved cleanup or delivery explicitly represented in its result. |
 | 2 | Invalid invocation or data. `USAGE`, `INVALID_ID`, `INVALID_REPO`, `INVALID_JSON`, `UNSUPPORTED_VERSION`, `INVALID_SPEC`, `INVALID_EVIDENCE`, `UNSUPPORTED_CAPABILITY`. |
 | 3 | `AUTH_REQUIRED` for missing/invalid credentials, `NOT_FOUND` for absent or out-of-scope IDs, `FORBIDDEN` for a visible object and an unauthorized action. |
-| 4 | Valid operation cannot proceed or its foreground work reached a non-success boundary. `BUSY`, `NOT_RESUMABLE`, `STOPPED`, `STALE_REQUEST`, `BINDING_CHANGED`, `DECISION_CONFLICT`, `PRODUCT_CHANGED`, `CHECKS_REQUIRED`, `LAUNCH_FAILED`, `CLEANUP_BLOCKED`, `DELIVERY_UNKNOWN`, `RUN_UNSETTLED`. |
+| 4 | Valid operation cannot proceed or its foreground work reached a non-success boundary. `BUSY`, `NOT_RESUMABLE`, `STOPPED`, `STALE_REQUEST`, `BINDING_CHANGED`, `DECISION_CONFLICT`, `PRODUCT_CHANGED`, `GUARDRAIL_VIOLATION`, `CHECKS_REQUIRED`, `LAUNCH_FAILED`, `CLEANUP_BLOCKED`, `DELIVERY_UNKNOWN`, `RUN_UNSETTLED`. |
 | 5 | `STATE_CORRUPT`, `SPEC_CHANGED`, `RUNTIME_MISMATCH`, `INTERNAL_ERROR`. Reconciliation requires reliable evidence. |
 
 Use a stable action/reason code alongside any more specific kernel status.
@@ -149,6 +149,7 @@ No added parser or schema dependencies.
 | `schema_version` | Required integer `1`. |
 | `repo` | Required path, matched by canonical Git identity to `--repo`. Freeze the primary worktree path and Git common directory. |
 | `base_ref` | Required nonblank Git ref/commit selector, at most 255 bytes, without leading option characters, control characters or shell expansion. Resolve locally to exactly one full Git commit at admission. Use the full commit for every later base comparison and worktree creation. |
+| `guardrails` | Optional lists `protected_paths` (any change) and `forbid_delete_paths` (deletions only) match a path or its descendants. Omitted or null imposes no restriction and preserves the existing spec digest. |
 | `worker_contract` | Required Workflow object. Required nonblank `objective`, `scope`, `authorization` (bounded to 8 KiB each) and `acceptance`. `authorization` is descriptive. The trusted submission separately binds verified authorization for the proposed operation. Optional `agent`, `sandbox`, `permissions`, `execution_policy`, `host_handoff`, `budget`, `stages`, `limits`, `memory` use the existing schemas. `memory` defaults to false and must be false in the isolated lane. The Codex Worker uses the submitting controller configuration. |
 | `reviewer` | Omitted or null disables technical review. Otherwise require `agent: {kind, model?, effort?}`. Optional `allowed_kinds` defaults to that kind alone and must include it. `session_mode` accepts `fresh_only` (default), `resume_if_supported` or `require_resume`. `max_review_rounds` defaults to 1 (1–20), `timeout_seconds` to 300 (1–3600), `checklist` and `design_docs` to empty lists (each at most 128). Use H1 agent/model/effort and text validation. Freeze each permitted design-doc path and digest from the base, with no symlink or outside reference. Ordinary ATO completion does not invoke the Reviewer. |
 | `worktree` | Optional object with only `shared_env_links` (default empty, unique names). Worktree parent is host-selected, defaulting to the primary repo's parent. A generated branch under `ato/TASK_ID` and the generated external worktree path are reserved for that Task. Callers cannot select a branch, reuse a worktree or choose an executable via the spec. |
@@ -206,7 +207,7 @@ metadata only.
 The owner of the private ATO state can use the sealed local CLI to submit and
 manage Tasks in that state root without a proof file. This applies to `run`, `list`,
 `status`, `stop`, `resume`, `accept`, `project trace`, `project recheck`,
-`project cleanup` and `agent binding`. Sessions under the same OS account
+`project diff`, `project cleanup` and `agent binding`. Sessions under the same OS account
 share the local operator identity. Each Task records the submitting local account,
 canonical repository and frozen spec digest. A caller with an explicit
 `ATO_ACTOR_FILE` uses that actor's scope.
@@ -406,7 +407,7 @@ lock needed for slow evidence or launch preparation.
 ### Task status and execution states
 
 `TaskSummary` has `task_id`, `repo`, `status`, `reason` and
-`updated_at`. `TaskStatus` adds `spec_sha256`, `execution`, `run_history`,
+`updated_at`. New products include `product.diff_summary` with exact change counts and bounded path lists. `TaskStatus` adds `spec_sha256`, `execution`, `run_history`,
 `stage`, `checks`, `review`, `product`, `acceptance`, `pending`, `delivery`,
 `worktree_state` and `next_step`. Unknown optional scalar fields are null.
 Empty collections are arrays. `reason` and `next_step` are code-owned, and

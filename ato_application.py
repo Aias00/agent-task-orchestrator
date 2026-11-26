@@ -33,7 +33,7 @@ class Application:
         operation = args.operation
         subcommand = getattr(args, "subcommand", None)
         read_only = (operation in {"status", "list", "inbox", "system"}
-                     or subcommand in {"validate", "trace", "doctor", "binding"})
+                     or subcommand in {"validate", "trace", "diff", "doctor", "binding"})
         seal = runtime_seal(required=not read_only)
         host = Host(seal=seal, read_only=read_only).compose(render_notice=render_notice)
         if read_only:
@@ -61,6 +61,8 @@ class Application:
             return doctor(host, probe_versions=getattr(args, "probe_versions", False))
         actor_operation = {"run": "initial", "list": "observe", "status": "observe"}.get(
             operation, subcommand or operation)
+        if operation == "project" and subcommand == "diff":
+            actor_operation = "observe"
         proof = host.caller(actor_operation)
         if operation == "answer":
             principal = host.store._principal(proof)
@@ -91,6 +93,8 @@ class Application:
         if operation == "accept":
             return api.accept_product(proof, args.task_id, getattr(args, "evidence", None))
         if operation == "project":
+            if subcommand == "diff":
+                return project_diff(host, proof, args.task_id, stat_only=getattr(args, "stat", False))
             if subcommand == "trace":
                 result = api.task_status(proof, args.task_id, trace=True)
                 return {key: result[key] for key in ("task_id", "status", "execution", "stage",
@@ -155,12 +159,32 @@ class Application:
         status = self.host.interaction.task_status(proof, task_id)
         if status["status"] == "completed":
             return status
+        if status["status"] == "blocked" and status.get("reason") == "GUARDRAIL_VIOLATION":
+            raise TaskError("GUARDRAIL_VIOLATION", task_id)
         code = {
             "stopped": "STOPPED",
             "cleanup_blocked": "CLEANUP_BLOCKED",
             "delivery_unknown": "DELIVERY_UNKNOWN",
         }.get(status["status"], "RUN_UNSETTLED")
         raise TaskError(code, task_id)
+
+
+def project_diff(host, proof, task_id, *, stat_only=False):
+    status = host.interaction.task_status(proof, task_id)
+    task = host.store.load_task(task_id)
+    result = dict(task_id=task_id, status=status["status"], base=None, branch=None, worktree_state=None,
+                  summary=None, files=[], patch=None, patch_truncated=False)
+    worktree = task["worktree"]
+    if worktree is None:
+        return result
+    if task["worktree_removed"]:
+        host.store._repo_matches(task)
+    else:
+        host.store._verify_worktree(task)
+    result.update(base=worktree["base_commit"], branch=worktree["branch"],
+                  worktree_state="removed" if task["worktree_removed"] else "present")
+    result.update(ato_product.collect_diff(task, include_patch=not stat_only))
+    return result
 
 
 def notification_policy(host, repo):

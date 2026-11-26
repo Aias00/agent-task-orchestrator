@@ -6,6 +6,8 @@ checks, human questions and delivery. A Task completes when its independent
 checks and any required technical review pass. Users can record approval
 separately.
 
+Specs can optionally protect paths or forbid deletions with `guardrails`.
+
 ## Quick start
 
 Install from a qualified snapshot using its interpreter. Choose an executable
@@ -50,6 +52,7 @@ Write a JSON spec next to the repository or use an absolute `repo` path.
 ato project validate --repo "$REPO" --spec "$SPEC"
 ato run --repo "$REPO" --spec "$SPEC"
 ato status "$TASK_ID"
+ato project diff "$TASK_ID" --stat
 ato list --repo "$REPO"
 ```
 

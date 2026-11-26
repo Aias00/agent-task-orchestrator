@@ -34,8 +34,8 @@ def text(value, maximum=8192):
     return value
 
 
-def relative(value):
-    text(value, 512)
+def relative(value, *, maximum=512):
+    text(value, maximum)
     require(not value.startswith(('/', '\\', '-')) and '\\' not in value
             and all(p not in ('', '.', '..') for p in value.split('/')))
     return value

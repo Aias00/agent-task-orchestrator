@@ -35,7 +35,7 @@ _RETRYABLE = {"stopped", "blocked", "failed", "launch_failed"}
 _STARTUP_SECONDS = 12
 _CONFIRMED_BLOCKERS = {
     "BINDING_CHANGED", "PRODUCT_CHANGED", "REVIEW_DIFF_BOUND_EXCEEDED",
-    "UNSAFE_REVIEW_FILE", "INTEGRITY_BOUND_EXCEEDED", "INVALID_REVIEW_PROMPT",
+    "GUARDRAIL_VIOLATION", "UNSAFE_REVIEW_FILE", "INTEGRITY_BOUND_EXCEEDED", "INVALID_REVIEW_PROMPT",
 }
 
 
@@ -478,7 +478,7 @@ class ExecutionService:
     def _project(self, task, spec, history, generation, status):
         self._project_execution(task, spec, history, generation, status)
         local = self.hooks.local_acceptance(task)
-        if local is not None:
+        if local is not None and status["reason"] != "GUARDRAIL_VIOLATION":
             acceptance, historical_close = local
             if historical_close or status["acceptance"]["disposition"] not in {"recorded", "invalidated"}:
                 status["acceptance"] = acceptance
@@ -550,6 +550,10 @@ class ExecutionService:
                 status["checks"] = data["checks"]
             status.update(status="blocked", reason="STAGES_INCOMPLETE", next_step="RESUME_MISSING_STAGES")
             return
+        if phase == "settled" and data.get("reason") == "GUARDRAIL_VIOLATION" and not execution["stop_requested"]:
+            status.update(status="blocked", reason=data["reason"], next_step="REVIEW_GUARDRAIL_VIOLATION",
+                          guardrail_violations=data.get("guardrail_violations", []), checks=data.get("checks", []))
+            return
         decision = (self.hooks.decision_status(task, binding)
                     if not delivered and not execution["stop_requested"] else None)
         if decision:
@@ -570,9 +574,10 @@ class ExecutionService:
             status["product"], status["checks"], status["review"] = ato_product.read_delivery(
                 self.store, task, run, last["generation"], spec, data, binding["review_revision"])
         except TaskError as exc:
-            if exc.code not in {"PRODUCT_CHANGED", "CHECKS_REQUIRED"}:
+            if exc.code not in {"PRODUCT_CHANGED", "CHECKS_REQUIRED", "GUARDRAIL_VIOLATION"}:
                 raise
-            status.update(status="blocked", reason=exc.code, next_step="RECHECK_PRODUCT")
+            status.update(status="blocked", reason=exc.code, next_step=(
+                "REVIEW_GUARDRAIL_VIOLATION" if exc.code == "GUARDRAIL_VIOLATION" else "RECHECK_PRODUCT"))
             status["acceptance"]["disposition"] = "invalidated"
             return
         status.update(status="completed", reason=data.get("reason") if data.get("advisory_checks") else None,
@@ -918,6 +923,7 @@ class _RunDriver:
         self.fingerprints = []
         self.reason = None
         self.product = None
+        self.guardrail_violations = []
         self.checks = []
         self.review = None
         self.retained_review = None
@@ -1195,9 +1201,14 @@ class _RunDriver:
             # used for any following technical review.
             owner.check_total()
             manifest = ato_product.measure(self.task)
+            changes = None
+            if any((self.spec.get("guardrails") or {}).values()):
+                changes = ato_product.frozen_changes(self.task, manifest)
             self.product, self.checks = ato_product.retain_checks(
-                self.store, self.task, self.run, generation, owner.contract, owner.state["criteria"], manifest)
-            passed = all(row["state"] == "passed" for row in self.checks)
+                self.store, self.task, self.run, generation, owner.contract, owner.state["criteria"], manifest,
+                changes=changes)
+            self.guardrail_violations = ato_product.check_guardrails(self.task, self.spec, manifest, diff=changes)
+            passed = not self.guardrail_violations and all(row["state"] == "passed" for row in self.checks)
             owner.state["status"] = "needs_input" if passed else "blocked"
             return passed, generation
         except ato_core.Halt as halt:
@@ -1421,6 +1432,9 @@ class _RunDriver:
                     self.reason = "STAGES_INCOMPLETE"
                     return "blocked"
                 passed, generation = self._checks(owner, lease)
+                if self.guardrail_violations:
+                    self.reason = "GUARDRAIL_VIOLATION"
+                    return "blocked"
                 if self.host.advisory:
                     if recheck and self.previous_receipt["outcome"] not in DELIVERY_OUTCOMES and not all(
                             stage["status"] == "completed" for stage in owner.state["stages"]):
@@ -1523,6 +1537,8 @@ class _RunDriver:
                         review_rounds=self.review_rounds, fingerprints=self.fingerprints,
                         product=self.product, checks=self.checks, review=self.review,
                         owner_pid=self.pid, owner_birth=self.birth, kernel_fence=self.kernel_fence)
+        if self.guardrail_violations:
+            evidence["guardrail_violations"] = self.guardrail_violations
         if self.host.advisory and outcome == "completed":
             evidence["advisory_checks"] = True
         if evidence["cleanup_verified"]:

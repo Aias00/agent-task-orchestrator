@@ -114,6 +114,23 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_id, task_id)
         return caught.exception
 
+    def test_opt_in_guardrails_canonicalization_and_validation(self):
+        raw = self.spec_input()
+        legacy = self.normalized(value=raw)
+        self.assertNotIn("guardrails", legacy.document)
+        self.assertEqual(self.normalized(value=dict(raw, guardrails=None)).canonical, legacy.canonical)
+        self.assertEqual(self.normalized(value=dict(raw, guardrails={})).document["guardrails"],
+                         {"protected_paths": [], "forbid_delete_paths": []})
+        rules = {"protected_paths": ["tests/"]}
+        self.assertEqual(self.normalized(value=dict(raw, guardrails=rules)).document["guardrails"]["protected_paths"],
+                         ["tests"])
+        for value in ([], {"unknown": []}, {"protected_paths": "tests"},
+                      *({"protected_paths": paths} for paths in ([1], [" "], ["../src"], ["/repo"], [".git"],
+                        [".codex/tasks/x"], ["a\\b"], ["a//b"], ["x\n"], ["x\x7f"], ["x"*1025],
+                        ["x", "x/"], ["x"]*129))):
+            with self.subTest(value=value):
+                self.assert_code("INVALID_SPEC", self.normalized, value=dict(raw, guardrails=value))
+
     def root_snapshot(self):
         items = {}
         for path in self.root.rglob("*"):

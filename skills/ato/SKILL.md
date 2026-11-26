@@ -36,3 +36,15 @@ For scoped operations, select the enrolled actor's proof via `ATO_ACTOR_FILE`.
 Keep the file outside the specification, worktree and conversation.
 Use `ato agent binding TASK_ID`
 to check the current controller, interaction endpoint, reviewer and Run owner.
+
+## Deletion, refactoring and merge review
+
+Specify both deletion targets and retained boundaries. Encode required behavior in
+frozen acceptance checks. For explicit path protection, use optional spec
+`guardrails.protected_paths` or `guardrails.forbid_delete_paths`.
+
+Before reporting completion or merging, inspect `product.diff_summary` or run
+`ato project diff TASK_ID --stat`. Check `files_deleted`, `tests_deleted` and
+`tests_modified` against the requested scope. Inspect the full diff where needed.
+Disclose any merge decision that changes the verified product, including files
+restored or dropped, and rerun the frozen checks on the merged result.

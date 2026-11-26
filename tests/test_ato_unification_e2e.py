@@ -61,6 +61,8 @@ assert sys.stdin.read()
 native = Path(os.environ["CODEX_HOME"])
 mode = (native / "mode").read_text()
 target = Path("delivery.txt")
+if mode == "delete":
+    Path("source.txt").unlink()
 if mode != "clean":
     target.write_text((target.read_text() if target.exists() else "") + "fixture output\n")
 with (native / "attempts").open("a") as log:
@@ -485,12 +487,18 @@ class InstalledATO(unittest.TestCase):
         cleaned = self.cli("project", "cleanup", task_id, "--confirm")
         self.assertEqual((cleaned["status"], cleaned["worktree_state"]), ("completed", "removed"))
         self.assertEqual(cleaned["product"], result["product"])
+        diff = self.cli("project", "diff", task_id)
+        self.assertEqual(diff["worktree_state"], "removed")
+        self.assertEqual(diff["summary"], result["product"]["diff_summary"])
+        self.assertIn("+fixture output", diff["patch"])
         self.assertFalse(worktree.exists())
         self.assertEqual(git(repo, "show", "-s", "--format=%an <%ae>", branch), "ATO Host <ato-host@local>")
         self.assertEqual(git(repo, "ls-tree", "-r", "--name-only", branch), "delivery.txt\nsource.txt")
         self.assertEqual(git(repo, "show", branch + ":delivery.txt"), "fixture output")
         self.assertEqual(git(repo, "status", "--porcelain"), "")
         self.assertEqual(self.cli("project", "cleanup", task_id, "--confirm"), cleaned)
+        git(repo, "branch", "-D", branch)
+        self.cli("project", "diff", task_id, error=(4, "BINDING_CHANGED"))
 
     def test_fixup_installed_run_can_start_after_optional_node_digest_changes(self):
         node = write(self.root, "node", "#!/bin/sh\nexit 0\n", 0o700)
@@ -1192,6 +1200,71 @@ class InstalledATO(unittest.TestCase):
         stopped = self.wait_for(lambda: self.cli("status", first), lambda status: status["status"] == "stopped")
         self.assertTrue(stopped["execution"]["verified"])
         self.running.pop(first)
+
+    def test_project_diff_readonly_visibility_and_parsing(self):
+        self.install()
+        missing = "task-" + "0"*32
+        self.cli("project", "diff", missing, error=(3, "NOT_FOUND"))
+        self.cli("project", "diff", "bad-id", error=(2, "INVALID_ID"))
+        self.cli("project", "diff", missing, "--stat", "--stat", error=(2, "USAGE"))
+        self.assertFalse(self.store.root.exists())
+        self.profile(via_setup=True)
+        repo, spec, bootstrap = self.submission("diff scoped fixture", "1", "2", via_setup=True)
+        work = self.cli("run", "--repo", repo, "--spec", spec, "--foreground", actor=bootstrap)
+        task = work["task_id"]
+        proof = self.host_setup("scope", task, "--role", "user")["proof"]
+        stat = self.cli("project", "diff", task, "--stat", actor=proof)
+        self.assertEqual(stat["summary"], work["product"]["diff_summary"])
+        self.assertEqual((stat["patch"], stat["patch_truncated"]), (None, False))
+        self.assertIn("+fixture output", self.cli("project", "diff", task)["patch"])
+        self.cli("project", "diff", missing, actor=proof, error=(3, "NOT_FOUND"))
+        other_repo, other_spec, _ = self.task_spec("other diff fixture")
+        other = self.cli("run", "--repo", other_repo, "--spec", other_spec, "--foreground")
+        self.cli("project", "diff", other["task_id"], actor=proof, error=(3, "NOT_FOUND"))
+
+    def test_declared_guardrails_block_advisory_settlement_and_recheck(self):
+        self.install()
+        self.profile(mode="delete")
+        repo, path, _ = self.task_spec("opt-in deletion")
+        value = json.loads(path.read_text())
+        value["worker_contract"]["acceptance"][0]["checks"] = [["true"]]
+        for rules, expected in ((None, None), ({"forbid_delete_paths": ["delivery.txt"]}, None),
+                                ({"forbid_delete_paths": ["source.txt"]}, "deleted"),
+                                ({"protected_paths": ["delivery.txt"]}, "added")):
+            with self.subTest(rules=rules):
+                path.write_text(json.dumps(dict(value, guardrails=rules)))
+                args = ("run", "--repo", repo, "--spec", path, "--foreground")
+                if expected is None:
+                    result = self.cli(*args)
+                    self.assertEqual(result["status"], "completed")
+                    self.assertEqual(result["product"]["diff_summary"]["files_deleted"], ["source.txt"])
+                    continue
+                task = self.cli(*args, error=(4, "GUARDRAIL_VIOLATION"))["task_id"]
+                status = self.cli("status", task)
+                self.assertEqual(status["run_history"][-1]["phase"], "settled")
+                self.assertEqual((status["status"], status["reason"], status["next_step"]),
+                                 ("blocked", "GUARDRAIL_VIOLATION", "REVIEW_GUARDRAIL_VIOLATION"))
+                self.assertEqual(status["guardrail_violations"][0]["change"], expected)
+                self.assertEqual(status["checks"][0]["state"], "passed")
+                self.cli("project", "recheck", task, error=(4, "GUARDRAIL_VIOLATION"))
+
+    def test_existing_file_edit_passes_delete_only_rule_and_blocks_protected_rule(self):
+        self.install()
+        self.profile()
+        repo, path, _ = self.task_spec("opt-in modifications")
+        write(repo, "delivery.txt", "existing content\n")
+        git(repo, "add", "delivery.txt")
+        git(repo, "commit", "-qm", "track delivery")
+        value = json.loads(path.read_text())
+        run = ("run", "--repo", repo, "--spec", path, "--foreground")
+        for rule in ("forbid_delete_paths", "protected_paths"):
+            path.write_text(json.dumps(dict(value, guardrails={rule: ["delivery.txt"]})))
+            if rule == "protected_paths":
+                result = self.cli(*run, error=(4, "GUARDRAIL_VIOLATION"))
+                violations = self.cli("status", result["task_id"])["guardrail_violations"]
+                self.assertEqual(violations, [dict(rule=rule, path="delivery.txt", change="modified")])
+            else:
+                self.assertEqual(self.cli(*run)["product"]["diff_summary"]["files_modified"], ["delivery.txt"])
 
     def test_failed_independent_check_is_retained_after_worker_completion(self):
         self.install()

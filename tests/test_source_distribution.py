@@ -18,6 +18,10 @@ class SourceDistributionTests(unittest.TestCase):
         self.assertFalse(data['project'].get('scripts'))
         skills = [path for name, paths in setuptools['data-files'].items() if '/skills/' in name for path in paths]
         self.assertEqual(skills, ['skills/ato/SKILL.md'])
+        guide = (ROOT / skills[0]).read_text()
+        self.assertNotRegex(guide, r"/(?:Users|Volumes)/")
+        for term in ("protected_paths", "forbid_delete_paths", "files_deleted", "tests_deleted", "tests_modified"):
+            self.assertIn(term, guide)
 
     def test_batch4_distribution_contains_release_and_native_support_files(self):
         data = tomllib.loads((ROOT/'pyproject.toml').read_text())['tool']['setuptools']
