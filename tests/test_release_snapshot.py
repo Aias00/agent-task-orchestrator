@@ -628,6 +628,7 @@ class StageTests(unittest.TestCase):
         with patch.object(release,'install_dependencies',side_effect=self.install),patch.object(release,'qualify') as qualify:
             result=release.stage(self.repo,self.commit,self.dest)
         self.assertFalse(result['activated'])
+        self.assertEqual(result['tests'], 'not_run')
         self.assertEqual(result['tree'],self.tree)
         qualify.assert_called_once()
         self.assertEqual(qualify.call_args.args[0],self.dest)
@@ -665,6 +666,7 @@ class StageTests(unittest.TestCase):
                 logs=root/'.release-logs';logs.mkdir(exist_ok=True)
                 (logs/'tests.log').write_text('Ran 11 tests in 0.1s\n\nOK\n')
         with patch.object(release,'run_logged',side_effect=logged) as run:
+            release.run_release_tests(self.repo,{})
             release.qualify(self.repo,{})
         self.assertEqual([call.args[3] for call in run.call_args_list],['tests','architecture','compile'])
         self.assertIn('ato.py',run.call_args_list[-1].args[0])
@@ -672,7 +674,15 @@ class StageTests(unittest.TestCase):
             logged(argv,root,env,name)
             if name=='tests':(root/'.release-logs/tests.log').write_text('Ran 11 tests in 0.1s\n\nOK (skipped=1)\n')
         with patch.object(release,'run_logged',side_effect=skipped),self.assertRaisesRegex(release.Refused,'clean full-test receipt'):
-            release.qualify(self.repo,{})
+            release.run_release_tests(self.repo,{})
+
+    def test_stage_records_explicit_test_run(self):
+        with patch.object(release, 'install_dependencies', side_effect=self.install), patch.object(
+                release, 'run_release_tests') as suite, patch.object(release, 'qualify'):
+            result = release.stage(self.repo, self.commit, self.dest, run_tests=True)
+        suite.assert_called_once()
+        self.assertEqual(result['tests'], 'passed')
+        self.assertEqual(release.verify_snapshot(self.dest, self.commit)['tests'], 'passed')
 
 
 class DependencyToolTests(unittest.TestCase):

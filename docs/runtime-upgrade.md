@@ -12,12 +12,14 @@ python3.12 scripts/release_snapshot.py --stage \
 ```
 
 Stage uses a Git archive and verifies the tree before qualification. It then
-installs from the local caches with offline flags, runs the full fixture
-suite, checks the dependency graph and compiles the tracked Python sources.
+installs from the local caches with offline flags, checks the dependency graph
+and compiles the tracked Python sources. Add `--run-tests` to `--stage` to run
+the full offline fixture suite before sealing. The manifest records `tests` as
+`not_run` by default or `passed` after a successful requested test run.
 It records hashes, modes, links, log and interpreter inventory in the
 read-only snapshot. Stage keeps failed evidence without marking it qualified.
 A separately supplied `--node-bin` and `--npm-bin` select exact trusted
-tools. This qualifies the local fixture behavior.
+tools. Fixture results apply to releases staged with `--run-tests`.
 
 For a fresh target, use the snapshot's `scripts/install.py`. It installs
 the single `ato` executable and optionally the Skill. A different executable

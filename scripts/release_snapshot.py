@@ -225,7 +225,7 @@ def install_dependencies(root, env):
     return tools
 
 
-def qualify(root, env):
+def run_release_tests(root, env):
     python = root/'.venv/bin/python'
     run_logged([python, 'scripts/run_tests.py'], root, env, 'tests')
     # The shipped test runner rejects skips. Also require its explicit receipt.
@@ -233,13 +233,17 @@ def qualify(root, env):
     require(re.search(r'^Ran \d+ tests in [\d.]+s$', report, re.M) and
             re.search(r'^OK$', report, re.M) and not re.search(r'^(FAILED|FAIL:|ERROR:)', report, re.M),
             'missing clean full-test receipt')
+
+
+def qualify(root, env):
+    python = root/'.venv/bin/python'
     run_logged([python, 'scripts/check_architecture.py'], root, env, 'architecture')
     # Compile tracked Python sources, not third-party code or generated caches.
     sources = command(['git', 'ls-files', '-z'], cwd=root).split('\0')
     run_logged([python, '-m', 'py_compile', *[p for p in sources if p.endswith('.py')]], root, env, 'compile')
 
 
-def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, npm_cache=None):
+def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, npm_cache=None, run_tests=False):
     require(sys.version_info >= (3, 12), 'Python 3.12 or later is required')
     commit, tree = git_commit(repo, commit)
     require(not root.exists() and not root.is_symlink(), 'snapshot destination already exists; never reuse it')
@@ -272,6 +276,8 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
                 if value is not None:
                     env['ATO_RELEASE_'+name] = str(value)
             tools = install_dependencies(root, env)
+            if run_tests:
+                run_release_tests(root, env)
             qualify(root, env)
         require(all(sha(root/p) == digest for p, digest in source.items()), 'qualification modified source files')
         shutil.rmtree(root/'.git')
@@ -279,7 +285,7 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         # to write its final private manifest, then close it permanently.
         seal(root)
         root.chmod(0o700)
-        manifest = dict(version=1, surface=SURFACE, qualified=True, root=str(root), commit=commit, tree=tree,
+        manifest = dict(version=1, surface=SURFACE, qualified=True, tests="passed" if run_tests else "not_run", root=str(root), commit=commit, tree=tree,
                         source_files=source, files=inventory(root),
                         tools={k:v for k,v in (tools or {}).items() if k == 'node'},
                         build_tools=tools or {}, created_at=time.time())
@@ -287,7 +293,7 @@ def stage(repo, commit, root, *, node_bin=None, npm_bin=None, wheelhouse=None, n
         (root/MANIFEST).chmod(0o400)
         root.chmod(0o500)
         verify_snapshot(root, commit)
-        return dict(snapshot=str(root), commit=commit, tree=tree, qualified=True, activated=False)
+        return dict(snapshot=str(root), commit=commit, tree=tree, qualified=True, tests=manifest["tests"], activated=False)
     except BaseException:
         # Keep failed evidence; absence of a sealed qualified manifest prevents
         # activation. Never remove an operator-selected existing directory.
@@ -820,10 +826,14 @@ def main(argv=None):
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--legacy-context', action='store_true', help='Old CODEX_HOME-only layout')
     parser.add_argument('--commit', help='Full Git commit for stage, diagnosis or activation')
+    parser.add_argument('--run-tests', action='store_true', help='Run the full offline suite while staging')
     parser.add_argument('--allow-runtime-change', action='store_true')
     parser.add_argument('--converge-mixed-entrypoints', action='store_true')
     parser.add_argument('--allow-prior-interpreter-change', action='store_true')
     args = parser.parse_args(argv)
+
+    if args.run_tests and not args.stage:
+        parser.error('--run-tests requires --stage')
 
     def need(*names):
         for name in names:
@@ -846,7 +856,7 @@ def main(argv=None):
         if args.stage:
             need('wheelhouse', 'npm_cache')
             result = stage(args.repo, args.commit, args.snapshot, node_bin=args.node_bin, npm_bin=args.npm_bin,
-                           wheelhouse=args.wheelhouse, npm_cache=args.npm_cache)
+                           wheelhouse=args.wheelhouse, npm_cache=args.npm_cache, run_tests=args.run_tests)
         else:
             need('bin_dir', 'ato_home', 'codex_home')
             paths = scoped_paths(args.bin_dir, args.ato_home, args.codex_home, legacy_home=args.legacy_ato_home,
