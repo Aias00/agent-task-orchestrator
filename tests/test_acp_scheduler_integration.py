@@ -89,7 +89,9 @@ class ACPIntegrationTests(unittest.TestCase):
         self.assertIn('native_error', [e['kind'] for e in task_trace.query(directory)['events']])
 
     def test_cancel_timeout_no_replay(self):
-        directory = self.create('fixture-timeout', timeout=1, attempts=2)
+        # Leave time for the bridge and agent to start. The agent sleeps for
+        # 60 seconds after admitting the prompt, beyond this attempt deadline.
+        directory = self.create('fixture-timeout', timeout=5, attempts=2)
         self.cli('run', directory)
         self.assertNotEqual(runner.read(directory/'state.json')['status'], 'completed')
         self.assertEqual(len((self.repo/'fixture-admissions').read_text().splitlines()), 1)
