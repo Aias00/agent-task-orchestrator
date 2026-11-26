@@ -241,7 +241,13 @@ class Runner:
         if not self.plan['memory'] or not bm.exists():
             return
         # Operational evidence only. Do not promote worker guesses into global knowledge.
-        content = ('---\ntitle: Task run ' + self.state['id'] + '\ntype: checkpoint\nscope: project\nstatus: verified\nsource_project: ' + json.dumps(str(self.repo)) + '\n---\n\n'
+        observed_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        run_status = self.state['status']
+        title = f'Task run {self.state["id"]} · {run_status} · {observed_at}'
+        content = ('---\ntitle: ' + json.dumps(title, ensure_ascii=False)
+                   + '\ntype: checkpoint\nscope: project\nstatus: verified\nrun_status: ' + json.dumps(run_status)
+                   + '\nobserved_at: ' + json.dumps(observed_at) + '\nupdated_at: ' + json.dumps(observed_at[:10])
+                   + '\nsource_project: ' + json.dumps(str(self.repo)) + '\n---\n\n'
                    + self.plan['objective'] + '\n\nRun status: ' + self.state['status']
                    + '\nLocal evidence: ' + str(self.dir) + '\n\n'
                    + '\n'.join(f'- {k}: {v["status"]}; checks: {v.get("evidence", [])}' for k, v in self.state['tasks'].items())
