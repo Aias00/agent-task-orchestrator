@@ -13,6 +13,7 @@ import time
 from ato import config, process
 from ato.process import terminate_popen
 from ato.spec import TaskError, WORKER_RESULT_SCHEMA, require
+from ato.store import Store
 
 SENSITIVE_PATHS = (".git", ".codex", ".cursor", ".ato", ".pi", ".aws", ".ssh", ".env")
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
@@ -59,6 +60,9 @@ class ReviewRequest:
     timeout_seconds: int = 300
     stop_check: object = None
     on_child: object = None
+    store: Store | None = None
+    run_id: str | None = None
+    round_num: int = 1
 
 
 @dataclass(frozen=True)
@@ -214,6 +218,9 @@ def get_reviewer_runner(kind: str):
     if kind == "codex":
         from ato.adapters.codex import run_review
         return run_review
+    if kind == "codex_acpx":
+        from ato.adapters.acpx import run_review
+        return run_review
     if kind == "claude":
         from ato.adapters.claude import run_review
         return run_review
@@ -237,6 +244,8 @@ def doctor_all(*, probe_versions: bool = False) -> dict:
                 pass
         return info
 
+    from ato.adapters.acpx import host_configuration
+
     return {
         "worker": {
             "codex": _probe("codex"),
@@ -244,7 +253,9 @@ def doctor_all(*, probe_versions: bool = False) -> dict:
             "cursor": _probe("cursor"),
             "pi": _probe("pi"),
         },
-        "reviewer_kinds": ["codex", "claude", "agy"],
-        "reviewers": {k: _probe(k) for k in ("codex", "claude", "agy")},
+        "reviewer_kinds": ["codex", "claude", "agy", "codex_acpx"],
+        "reviewers": {**{k: _probe(k) for k in ("codex", "claude", "agy")},
+                      "codex_acpx": {"kind": "codex_acpx", "available": host_configuration() is not None,
+                                     "executable": None, "version": None}},
         "sandbox_available": SANDBOX_EXEC.is_file(),
     }

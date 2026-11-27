@@ -1,7 +1,8 @@
 """Single-source-of-truth SQLite WAL store for ATO v2."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -83,6 +84,22 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS acpx_reviews (
+  request_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  round INTEGER NOT NULL,
+  bridge_json TEXT NOT NULL,
+  launch_json TEXT,
+  dispatch_json TEXT,
+  receipt_json TEXT,
+  cleanup TEXT NOT NULL DEFAULT 'pending',
+  bridge_closed INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (run_id, round)
+);
+
+CREATE INDEX IF NOT EXISTS idx_acpx_reviews_task ON acpx_reviews(task_id);
+
 CREATE TABLE IF NOT EXISTS questions (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -159,6 +176,9 @@ CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
 """
 
 
+_ACPX_UNRESOLVED = "(bridge_closed = 0 OR (dispatch_json IS NOT NULL AND receipt_json IS NULL) OR json_extract(receipt_json, '$.delivery') = 'unknown')"
+
+
 def _is_busy(exc: sqlite3.Error) -> bool:
     code = (getattr(exc, "sqlite_errorcode", None) or 0) & 0xFF
     if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
@@ -227,9 +247,12 @@ class Store:
         _retry(op)
 
     @contextmanager
-    def tx(self, *, write: bool = True):
+    def tx(self, *, write: bool = True, admission: bool = False):
         con = self._connect(readonly=not write and self.db_file.exists())
         try:
+            if admission:
+                con.execute("PRAGMA synchronous = FULL")
+                con.execute("PRAGMA busy_timeout = 200")
             if write:
                 con.execute("BEGIN IMMEDIATE")
             yield con
@@ -325,22 +348,164 @@ class Store:
         return self.get_task(task_id)
 
     def create_run(self, task_id: str, kind: str, *, timeout_seconds: int | None = None,
-                   timeout_source: str | None = None) -> dict:
+                   timeout_source: str | None = None, expected_revision: int | None = None,
+                   owner: tuple[int, str] | None = None) -> dict:
         run_id = new_id("run")
         now = time.time()
         def op():
             with self.tx(write=True) as con:
+                if expected_revision is not None:
+                    task = con.execute("SELECT revision FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                    require(task is not None and task["revision"] == expected_revision, "BUSY", task_id)
+                    pending = con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                          (task_id,)).fetchone()
+                    require(pending is None, "CLEANUP_BLOCKED", task_id)
                 con.execute(
-                    """INSERT INTO runs(id, task_id, kind, phase, created_at, timeout_seconds, timeout_source)
-                       VALUES (?, ?, ?, 'launching', ?, ?, ?)""",
-                    (run_id, task_id, kind, now, timeout_seconds, timeout_source),
+                    """INSERT INTO runs(id, task_id, kind, phase, created_at, timeout_seconds, timeout_source, pid, pid_identity)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, task_id, kind, 'running' if owner else 'launching', now,
+                     timeout_seconds, timeout_source, *(owner or (None, None))),
                 )
-                con.execute(
-                    "UPDATE tasks SET active_run_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                    (run_id, now, task_id),
-                )
-        _retry(op)
+                state = ""
+                if kind == "resume":
+                    state = "stop_requested = 0, status = 'queued', reason = NULL,"
+                elif kind == "recheck" and owner:
+                    state = "stop_requested = 0, status = 'running', reason = NULL,"
+                con.execute(f"UPDATE tasks SET {state} active_run_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                            (run_id, now, task_id))
+        with self._worktree_lease(task_id) if expected_revision is not None else nullcontext():
+            _retry(op)
         return self.get_run(run_id)
+
+    @staticmethod
+    def _acpx_owner(con, task_id: str, run_id: str) -> bool:
+        from ato import process
+
+        row = con.execute("""SELECT r.pid, r.pid_identity FROM tasks t JOIN runs r ON r.id = t.active_run_id
+                             WHERE t.id = ? AND r.id = ? AND r.task_id = t.id
+                               AND t.stop_requested = 0 AND t.worktree_state = 'present' AND r.phase = 'running'""",
+                          (task_id, run_id)).fetchone()
+        return bool(row and row['pid'] == os.getpid() and row['pid_identity']
+                    and process.identity(row['pid']) == row['pid_identity'])
+
+    def begin_acpx_review(self, task_id: str, run_id: str, round_num: int, request_id: str, bridge: dict) -> bool:
+        with self.tx(admission=True) as con:
+            if not self._acpx_owner(con, task_id, run_id):
+                return False
+            if con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                           (task_id,)).fetchone():
+                return False
+            con.execute("INSERT INTO acpx_reviews(request_id, task_id, run_id, round, bridge_json) VALUES (?, ?, ?, ?, ?)",
+                        (request_id, task_id, run_id, round_num, json.dumps(bridge)))
+            return True
+
+    def record_acpx_launch(self, request_id: str, launch: dict) -> bool:
+        # Journal a verified child even if STOP already revoked dispatch authority.
+        with self.tx(admission=True) as con:
+            return con.execute("""UPDATE acpx_reviews SET launch_json = ?
+                                  WHERE request_id = ? AND launch_json IS NULL AND bridge_closed = 0""",
+                               (json.dumps(launch), request_id)).rowcount == 1
+
+    def authorize_acpx_dispatch(self, request_id: str, dispatch: dict, witnesses: dict[int, str]) -> bool:
+        with self.tx(admission=True) as con:
+            row = con.execute("SELECT * FROM acpx_reviews WHERE request_id = ?", (request_id,)).fetchone()
+            if (not row or row['bridge_closed'] or row['dispatch_json'] or not row['launch_json']
+                    or json.loads(row['launch_json'])['launch_id'] != dispatch['launch_id']
+                    or not self._acpx_owner(con, row['task_id'], row['run_id'])):
+                return False
+            launch = json.loads(row['launch_json'])
+            launch['witnesses'] = witnesses
+            con.execute("UPDATE acpx_reviews SET dispatch_json = ?, launch_json = ? WHERE request_id = ?",
+                        (json.dumps(dispatch), json.dumps(launch), request_id))
+            return True
+
+    def ack_acpx(self, request_id: str, record: str, send) -> bool:
+        # The prior commit is durable. Serialize the final nonblocking ACK with STOP.
+        with self.tx(admission=True) as con:
+            row = con.execute("SELECT * FROM acpx_reviews WHERE request_id = ?", (request_id,)).fetchone()
+            if (row and not row['bridge_closed'] and row[record] and row['cleanup'] == 'pending'
+                    and self._acpx_owner(con, row['task_id'], row['run_id'])):
+                send()
+                return True
+            return False
+
+    def record_acpx_receipt(self, request_id: str, receipt: dict) -> None:
+        with self.tx(admission=True) as con:
+            con.execute("UPDATE acpx_reviews SET receipt_json = ? WHERE request_id = ? AND receipt_json IS NULL",
+                        (json.dumps(receipt), request_id))
+
+    def record_acpx_cleanup(self, request_id: str, cleanup: str, *, bridge_closed: bool = False) -> None:
+        with self.tx(admission=True) as con:
+            con.execute("""UPDATE acpx_reviews SET cleanup = CASE
+                             WHEN cleanup IN ('verified_gone', 'no_process') THEN cleanup ELSE ? END,
+                             bridge_closed = MAX(bridge_closed, ?) WHERE request_id = ?""",
+                        (cleanup, bridge_closed, request_id))
+
+    def acpx_review(self, task_id: str, *, unresolved: bool = False) -> dict | None:
+        with self.tx(write=False) as con:
+            where = f"AND {_ACPX_UNRESOLVED}" if unresolved else ""
+            row = con.execute(f"SELECT * FROM acpx_reviews WHERE task_id = ? {where} ORDER BY rowid DESC LIMIT 1",
+                              (task_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        for field in ('bridge', 'launch', 'dispatch', 'receipt'):
+            raw = result.pop(field + '_json')
+            result[field] = json.loads(raw) if raw is not None else None
+        return result
+
+    def complete_acpx_run(self, task_id: str, run_id: str, product: dict, *,
+                          stage: dict | None = None, reason: str | None = None) -> bool:
+        now = time.time()
+        with self.tx() as con:
+            if not self._acpx_owner(con, task_id, run_id):
+                return False
+            require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+            con.execute("UPDATE runs SET phase = 'settled', outcome = 'completed', settled_at = ? WHERE id = ?",
+                        (now, run_id))
+            con.execute("""UPDATE tasks SET status = 'completed', reason = ?, product_json = ?,
+                             stage_json = COALESCE(?, stage_json), next_step = NULL,
+                             revision = revision + 1, updated_at = ? WHERE id = ?""",
+                        (reason, json.dumps(product, ensure_ascii=False),
+                         json.dumps(stage) if stage is not None else None, now, task_id))
+            return True
+
+    def settle_acpx_stop(self, task_id: str, run_id: str, blocker: str | None) -> None:
+        now = time.time()
+        status, reason = ("blocked", blocker) if blocker else ("stopped", "STOPPED")
+        with self.tx() as con:
+            row = con.execute("SELECT active_run_id, status, reason, stop_requested FROM tasks WHERE id = ?",
+                              (task_id,)).fetchone()
+            if row['active_run_id'] != run_id or not row['stop_requested'] or row['status'] == 'completed':
+                return
+            if row['reason'] == 'MUTATION_VIOLATION' or (row['status'], row['reason']) == (status, reason):
+                return
+            con.execute("UPDATE runs SET phase = 'settled', outcome = ?, error_code = ?, settled_at = ? WHERE id = ?",
+                        (status, reason, now, run_id))
+            con.execute("UPDATE tasks SET status = ?, reason = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                        (status, reason, now, task_id))
+
+    @contextmanager
+    def _worktree_lease(self, task_id: str):
+        require_id(task_id, "task")
+        path = config.ensure_private_dir(self.db_file.parent / "worktree-locks") / task_id
+        with path.open("ab") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise TaskError("BUSY", task_id) from None
+            yield
+
+    @contextmanager
+    def remove_worktree(self, task_id: str, expected_revision: int):
+        # Fence recovery Run claims through the commit and removal without holding the SQLite writer.
+        with self._worktree_lease(task_id):
+            task = self.get_task(task_id)
+            require(task['revision'] == expected_revision, "BUSY", task_id)
+            require(self.acpx_review(task_id, unresolved=True) is None, "CLEANUP_BLOCKED", task_id)
+            yield
+            self.update_task(task_id, worktree_state="removed", stage=None)
 
     def get_run(self, run_id: str) -> dict:
         def op():
@@ -351,17 +516,24 @@ class Store:
         return _retry(op)
 
     def _transition_running(self, task_id: str, run_id: str, pid: int,
-                            pid_identity: str | None, *, launching_only: bool) -> bool:
+                            pid_identity: str | None, *, launching_only: bool,
+                            match_owner: bool = False) -> bool:
         def op():
             with self.tx(write=True) as con:
                 phase = "phase = 'launching'" if launching_only else "phase != 'settled'"
                 status = "AND status = 'queued'" if launching_only else ""
+                owner = ""
+                params = (pid, pid_identity, run_id, task_id, task_id, run_id)
+                if match_owner:
+                    # An ACP dispatch is bound to the controller that owns the run.
+                    owner = "AND (phase = 'launching' OR (pid = ? AND (pid_identity IS NULL OR pid_identity = ?)))"
+                    params += (pid, pid_identity)
                 cur = con.execute(
                     f"""UPDATE runs SET phase = 'running', pid = ?, pid_identity = ?
                         WHERE id = ? AND task_id = ? AND {phase}
                         AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND stop_requested = 0
-                                    AND active_run_id = ? {status})""",
-                    (pid, pid_identity, run_id, task_id, task_id, run_id),
+                                    AND active_run_id = ? {status}) {owner}""",
+                    params,
                 )
                 if cur.rowcount != 1:
                     return False
@@ -376,8 +548,10 @@ class Store:
     def mark_run_running(self, task_id: str, run_id: str, pid: int, pid_identity: str | None) -> bool:
         return self._transition_running(task_id, run_id, pid, pid_identity, launching_only=True)
 
-    def claim_run_execution(self, task_id: str, run_id: str, pid: int, pid_identity: str | None) -> bool:
-        return self._transition_running(task_id, run_id, pid, pid_identity, launching_only=False)
+    def claim_run_execution(self, task_id: str, run_id: str, pid: int, pid_identity: str | None,
+                            *, match_owner: bool = False) -> bool:
+        return self._transition_running(task_id, run_id, pid, pid_identity,
+                                        launching_only=False, match_owner=match_owner)
 
     def update_run(self, run_id: str, **fields) -> dict:
         allowed = {"phase", "pid", "pid_identity", "child_pid", "child_pid_identity", "outcome", "error_code", "settled_at"}

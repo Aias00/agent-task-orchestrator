@@ -100,7 +100,7 @@ class CodexAndAdaptersTests(unittest.TestCase):
             self.assertFalse(base.has_secret({"text": "clean"}, secrets))
 
             doc = base.doctor_all(probe_versions=False)
-            self.assertEqual(set(doc["reviewer_kinds"]), {"codex", "claude", "agy"})
+            self.assertEqual(set(doc["reviewer_kinds"]), {"codex", "claude", "agy", "codex_acpx"})
             self.assertIn("pi", doc["worker"])
             self.assertNotIn("acp_pi", doc["worker"])
 

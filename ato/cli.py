@@ -198,6 +198,9 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
             if effort:
                 agent_cfg["effort"] = effort
             existing = dict(task.get("reviewer") or {"session_mode": "fresh_only", "max_review_rounds": 1, "timeout_seconds": 300, "checklist": [], "design_docs": []})
+            if args.kind == "codex_acpx":
+                require(existing["session_mode"] == "fresh_only" and set(agent_cfg) == {"kind"}, "INVALID_SPEC",
+                        detail="codex_acpx requires fresh_only with the host launcher defaults.")
             existing["agent"] = agent_cfg
             existing["allowed_kinds"] = sorted(set(existing.get("allowed_kinds") or []) | {args.kind})
             st.update_task(args.task_id, reviewer=existing)

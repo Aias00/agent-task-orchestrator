@@ -7,7 +7,7 @@
 | `ato run --repo PATH --spec FILE [--foreground]` | Submit a task into a new isolated Git worktree |
 | `ato list [--repo PATH]` | List tasks (optionally filtered by repository) |
 | `ato status TASK_ID` | Inspect task state, execution, checks, review, product, notifications, and watchdog |
-| `ato stop TASK_ID` | Durably request STOP and terminate live worker process group |
+| `ato stop TASK_ID` | Durably request STOP and verify owned execution cleanup |
 | `ato resume TASK_ID [--foreground] [--timeout-seconds SECONDS]` | Continue a `stopped`, `blocked`, or answered `waiting_input` task |
 | `ato inbox` | List open human questions across tasks |
 | `ato answer REQUEST_ID --answer TEXT` | Record a user reply to an open question |
@@ -19,7 +19,7 @@
 | `ato project cleanup TASK_ID --confirm` | Retain product commit on branch and remove worktree |
 | `ato agent doctor [--probe-versions]` | Inspect local Codex, Claude, Cursor, AGY, and Pi CLI availability |
 | `ato agent binding TASK_ID` | Inspect task origin, worker adapter, and reviewer config |
-| `ato agent reviewer TASK_ID --kind KIND [--model M] [--effort E]` | Select or change task reviewer (`codex`, `claude`, `agy`) |
+| `ato agent reviewer TASK_ID --kind KIND [--model M] [--effort E]` | Select or change task reviewer |
 | `ato agent ask TASK_ID --kind K --question Q --reason R` | Open a human question in `ato inbox` |
 | `ato system status` | Inspect v2 runtime, Observer heartbeat, and notification counts |
 | `ato system notification-policy [--repo PATH]` | Inspect global notification and repo mute policy |
@@ -63,7 +63,8 @@
 ```
 
 Supported worker kinds: `codex`, `claude`, `cursor`, `pi`.
-Supported reviewer kinds: `codex`, `claude`, `agy`.
+Supported reviewer kinds are `codex`, `claude`, `agy`, and the opt-in
+[Codex ACP Reviewer](acpx-reviewer.md) (`codex_acpx`).
 
 Worker `timeout_seconds` defaults to 600 (range 5–7200); reviewer timeout defaults
 to 300 (range 5–3600). `ato project validate` shows `timeout_seconds` and

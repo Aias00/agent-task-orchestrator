@@ -79,7 +79,11 @@ def _is_run_live(run: dict | None) -> bool:
 def _ensure_idle(store: Store, task: dict) -> None:
     if task["active_run_id"]:
         run = store.get_run(task["active_run_id"])
-        require(not _is_run_live(run), "BUSY", task["id"])
+        require(run["phase"] != "launching" and not _is_run_live(run), "BUSY", task["id"])
+    pending = store.acpx_review(task["id"], unresolved=True)
+    if pending:
+        from ato.adapters.acpx import recovery_blocker
+        raise TaskError(recovery_blocker(pending), task["id"])
 
 
 def _run_timeout(task: dict, run: dict | None = None) -> dict:
@@ -172,7 +176,8 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
         stopped = True
 
     def stop_requested() -> bool:
-        return stopped or store.get_task(task_id)["stop_requested"]
+        current = store.get_task(task_id)
+        return stopped or current["stop_requested"] or current["active_run_id"] != run_id
 
     def on_child(pid, birth):
         store.update_run(run_id, child_pid=pid, child_pid_identity=birth)
@@ -181,7 +186,11 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
     if threading.current_thread() is threading.main_thread():
         old_handler = signal.signal(signal.SIGTERM, handle_term)
     try:
-        if not store.claim_run_execution(task_id, run_id, os.getpid(), process.identity(os.getpid())):
+        task = store.get_task(task_id)
+        review = task.get("reviewer") or task["spec"].get("reviewer") or {}
+        uses_acpx = review.get("agent", {}).get("kind") == "codex_acpx"
+        pid = os.getpid()
+        if not store.claim_run_execution(task_id, run_id, pid, process.identity(pid), match_owner=uses_acpx):
             return store.get_task(task_id)
         return _execute_claimed_run(store, task_id, run_id, stop_requested=stop_requested,
                                     on_child=on_child, worker_runner=worker_runner,
@@ -201,6 +210,8 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
     timeout = _run_timeout(task, run)
     spec = task["spec"]
     contract = spec["worker_contract"]
+    active_reviewer = task.get("reviewer") or spec.get("reviewer")
+    uses_acpx = bool(active_reviewer and active_reviewer["agent"]["kind"] == "codex_acpx")
     worker_cfg = contract.get("agent") or {"kind": "codex"}
     worker_kind = worker_cfg["kind"]
     model = worker_cfg.get("model") or contract.get("model")
@@ -213,7 +224,7 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
     attempt = 0
     review_session: str | None = None
     review_round = 0
-    max_review_rounds = (spec.get("reviewer") or {}).get("max_review_rounds", 1)
+    max_review_rounds = (active_reviewer or {}).get("max_review_rounds", 1)
 
     try:
         while attempt < max_attempts:
@@ -331,15 +342,14 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
                 return store.get_task(task_id)
 
             # Optional read-only technical review loop.
-            active_reviewer = task.get("reviewer") or spec.get("reviewer")
             if active_reviewer is not None:
                 review_round += 1
                 rev = reviewer.run_review_turn(
                     task, spec, run_id, round_num=review_round,
                     resume_session_id=review_session, stop_check=stop_requested, on_child=on_child,
-                    runner_override=reviewer_runner,
+                    runner_override=reviewer_runner, store=store,
                 )
-                if stop_requested() or rev.code == "STOPPED":
+                if rev.code == "STOPPED" or (not uses_acpx and stop_requested()):
                     raise TaskError("STOPPED", task_id)
                 if not rev.ok or rev.verdict is None:
                     detail = safe_review_detail(ValueError(rev.detail), secret_values())
@@ -366,12 +376,14 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
             if stop_requested():
                 raise TaskError("STOPPED", task_id)
             # All checks (and optional review) passed -> settle completed!
-            store.update_run(run_id, phase="settled", outcome="completed", settled_at=time.time())
-            store.update_task(
-                task_id, status="completed", reason=None, product=prod, next_step=None,
-                stage={"stage_id": "implement", "attempts": attempt, "elapsed_seconds": round(time.monotonic() - started, 3),
-                       "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "completed", "attempts": attempt}]},
-            )
+            stage = {"stage_id": "implement", "attempts": attempt, "elapsed_seconds": round(time.monotonic() - started, 3),
+                     "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "completed", "attempts": attempt}]}
+            if uses_acpx:
+                if not store.complete_acpx_run(task_id, run_id, prod, stage=stage):
+                    raise TaskError("STOPPED", task_id)
+            else:
+                store.update_run(run_id, phase="settled", outcome="completed", settled_at=time.time())
+                store.update_task(task_id, status="completed", reason=None, product=prod, next_step=None, stage=stage)
             _enqueue_terminal_notice(
                 store, store.get_task(task_id), run_id, kind="completion",
                 body=f"ATO 任务 {task_id} 已完成。请用 ato status {task_id} 查看产物和检查结果。",
@@ -383,6 +395,8 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
         return store.get_task(task_id)
     except TaskError as exc:
         if exc.code == "STOPPED":
+            if store.get_task(task_id)["active_run_id"] != run_id:
+                return store.get_task(task_id)
             store.update_run(run_id, phase="settled", outcome="stopped", error_code="STOPPED", settled_at=time.time())
             store.update_task(task_id, status="stopped", reason="STOPPED")
             return store.get_task(task_id)
@@ -396,10 +410,16 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
 
 
 def request_stop(store: Store, task_id: str) -> dict:
-    task = store.get_task(task_id)
-    store.update_task(task_id, stop_requested=True)
+    task = store.update_task(task_id, stop_requested=True)
     if task["active_run_id"]:
         run = store.get_run(task["active_run_id"])
+        acpx = store.acpx_review(task_id)
+        # A later worker attempt may have its own child after a review closes.
+        if acpx and acpx["run_id"] == run["id"] and (not acpx["bridge_closed"] or run["child_pid"] is None):
+            return _stop_acpx_review(store, task_id, run, acpx)
+        active_reviewer = task.get("reviewer") or task["spec"].get("reviewer") or {}
+        if run["kind"] == "recheck" and _is_run_live(run) and active_reviewer.get("agent", {}).get("kind") == "codex_acpx":
+            return task_status_view(store, task_id)
 
         def stop_recorded(row, prefix):
             pid, birth = row.get(prefix + "pid"), row.get(prefix + "pid_identity")
@@ -438,6 +458,23 @@ def request_stop(store: Store, task_id: str) -> dict:
     return task_status_view(store, task_id)
 
 
+def _stop_acpx_review(store: Store, task_id: str, run: dict, row: dict) -> dict:
+    from ato.adapters.acpx import STOP_GRACE, reconcile_cleanup, recovery_blocker
+
+    store.append_event(task_id, "stop_requested", {}, run_id=run["id"])
+    deadline = time.monotonic() + STOP_GRACE
+    while _is_run_live(run) and time.monotonic() < deadline:
+        time.sleep(0.05)
+        row = store.acpx_review(task_id)
+        run = store.get_run(run["id"])
+    if not row["bridge_closed"]:
+        reconcile_cleanup(store, row, stop=True)
+        row = store.acpx_review(task_id)
+    if not _is_run_live(run):
+        store.settle_acpx_stop(task_id, run["id"], recovery_blocker(row))
+    return task_status_view(store, task_id)
+
+
 def resume(store: Store, task_id: str, *, foreground: bool = False,
            worker_runner=None, reviewer_runner=None, timeout_seconds: int | None = None) -> dict:
     if timeout_seconds is not None:
@@ -446,8 +483,8 @@ def resume(store: Store, task_id: str, *, foreground: bool = False,
                 "USAGE", detail="timeout_seconds must be an integer in [5, 7200].")
     task = store.get_task(task_id)
     require(task["worktree_state"] == "present", "NOT_RESUMABLE", task_id)
-    require(task["status"] in ("stopped", "blocked", "waiting_input"), "NOT_RESUMABLE", task_id)
     _ensure_idle(store, task)
+    require(task["status"] in ("stopped", "blocked", "waiting_input"), "NOT_RESUMABLE", task_id)
     if task["status"] == "waiting_input":
         require(not store.list_questions(task_id, state="open"), "NOT_RESUMABLE", task_id)
     worktree.verify_worktree(task)
@@ -456,8 +493,7 @@ def resume(store: Store, task_id: str, *, foreground: bool = False,
     timeout = _run_timeout(task)
     if timeout_seconds is not None:
         timeout = {"timeout_seconds": timeout_seconds, "timeout_source": "resume_override"}
-    store.update_task(task_id, stop_requested=False, status="queued", reason=None)
-    run = store.create_run(task_id, "resume", **timeout)
+    run = store.create_run(task_id, "resume", expected_revision=task["revision"], **timeout)
     store.append_event(task_id, "task_resumed", {
         "run_id": run["id"], **timeout, "previous_timeout_seconds": previous_timeout,
         "timeout_overridden": timeout_seconds is not None,
@@ -474,19 +510,37 @@ def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_r
     _ensure_idle(store, task)
     worktree.verify_worktree(task)
     spec = task["spec"]
-    run = store.create_run(task_id, "recheck")
+    active_rev = task.get("reviewer") or spec.get("reviewer")
+    acpx = active_rev and active_rev["agent"]["kind"] == "codex_acpx"
+    owner = (os.getpid(), process.identity(os.getpid())) if acpx else None
+    run = store.create_run(task_id, "recheck", expected_revision=task["revision"], owner=owner)
+
+    def stop_requested():
+        current = store.get_task(task_id)
+        return current["stop_requested"] or current["active_run_id"] != run["id"]
+
     diff_data = product.collect_diff(task)
     violations = product.check_guardrails(task, spec, diff=diff_data)
     if violations:
         store.update_run(run["id"], phase="settled", outcome="blocked", error_code="GUARDRAIL_VIOLATION", settled_at=time.time())
         store.update_task(task_id, status="blocked", reason="GUARDRAIL_VIOLATION")
         return task_status_view(store, task_id)
-    check_rows, passed = product.run_checks(task, spec)
+    try:
+        check_rows, passed = product.run_checks(task, spec, stop_check=stop_requested if acpx else None)
+    except TaskError as exc:
+        if not acpx or exc.code != "STOPPED":
+            raise
+        store.settle_acpx_stop(task_id, run["id"], None)
+        return task_status_view(store, task_id)
     store.save_checks(task_id, run["id"], check_rows)
     prod = product.build_product(task, check_rows, diff_data=diff_data)
     reason = None if passed else "CHECKS_FAILED"
-    if passed and not checks_only and (task.get("reviewer") or spec.get("reviewer")):
-        rev = reviewer.run_review_turn(task, spec, run["id"], round_num=1, runner_override=reviewer_runner)
+    if passed and not checks_only and active_rev:
+        rev = reviewer.run_review_turn(task, spec, run["id"], round_num=1, runner_override=reviewer_runner,
+                                       stop_check=stop_requested if acpx else None, store=store)
+        if acpx and rev.code == "STOPPED":
+            store.settle_acpx_stop(task_id, run["id"], None)
+            return task_status_view(store, task_id)
         if not rev.ok or rev.verdict is None:
             detail = safe_review_detail(ValueError(rev.detail), secret_values())
             store.append_event(task_id, "review_failed", {"code": rev.code, "detail": detail}, run_id=run["id"])
@@ -494,15 +548,19 @@ def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_r
             store.update_task(task_id, status="blocked", reason=rev.code, product=prod,
                               next_step=detail)
             return task_status_view(store, task_id)
-        active_rev = task.get("reviewer") or spec["reviewer"]
         store.add_review(task_id, run["id"], 1, active_rev["agent"]["kind"], rev.verdict, session_id=rev.session_id)
         if rev.verdict["verdict"] != "approve":
             reason = "REVIEW_CHANGES_REQUESTED" if rev.verdict["verdict"] == "request_changes" else "REVIEW_BLOCKED"
             store.update_run(run["id"], phase="settled", outcome="blocked", error_code=reason, settled_at=time.time())
             store.update_task(task_id, status="blocked", reason=reason, product=prod)
             return task_status_view(store, task_id)
-    store.update_run(run["id"], phase="settled", outcome="completed", settled_at=time.time())
-    store.update_task(task_id, status="completed", reason=reason, product=prod)
+    if acpx:
+        if not store.complete_acpx_run(task_id, run["id"], prod, reason=reason):
+            store.settle_acpx_stop(task_id, run["id"], None)
+            return task_status_view(store, task_id)
+    else:
+        store.update_run(run["id"], phase="settled", outcome="completed", settled_at=time.time())
+        store.update_task(task_id, status="completed", reason=reason, product=prod)
     store.append_event(task_id, "recheck_completed", {"passed": passed, "checks_only": checks_only}, run_id=run["id"])
     return task_status_view(store, task_id)
 
@@ -514,12 +572,12 @@ def cleanup(store: Store, task_id: str) -> dict:
         return task_status_view(store, task_id)
     require(task["status"] in ("completed", "stopped"), "CLEANUP_BLOCKED", task_id)
     wt = worktree.verify_worktree(task)
-    if task["status"] == "stopped":
-        require(worktree.is_clean(wt, ignored=worktree.shared_links_for(task)), "CLEANUP_BLOCKED", task_id)
-    else:
-        worktree.commit_worktree_product(task)
-    worktree.remove_worktree(task)
-    store.update_task(task_id, worktree_state="removed", stage=None)
+    with store.remove_worktree(task_id, task["revision"]):
+        if task["status"] == "stopped":
+            require(worktree.is_clean(wt, ignored=worktree.shared_links_for(task)), "CLEANUP_BLOCKED", task_id)
+        else:
+            worktree.commit_worktree_product(task)
+        worktree.remove_worktree(task)
     store.append_event(task_id, "worktree_removed", {})
     return task_status_view(store, task_id)
 
@@ -540,6 +598,34 @@ def task_status_view(store: Store, task_id: str) -> dict:
     open_q = store.list_questions(task_id, state="open")
     notices = store.list_notifications(task_id)
     comp = next((n for n in reversed(notices) if n["kind"] == "completion"), None)
+    status, reason, next_step = task["status"], task["reason"], task["next_step"]
+    acpx_view = None
+    acpx = store.acpx_review(task_id)
+    if acpx:
+        from ato.adapters.acpx import delivery_of, recovery_blocker
+
+        active_review = active and active["id"] == acpx["run_id"] and exec_state == "active"
+        delivery = delivery_of(acpx)
+        if active_review and acpx["receipt"] is None:
+            delivery = "approval_recorded" if acpx["dispatch"] else "pending"
+        receipt = acpx["receipt"] or {}
+        acpx_view = {
+            "run_id": acpx["run_id"], "round": acpx["round"],
+            "dispatch_recorded": acpx["dispatch"] is not None,
+            "delivery": delivery, "transport": receipt.get("transport"),
+            "cancel_requested": receipt.get("cancel_requested"),
+            "cancel_written": receipt.get("cancel_written"),
+            "cancel_acknowledged": receipt.get("cancel_acknowledged"),
+            "group_cleanup": acpx["cleanup"], "execution_cleanup_verified": bool(acpx["bridge_closed"]),
+        }
+        blocker = recovery_blocker(acpx)
+        if blocker and not active_review:
+            status = "blocked"
+            reason = blocker if reason != "MUTATION_VIOLATION" else reason
+            next_step = (f"Use `ato stop {task_id}` to verify local process cleanup. "
+                         if not acpx["bridge_closed"] else "")
+            if blocker == "ACPX_DELIVERY_UNKNOWN":
+                next_step += "Inspect the unresolved reviewer outcome. ATO will not replay the prompt."
 
     if task["origin_kind"] == "agy":
         comp_state = "unsupported"
@@ -559,8 +645,8 @@ def task_status_view(store: Store, task_id: str) -> dict:
     return {
         "task_id": task["id"],
         "repo": task["repo_root"],
-        "status": task["status"],
-        "reason": task["reason"],
+        "status": status,
+        "reason": reason,
         "updated_at": task["updated_at"],
         "spec_sha256": task["spec_sha256"],
         "execution": {
@@ -585,7 +671,8 @@ def task_status_view(store: Store, task_id: str) -> dict:
         "pending": [{"request_id": q["id"], "kind": q["kind"], "question": q["question"]} for q in open_q],
         "delivery": [{"id": n["id"], "kind": n["kind"], "state": n["state"], "error": n["error"]} for n in notices],
         "worktree_state": task["worktree_state"],
-        "next_step": task["next_step"],
+        "next_step": next_step,
+        **({"acpx_reviewer": acpx_view} if acpx_view is not None else {}),
         "completion_notification": {
             "origin": task["origin_kind"],
             "session_verified": verified_session,

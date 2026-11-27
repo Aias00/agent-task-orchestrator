@@ -9,6 +9,7 @@ from ato import config
 from ato.adapters.base import ReviewRequest, ReviewResult, get_reviewer_runner, safe_review_detail, secret_values
 from ato.product import collect_diff
 from ato.spec import REVIEW_VERDICT_SCHEMA, SEVERITIES, CATEGORIES
+from ato.store import Store
 from ato.worktree import shared_links_for, tree_fingerprint
 
 
@@ -43,6 +44,8 @@ def build_review_prompt(task: dict, spec: dict, *, round_num: int, previous_find
         "and no empty, . or .. path segments. lines must be L1 or L1-L2 (positive numbers). "
         "severity must be one of: " + ", ".join(SEVERITIES) + ". category must be one of: " + ", ".join(CATEGORIES) + ".",
     ])
+    if reviewer.get("agent", {}).get("kind") == "codex_acpx":
+        lines.append("Summarize your evidence and omit credentials and raw tool output.")
     if format_feedback:
         lines.append("Your previous receipt failed format validation. Correct the JSON receipt using this exact "
                      "validation feedback; keep the review read-only and preserve substantive findings:\n" + format_feedback)
@@ -53,7 +56,7 @@ def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
                     resume_session_id: str | None = None,
                     previous_findings: list[dict] | None = None,
                     stop_check=None, on_child: object = None, runner_override=None,
-                    max_format_retries: int = 2) -> ReviewResult:
+                    max_format_retries: int = 2, store: Store | None = None) -> ReviewResult:
     """Execute one read-only review turn and fail closed if the worktree mutates."""
     reviewer_cfg = task.get("reviewer") or spec.get("reviewer")
     if not reviewer_cfg:
@@ -78,15 +81,24 @@ def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
         resume_session_id=resume_session_id if reviewer_cfg.get("session_mode", "fresh_only") != "fresh_only" else None,
         timeout_seconds=reviewer_cfg.get("timeout_seconds", 300),
         stop_check=stop_check, on_child=on_child,
+        store=store, run_id=run_id, round_num=round_num,
     )
     runner = runner_override or get_reviewer_runner(agent["kind"])
+    uses_acpx = agent["kind"] == "codex_acpx"
     for retry in range(max(0, max_format_retries) + 1):
         if stop_check is not None and stop_check():
             return ReviewResult(ok=False, code="STOPPED")
-        result = runner(req)
+        try:
+            result = runner(req)
+        except Exception:
+            if not uses_acpx:
+                raise
+            result = ReviewResult(ok=False, code="ACPX_BRIDGE_FAILED")
         after_fp = tree_fingerprint(wt, ignored=ignored)
         if after_fp != before_fp:
             return ReviewResult(ok=False, code="MUTATION_VIOLATION", metadata={"before": before_fp, "after": after_fp})
+        if uses_acpx:
+            return result
         if stop_check is not None and stop_check():
             return ReviewResult(ok=False, code="STOPPED")
         if result.code != "INVALID_PROTOCOL":
