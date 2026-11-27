@@ -7,6 +7,11 @@ before and after review.
 
 ## Enablement
 
+Install Node.js and a compatible acpx build. The fork based on acpx 0.23.0
+requires Node.js 22.13.0 or later. ATO uses the built `dist/runtime.js` with
+the `beforePromptDispatch`, `onOwnedProcessStarted`, and
+`onOwnedProcessCleanup` host hooks.
+
 Add an `acpx_reviewer` object to the host's existing `$ATO_HOME/v2/settings.json`
 (default `~/.local/share/ato/v2/settings.json`). Use this structure.
 

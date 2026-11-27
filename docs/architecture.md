@@ -21,7 +21,7 @@ flowchart TD
 ## State Storage
 
 All v2 runtime state lives under `$ATO_HOME/v2/` (default `~/.local/share/ato/v2/`):
-- `ato.db` — SQLite WAL database (`tasks`, `runs`, `checks`, `reviews`, `questions`, `watchdog_state`, `watchdog_alerts`, `notifications`, `events`)
+- `ato.db` — SQLite WAL database (`tasks`, `runs`, `checks`, `reviews`, `acpx_reviews`, `questions`, `watchdog_state`, `watchdog_alerts`, `notifications`, `events`)
 - `worktrees/<task_id>/` — isolated Git worktrees on branch `ato/<task_id>`
 - `runtime/<task_id>/<run_id>/` — per-attempt logs, schemas, and sandbox profiles
 - `observer.json` / `observer.lock` — background Observer heartbeat and single-instance lock
