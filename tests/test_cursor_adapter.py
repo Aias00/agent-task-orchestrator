@@ -132,7 +132,11 @@ class CursorTests(unittest.TestCase):
                  json.dumps({"type": "result", "result": DONE}), assistant(text), assistant(fence),
                  json.dumps({"type": "result", "result": fence}),
                  assistant(text) + '\n{"type":"result","subtype":"success"}',
-                 '{"type":"system","subtype":"init"}\n' + assistant("working") + "\n" + self.event(DONE)]
+                 '{"type":"system","subtype":"init"}\n' + assistant("working") + "\n" + self.event(DONE),
+                 # Real cursor-agent concatenates pre-tool narration + final assistant fenced JSON in result.result.
+                 assistant("Creating file.") + "\n" + assistant(fence) + "\n"
+                 + json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                               "result": "Creating file.\n\n" + fence})]
         for payload in cases:
             with self.subTest(payload=payload):
                 result = self.output(payload)

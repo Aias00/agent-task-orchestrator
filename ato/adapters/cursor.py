@@ -58,8 +58,16 @@ def _decode_stream(stdout: bytes) -> tuple[object, bool, str]:
             kind == "result" and str(row.get("subtype", "")).startswith("error")
         ):
             errors.append(json.dumps(row))
-    output = terminal.get("result", assistant) if terminal is not None else assistant
-    return output, bool(errors), "\n".join(errors)
+    if terminal is not None and "result" in terminal:
+        final_result = terminal["result"]
+        if (isinstance(final_result, str) and isinstance(assistant, str) and assistant.strip()
+                and final_result.strip().endswith(assistant.strip())):
+            try:
+                _result_object(final_result)
+            except (ValueError, TypeError, RecursionError):
+                return assistant, bool(errors), "\n".join(errors)
+        return final_result, bool(errors), "\n".join(errors)
+    return assistant, bool(errors), "\n".join(errors)
 
 
 def _redact(data: bytes, secrets: tuple[str, ...]) -> bytes:
