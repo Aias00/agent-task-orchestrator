@@ -17,7 +17,7 @@
 | `ato project trace TASK_ID` | Show bounded task lifecycle event timeline |
 | `ato project recheck TASK_ID [--checks-only]` | Re-run frozen host checks (and reviewer unless `--checks-only`) |
 | `ato project cleanup TASK_ID --confirm` | Retain product commit on branch and remove worktree |
-| `ato agent doctor [--probe-versions]` | Inspect local Codex, Claude, AGY, Pi, and ACP availability |
+| `ato agent doctor [--probe-versions]` | Inspect local Codex, Claude, Cursor, AGY, Pi, and ACP availability |
 | `ato agent binding TASK_ID` | Inspect task origin, worker adapter, and reviewer config |
 | `ato agent reviewer TASK_ID --kind KIND [--model M] [--effort E]` | Select or change task reviewer (`codex`, `claude`, `agy`) |
 | `ato agent ask TASK_ID --kind K --question Q --reason R` | Open a human question in `ato inbox` |
@@ -62,6 +62,24 @@
 }
 ```
 
-Supported worker kinds: `codex`, `claude`, `pi`, `acp_pi`.
+Supported worker kinds: `codex`, `claude`, `cursor`, `pi`, `acp_pi`.
 Supported reviewer kinds: `codex`, `claude`, `agy`.
 Foreground Pi ACP coordinator is available programmatically via `ato.adapters.pi_acp.PiCoordinator`.
+
+Cursor is supported only as a worker (`"agent": {"kind": "cursor"}`), with no
+Cursor coordinator/controller or reviewer. Executable lookup uses `ATO_CURSOR_BIN`,
+then `CTASK_CURSOR_BIN`, then `cursor-agent` on PATH or in the managed CLI directory;
+it does not select a generic `agent` binary or shell alias. Set
+`ATO_SUBMISSION_KIND=cursor` for Cursor submissions to suppress ambient Codex origin IDs.
+Optional model names support parameter lists, for example
+`claude-opus-4-8[context=1m,effort=high,fast=false]` (maximum 256 characters,
+no whitespace, quotes, control characters, or leading `-`).
+
+The Cursor worker runs `cursor-agent -p --output-format stream-json` under macOS
+`sandbox-exec`. Read-only tasks also use `--mode plan`; workspace-write tasks use
+`--workspace`, `--trust`, and `--force`. The outer sandbox restricts writes to the
+worktree (excluding sensitive paths such as `.git`, `.env`, and `.cursor`), task
+runtime, and native `~/.cursor` state; read-only tasks cannot write the worktree.
+Cursor's nested sandbox is disabled only inside this outer sandbox. Missing sandbox
+support blocks the task with `UNSUPPORTED_CAPABILITY`. Final output must contain a
+valid worker result JSON object, optionally enclosed in a single JSON code fence.

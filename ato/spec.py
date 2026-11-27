@@ -51,8 +51,12 @@ _ERROR_DETAILS = {code: (status, msg) for status, codes in ERRORS.items() for co
 
 ID_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
-MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}")
-WORKER_KINDS = ("codex", "claude", "pi", "acp_pi")
+MODEL_RE = re.compile(
+    r"(?=.{1,256}\Z)[A-Za-z0-9][A-Za-z0-9_.:/-]*"
+    r"(?:\[[A-Za-z][A-Za-z0-9_-]*=[A-Za-z0-9_.:/-]+"
+    r"(?:,[A-Za-z][A-Za-z0-9_-]*=[A-Za-z0-9_.:/-]+)*\])?"
+)
+WORKER_KINDS = ("codex", "claude", "cursor", "pi", "acp_pi")
 REVIEWER_KINDS = ("codex", "claude", "agy")
 SESSION_MODES = ("fresh_only", "resume_if_supported", "require_resume")
 EFFORTS = (None, "minimal", "low", "medium", "high", "xhigh", "max")

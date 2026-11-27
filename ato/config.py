@@ -112,9 +112,11 @@ def is_repo_muted(repo_root: str, settings: dict | None = None) -> bool:
 
 
 def detect_submission_origin(env: dict[str, str] | None = None) -> tuple[str, str | None]:
-    """Return (origin_kind, origin_session_id) with AGY taking precedence over ambient Codex vars."""
+    """Return (origin_kind, origin_session_id), respecting explicit vendor origins."""
     environ = os.environ if env is None else env
     kind_env = (environ.get("ATO_SUBMISSION_KIND") or "").strip().lower()
+    if kind_env == "cursor":
+        return "cursor", None
     if kind_env == "agy" or (not kind_env and environ.get("ANTIGRAVITY_CONVERSATION_ID")):
         return "agy", None
     thread = (environ.get("CODEX_THREAD_ID") or "").strip()
@@ -129,17 +131,18 @@ def detect_submission_origin(env: dict[str, str] | None = None) -> tuple[str, st
 
 
 def resolve_executable(kind: str, override: str | None = None) -> str | None:
-    """Find an executable binary for codex/claude/agy/pi/node."""
+    """Find a vendor CLI; Cursor uses cursor-agent, never the generic agent binary."""
     env_key = f"ATO_{kind.upper()}_BIN"
     legacy_key = f"CTASK_{kind.upper()}_BIN"
     candidate = override or os.environ.get(env_key) or os.environ.get(legacy_key)
     if candidate:
         found = shutil.which(candidate)
         return str(Path(found).resolve()) if found else None
-    found = shutil.which(kind)
+    binary = "cursor-agent" if kind == "cursor" else kind
+    found = shutil.which(binary)
     if found:
         return str(Path(found).resolve())
-    managed = MANAGED_CLI_BIN / kind
+    managed = MANAGED_CLI_BIN / binary
     if managed.is_file() and os.access(managed, os.X_OK):
         return str(managed.resolve())
     return None
