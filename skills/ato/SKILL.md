@@ -1,57 +1,118 @@
 ---
 name: ato
-description: Submit, observe, stop and resume durable agent tasks in isolated Git worktrees. Route human questions and report verified task completion.
+description: Use MCP first to submit, inspect, stop and resume durable ATO tasks; preserve task IDs, independent verification and human authority. Use authorized CLI fallback only when MCP is unavailable.
 ---
 
-# ATO
+# ATO controller
 
-Use `ato --help` to inspect available commands. Use one Task ID for all operations.
+This skill controls the existing ATO engine. It does not change Worker/Reviewer
+adapters, sandbox defaults, retries, independent host checks or notifications.
+An already dispatched worker executes its task; it must not dispatch nested ATO work.
 
-1. Write a task spec and validate it with `ato project validate --repo PATH --spec FILE`.
-   Include command checks in `worker_contract.acceptance`; manual criteria and `guardrails`
-   (`protected_paths`, `forbid_delete_paths`) are optional.
-   Submit using `ato run --repo PATH --spec FILE` (add `--foreground` to block until settled).
-   When submitting from AGY, prefix with `ATO_SUBMISSION_KIND=agy` so Codex workers keep
-   their default `workspace-write` sandbox without inheriting ambient `CODEX_THREAD_ID`.
-2. Check progress with `ato status TASK_ID` and `ato list --repo PATH`.
-   Read `completion_notification` (AGY reports `unsupported`; unverified Codex reports `unbound`)
-   and `watchdog` (`state`, `sampled_at`, `alerts` — alerts are advisory).
-3. If the task pauses for user input, run `ato inbox`, relay the question to the user,
-   record their reply via `ato answer REQUEST_ID --answer TEXT`, then run `ato resume TASK_ID`.
-   To change the worker timeout for only that new run, use
-   `ato resume TASK_ID --timeout-seconds SECONDS` (base-10 digits, 5–7200).
-   A later plain resume returns to the spec/default timeout; Task ID, worktree,
-   frozen spec digest, and acceptance criteria stay unchanged.
-4. Inspect `status`, `reason`, and `checks[*].state` before reporting success.
-   Exhausted independent checks block with `reason="CHECKS_FAILED"`. Use
-   `ato status TASK_ID --check-history` to inspect earlier check rounds. Inspect `product.diff_summary` or run
-   `ato project diff TASK_ID --stat` to verify `files_deleted`, `tests_deleted`, and
-   `tests_modified`. Record optional approval with `ato accept TASK_ID` only if requested.
-5. Use `ato stop TASK_ID` to stop a running task, `ato project recheck TASK_ID` to re-run
-   frozen checks/review, and `ato project cleanup TASK_ID --confirm` to commit verified
-   changes to the task branch and remove the worktree.
+## Discover and submit
 
-Validate previews show `timeout_seconds` and `timeout_source` (`default` or `spec`),
-plus reviewer timeout/source when configured. Worker/reviewer defaults are 600/300
-seconds. Run, resume, and status receipts show worker timeout/source in `execution`
-and `run_history`; `project trace` submission/resume events record them too.
-Single-run overrides report `resume_override`; old unknown sources report `legacy`.
+1. Discover the connected ATO MCP server's tools (`tools/list`, including further
+   pages if supplied); inspect their input schemas. Clients may prefix tool names.
+   Match the `ato_*` names below to the actual connection. Do not guess a tool,
+   server identity, permission or repository from a filesystem path.
+2. Call `ato_repositories({})` and select an authorized `data.repositories[].alias`.
+   Use that alias as both `repo` and inline `spec.repo`. Specs are objects, not file
+   paths or JSON strings. Read [the exact contract](references/controller.md) and
+   [example calls](templates/controller-calls.example.json). Include the complete
+   objective, scope, authorization and independent command acceptance criteria;
+   optional guardrails are `protected_paths` and `forbid_delete_paths`.
+3. Call `ato_validate({"repo": ALIAS, "spec": SPEC})`. Require `ok:true` and
+   `data.valid:true`. The transport preview returns `repo`, `valid`, `spec_sha256`,
+   `base_commit`; it does not return the CLI's timeout preview. Do not invent fields.
+4. Before `ato_submit`, generate a unique operation key, e.g. `submit-` plus a UUID4
+   (`python3 -c 'import uuid; print("submit-" + uuid.uuid4().hex)'` where available).
+   Durably save it with the server identity, principal name (no token), operation,
+   exact arguments, known task ID and outcome in private controller task state.
+   Keep this outside Git and worker prompts; retain it across restarts. If durable
+   state is unavailable, stop before a write and explain the missing capability.
+5. Call `ato_submit({"repo": ALIAS, "spec": SPEC, "request_id": KEY})` once.
+   Save `data.task_id` immediately. An accepted/queued reply is not completion.
+   All later operations follow that Task ID; do not create a replacement task to
+   continue the same objective. New stop/resume actions each get their own key.
 
-Review defaults to `max_review_rounds=10` (integer 1..50). Normal review rework
-has its own counter and does not consume the worker execution-failure budget
-(`max_attempts=3` by default). Guardrail/check repair uses a separate counter with
-the same cap, reset when verification passes. Task reviewer overrides also control
-the effective review limit; reaching it blocks with `REVIEW_CHANGES_REQUESTED`.
+Read `structuredContent` (official Python SDK: `structured_content`), or parse the
+JSON text content if the client omits structured content. Require the canonical
+`{schema_version:1, ok, data, error}` envelope. Inspect `ok` and MCP `isError`
+(Python `is_error`); missing/malformed results are not success. Do not retry a
+mutation merely because the client could not parse its reply.
 
-Optional `worker_contract.max_no_progress_rounds` defaults to 2 (integer 1..10).
-Its omission preserves canonical spec/hash compatibility. The first issue sets a
-baseline; unchanged failures or unresolved review blockers increase the streak.
-At streak 1 the worker gets a repeated-issue warning; at the limit the executor
-pauses with `REPEATED_NO_PROGRESS`, records the issue, and queues a failure notice.
-Inspect `stage.category`, the separate failure/rework counters, `progress_made`,
-`no_progress_streak`, and `repeated_items` before deciding how to resume.
+## Observe, handle questions and finish
 
-Watchdog distinguishes `EXECUTION_FAILURE_RETRY` from `REPEATED_NO_PROGRESS`;
-healthy `review_rework` produces no failure alerts. Blocked alerts include their
-category. Terminal tasks with a matching successful sample and no active/pending
-alerts report Watchdog `state="settled"`, remaining settled after 180 seconds.
+- `ato_list({"repo": ALIAS})` returns allowed tasks; omitting `repo` lists all
+  allowed aliases. `ato_status({"task_id": ID, "check_history": true})` supplies
+  current status, reason, execution, checks/history, review, product and pending.
+  Use `ato_diff({"task_id": ID, "stat": true})` for the summary, `stat:false`
+  for the bounded patch, and `ato_trace({"task_id": ID})` for bounded events.
+- Poll status/inbox at a bounded cadence only while this controller is executing
+  (e.g. 5 seconds, back off to 30 seconds). On a local wait deadline retain the
+  Task ID and report current facts; it does not stop the task or authorize a retry.
+  No detached poller, webhook or native wakeup is created by this skill.
+- For `waiting_input` or nonempty `pending`, call `ato_inbox({"task_id": ID})`.
+  Relay each question with its Task ID and inbox `request_id`. That inbox ID is
+  the `question_id` for answering; it is NOT the mutation idempotency key.
+  Only an actual authorized human's input may be recorded via `ato_answer` using
+  separate human authority. Bots must never possess the human token, invent a
+  reply, auto-approve, or impersonate a human through CLI. Answering alone neither
+  resumes nor accepts. Keep the question/task linkage until the answer is recorded.
+- Report verified completion only after a fresh status says `completed`, its
+  `reason` contains no unresolved blocker, all required independent checks are
+  `passed`, configured review is satisfied, and `pending` is empty. Inspect
+  `product.diff_summary` / diff `summary` for `files_deleted`, `tests_deleted`,
+  `tests_modified` and scope. Missing evidence is not a pass; inspect check history
+  and trace. Distinguish engine completion from human acceptance, merge or deploy.
+  Exhausted checks block with `CHECKS_FAILED`. A worker saying “done” is not evidence.
+- Report Task ID, verified outcome, check/diff evidence, remaining limitations and
+  next step. Read `completion_notification` and `watchdog` as separate facts:
+  delivery/queued notification does not establish completion or human approval.
+
+## STOP, resume and uncertain delivery
+
+Use `ato_stop({"task_id": ID, "request_id": NEW_KEY})` for an authorized STOP.
+Poll fresh status for `execution.stop_requested`, execution state/verification,
+status/reason, and any `acpx_reviewer` cleanup facts. A STOP receipt alone does not
+prove process cleanup; `CLEANUP_BLOCKED`, unknown execution or unresolved reviewer
+outcomes need operator reconciliation. A previously completed task may remain
+completed after STOP. Do not kill arbitrary PIDs or auto-resume an explicit STOP.
+
+Resume only when authorized, pending human input is resolved and the task is
+eligible (`stopped`, `blocked`, `waiting_input`; legacy completion needs inspection).
+Call `ato_resume({"task_id": ID, "request_id": NEW_KEY})`; optional
+`timeout_seconds` is an integer 5..7200 for this run only. Omit it to use the
+frozen spec/default. Task ID, worktree, spec digest and acceptance stay unchanged.
+Read execution/run_history/trace for the actual new run, not a cached receipt.
+
+For disconnects, timeouts, protocol errors or missing replies after any write,
+mark outcome unknown. Reconnect/discover and retry only the same operation, same
+arguments and same `request_id` with the same principal/server journal. The
+journal can return the original (possibly stale) result or `REQUEST_UNRESOLVED`.
+Poll any known `error.task_id` via status/trace. A 404 is not proof of no effect.
+If still unresolved, retain the key and escalate for host reconciliation; do not
+change keys, switch to CLI submission, erase journal rows or infer rollback.
+`IDEMPOTENCY_CONFLICT` means the key was used for other arguments/operation; inspect
+the saved intent instead of guessing. See [recovery details](references/controller.md).
+
+## Availability, authority and fallback
+
+Missing tools can mean missing scope, client filtering, policy or version mismatch.
+Explain the affected operation and needed capability. `read` permits inspection;
+`control` permits validate/submit/stop/resume; `human` permits actual human answers.
+`AUTH_REQUIRED`, `FORBIDDEN` and client approval denial are authority failures,
+not reasons to bypass controls. Do not upgrade scopes or acquire a human token.
+
+Only when MCP is unavailable AND the existing local CLI is already authorized,
+explain that fallback and use [the CLI mapping](references/controller.md#cli-fallback).
+A disconnected write is ambiguous, not permission to resubmit through CLI. CLI
+has no transport request journal. HTTP API and CLI remain supported for operators
+and scripts. MCP exposes no accept, recheck, cleanup, merge or deploy controls;
+do not use fallback to silently add these actions.
+
+New `api`/`mcp` tasks have no native conversation binding. MCP polling is not push
+and does not bind or wake Codex, Cursor, AGY or Grok Bot. Do not synthesize session
+IDs, set origin variables to impersonate a client, or replace existing notification
+mechanisms. Existing native-origin tasks retain their provenance when controlled
+through MCP. See [setup and migration](references/setup.md).

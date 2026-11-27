@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ato": {
+      "url": "https://ato.example.com/mcp",
+      "headers": {"Authorization": "Bearer ${env:ATO_SERVER_TOKEN_BOT}"}
+    }
+  }
+}

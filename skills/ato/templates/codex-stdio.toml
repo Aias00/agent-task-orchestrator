@@ -1,0 +1,9 @@
+# Future setup only; replace /srv/ato paths. See ../references/setup.md.
+[mcp_servers.ato]
+command = "/srv/ato/venv/bin/ato"
+args = ["mcp", "--stdio", "--config", "/srv/ato/server-stdio.json"]
+env_vars = ["ATO_SERVER_TOKEN_BOT"]
+
+[mcp_servers.ato.env]
+ATO_HOME = "/srv/ato/state"
+CODEX_HOME = "/srv/ato/codex"

@@ -1,0 +1,53 @@
+{
+  "repositories": {},
+  "validate": {
+    "repo": "demo",
+    "spec": {
+      "schema_version": 1,
+      "repo": "demo",
+      "base_ref": "HEAD",
+      "worker_contract": {
+        "objective": "Implement the agreed feature",
+        "scope": "Only the agreed repository files",
+        "authorization": "Worktree changes and the specified check are authorized",
+        "acceptance": [{
+          "id": "whitespace", "kind": "command",
+          "description": "No whitespace errors",
+          "checks": [["git", "diff", "--check"]]
+        }]
+      }
+    }
+  },
+  "submit": {
+    "repo": "demo",
+    "spec": {
+      "schema_version": 1,
+      "repo": "demo",
+      "base_ref": "HEAD",
+      "worker_contract": {
+        "objective": "Implement the agreed feature",
+        "scope": "Only the agreed repository files",
+        "authorization": "Worktree changes and the specified check are authorized",
+        "acceptance": [{
+          "id": "whitespace", "kind": "command",
+          "description": "No whitespace errors",
+          "checks": [["git", "diff", "--check"]]
+        }]
+      }
+    },
+    "request_id": "example-submit-00000000000000000000000000000001"
+  },
+  "list": {"repo": "demo"},
+  "status": {"task_id": "task-00000000000000000000000000000001", "check_history": true},
+  "diff": {"task_id": "task-00000000000000000000000000000001", "stat": true},
+  "trace": {"task_id": "task-00000000000000000000000000000001"},
+  "inbox": {"task_id": "task-00000000000000000000000000000001"},
+  "stop": {"task_id": "task-00000000000000000000000000000001", "request_id": "example-stop-00000000000000000000000000000002"},
+  "resume": {"task_id": "task-00000000000000000000000000000001", "request_id": "example-resume-00000000000000000000000000000003", "timeout_seconds": 600},
+  "answer": {
+    "task_id": "task-00000000000000000000000000000001",
+    "question_id": "request-00000000000000000000000000000002",
+    "answer": "Example only: replace with actual authorized human input",
+    "request_id": "example-answer-00000000000000000000000000000004"
+  }
+}

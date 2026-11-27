@@ -34,7 +34,7 @@ Usage: sh ./install.sh [options]
 Options:
   --bin-dir PATH       Launcher directory (default: ~/.local/bin)
   --venv-dir PATH      Virtualenv directory (default: ~/.local/share/ato/venv)
-  --skills-dir PATH    Optional Codex skills directory (e.g. ~/.codex/skills)
+  --skills-dir PATH    Optional skill bundle destination (e.g. ~/.codex/skills)
   --editable           Install local checkout in editable mode (changes take effect immediately)
   --server             Opt in to pip installation of HTTP/MCP server dependencies
 
@@ -128,6 +128,8 @@ EOF
     if [ -n "$SKILLS_DIR" ]; then
         mkdir -p "$SKILLS_DIR/ato"
         cp "$SRC/skills/ato/SKILL.md" "$SKILLS_DIR/ato/SKILL.md"
+        cp -R "$SRC/skills/ato/references" "$SKILLS_DIR/ato/"
+        cp -R "$SRC/skills/ato/templates" "$SKILLS_DIR/ato/"
         chmod 0644 "$SKILLS_DIR/ato/SKILL.md"
     fi
 

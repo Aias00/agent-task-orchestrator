@@ -6,6 +6,12 @@ running elsewhere. `ato serve` provides REST at `/api/v1` and **MCP Streamable H
 Both call the same authorization/service/journal layer and existing executor, spec,
 product and inbox operations. They do not introduce another scheduler.
 
+Controllers should follow the [MCP-first skill](../skills/ato/SKILL.md) and
+[client migration guide](mcp-controller.md). HTTP/CLI remain supported for
+operators and scripts. Controller transport does not replace native Worker or
+Reviewer adapters. New `api`/`mcp` origins do not bind or wake native conversations;
+MCP polling is not push delivery. Existing native notification mechanisms remain.
+
 Implementation status: **isolated validation passed on 2026-11-27**: 126 core,
 service/journal and real SDK tests, plus actual loopback HTTP/MCP and stdio checks.
 See [validation results and limits](mcp-api-validation.md). Optional dependencies
@@ -261,7 +267,12 @@ SDK protocol errors retain the SDK's JSON-RPC behavior.
 Official SDK 2.3.x client example, including initialization (its HTTP client is
 `httpx2`, and the stream context returns two streams). Python result attributes use
 snake_case (`structured_content`, `is_error`, `server_info`); JSON wire fields
-retain their MCP camelCase names:
+retain their MCP camelCase names. Before any write, durably prepare a private
+`private-submit-intent.json` containing `repo`, `spec` and a fresh UUID4-based
+`request_id`. Reuse that exact file/key after uncertain delivery; never generate a
+key inside a retry loop. The [controller recovery contract](../skills/ato/references/controller.md)
+also requires retaining deployment/principal identity, task ID and outcome. This
+short SDK example does not implement a durable controller or background poller:
 
 ```python
 import asyncio
@@ -283,11 +294,12 @@ async def main():
                 await session.initialize()
                 print(await session.list_tools())
                 print(await session.call_tool("ato_repositories", {}))
-                request = json.loads(Path("request.json").read_text())
-                print(await session.call_tool("ato_validate", request))
-                result = await session.call_tool("ato_submit", {
-                    **request, "request_id": "feature-20261127-1"
-                })
+                intent = json.loads(Path("private-submit-intent.json").read_text())
+                request = {key: intent[key] for key in ("repo", "spec")}
+                validation = await session.call_tool("ato_validate", request)
+                if validation.is_error or not validation.structured_content["ok"]:
+                    raise RuntimeError("Validation failed; inspect the error envelope")
+                result = await session.call_tool("ato_submit", intent)
                 envelope = result.structured_content
                 if not envelope["ok"]:
                     raise RuntimeError(envelope["error"]["code"])

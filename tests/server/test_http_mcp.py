@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import json
+from pathlib import Path
 import threading
 import unittest
 from unittest.mock import patch
@@ -114,6 +115,63 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(collision.is_error)
             self.assertEqual(collision.structured_content["error"]["code"], "IDEMPOTENCY_CONFLICT")
         self.spawn.assert_called_once()
+
+    async def test_distributed_controller_calls_with_real_sdk(self):
+        path = Path(__file__).resolve().parents[2] / "skills/ato/templates/controller-calls.example.json"
+        examples = json.loads(path.read_text())
+
+        async def call(session, operation, **overrides):
+            result = await session.call_tool("ato_" + operation, {**examples[operation], **overrides})
+            self.assertFalse(result.is_error, result)
+            envelope = result.structured_content
+            self.assertEqual(json.loads(result.content[0].text), envelope)
+            self.assertEqual(envelope["schema_version"], 1)
+            self.assertTrue(envelope["ok"], envelope)
+            self.assertIsNone(envelope["error"])
+            return envelope["data"]
+
+        async with self.sdk() as bot:
+            names = {tool.name for tool in (await bot.list_tools()).tools}
+            self.assertEqual(names, {"ato_" + name for name in examples if name != "answer"})
+            self.assertEqual((await call(bot, "repositories"))["repositories"], [{"alias": "demo"}])
+            self.assertTrue((await call(bot, "validate"))["valid"])
+            receipt = await call(bot, "submit")
+            task_id = receipt["task_id"]
+        # Reconnect with the persisted example key: one admission, same task/result.
+        async with self.sdk() as bot:
+            self.assertEqual(await call(bot, "submit"), receipt)
+            self.spawn.assert_called_once()
+            self.assertEqual([row["task_id"] for row in (await call(bot, "list"))["tasks"]], [task_id])
+            status = await call(bot, "status", task_id=task_id)
+            self.assertEqual(status["status"], "queued")
+            self.assertIn("check_history", status)
+            self.assertEqual(status["completion_notification"]["origin"], "mcp")
+            self.assertEqual(status["completion_notification"]["state"], "unsupported")
+            self.assertIsNone(self.store.get_task(task_id)["origin_session_id"])
+            self.assertIn("summary", await call(bot, "diff", task_id=task_id))
+            self.assertIn("events", await call(bot, "trace", task_id=task_id))
+            stopped = await call(bot, "stop", task_id=task_id)
+            self.assertEqual(stopped["status"], "stopped")
+            self.assertEqual(stopped["execution"]["state"], "idle")
+            question = self.store.create_question(task_id, "permission", "Synthetic decision?", "Fixture")
+            pending = await call(bot, "inbox", task_id=task_id)
+            self.assertEqual(pending["requests"][0]["request_id"], question["id"])
+            self.assertEqual(pending["requests"][0]["task_id"], task_id)
+            denied = await bot.call_tool("ato_answer", {**examples["answer"], "task_id": task_id,
+                                                       "question_id": question["id"]})
+            self.assertEqual(denied.structured_content["error"]["code"], "FORBIDDEN")
+            async with self.sdk(HUMAN_TOKEN) as human:
+                await call(human, "answer", task_id=task_id, question_id=question["id"],
+                           answer="Synthetic authorized human fixture input")
+            self.spawn.assert_called_once()  # Answer never resumes implicitly.
+            self.assertEqual((await call(bot, "inbox", task_id=task_id))["count"], 0)
+            resumed = await call(bot, "resume", task_id=task_id)
+            self.assertEqual(resumed["task_id"], task_id)
+            self.assertEqual(self.spawn.call_count, 2)
+            fresh = await call(bot, "status", task_id=task_id)
+            self.assertEqual(fresh["spec_sha256"], status["spec_sha256"])
+            self.assertEqual(fresh["execution"]["timeout_source"], "resume_override")
+            self.assertEqual(fresh["execution"]["timeout_seconds"], examples["resume"]["timeout_seconds"])
 
     async def test_sdk_principal_isolation_and_separate_human_authority(self):
         own, other = self.task(), self.task("other")

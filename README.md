@@ -3,7 +3,21 @@
 `ato` is a lightweight local orchestrator for durable coding agent tasks in isolated Git worktrees.
 One Task ID tracks the task spec, execution runs, independent host checks, optional read-only technical review, human Q&A inbox, diff/guardrails, watchdog monitoring, and Codex completion notifications.
 
-A Task runs its declared worker and records independent checks separately; failed checks are surfaced as `reason="CHECKS_FAILED"` on the completed status when advisory checks are enabled, so always inspect `reason` and `checks` alongside `status`.
+A Task runs its declared worker and records independent checks separately. Exhausted checks block with `reason="CHECKS_FAILED"`; inspect status, reason, checks, review, diff and pending questions before reporting verified completion.
+
+## Controllers and execution agents
+
+Controllers use [MCP first](skills/ato/SKILL.md) for discovery, validate/submit,
+list/status/diff/trace/inbox and STOP/resume. HTTP API and CLI remain supported for
+operators and scripts. See the [migration and qualification guide](docs/mcp-controller.md)
+for Codex, Cursor agent, AGY (Antigravity) and Grok Bot setup and limitations.
+
+Controller transport is separate from execution: workers remain `codex` (macOS/Linux),
+`claude`, `cursor` and `pi` (macOS with sandbox-exec). Optional read-only reviewers
+remain `codex`, `claude`, `agy`, `codex_acpx`; see [ACP setup](docs/acpx-reviewer.md).
+MCP does not introduce a Grok Bot worker or change sandbox/retry/check behavior.
+New MCP/API tasks do not bind or wake native conversations. Existing verified
+Codex-origin notifications remain supported; AGY notifications remain unsupported.
 
 ## Installation
 
@@ -41,9 +55,11 @@ See [MCP/API deployment and usage](docs/mcp-api.md) and the
 [safe host configuration example](docs/server-config.example.json) for optional
 dependency installation, TLS proxy policy, REST/SDK examples and crash-safe
 idempotency limitations. Poll task status/inbox; webhook/push integration is not
-included. Implementation is complete; tests have not run and await user instruction.
+included. The [prior isolated API/MCP validation](docs/mcp-api-validation.md) and
+[controller regression report](docs/mcp-controller-validation.md) distinguish SDK
+verification from native client and deployment checks still pending.
 
-## Quick start
+## CLI quick start (operators and authorized fallback)
 
 ```sh
 # 1. Validate a task spec
@@ -77,4 +93,5 @@ ato system status
 - [Architecture](docs/architecture.md) — 4-layer single-package architecture, SQLite schema, and safety invariants
 - [CLI & Spec Reference](docs/cli-and-spec.md) — commands, task specification format, guardrails, reviewers, and Pi worker
 - [MCP & HTTP API](docs/mcp-api.md) — authenticated transports, scopes, deployment, idempotency and polling
-- [Agent Skill](skills/ato/SKILL.md) — concise instructions for Codex/AGY agents driving `ato`
+- [MCP controller migration](docs/mcp-controller.md) — distributable client examples and qualification boundaries
+- [Agent Skill](skills/ato/SKILL.md) — MCP-first controller instructions and authorized CLI fallback

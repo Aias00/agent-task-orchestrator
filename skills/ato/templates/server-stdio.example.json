@@ -1,0 +1,11 @@
+{
+  "repositories": {"demo": "/srv/ato/repos/demo"},
+  "principals": {
+    "coordinator": {
+      "token_env": "ATO_SERVER_TOKEN_BOT",
+      "repositories": ["demo"],
+      "scopes": ["read", "control"]
+    }
+  },
+  "stdio_principal": "coordinator"
+}

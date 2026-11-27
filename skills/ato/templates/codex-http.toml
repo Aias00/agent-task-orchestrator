@@ -1,0 +1,4 @@
+# Future setup only; provision bot token in the client environment, never here.
+[mcp_servers.ato]
+url = "https://ato.example.com/mcp"
+bearer_token_env_var = "ATO_SERVER_TOKEN_BOT"
