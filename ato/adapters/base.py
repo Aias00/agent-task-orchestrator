@@ -13,7 +13,7 @@ from ato import config
 from ato.process import terminate_popen
 from ato.spec import TaskError, WORKER_RESULT_SCHEMA, require
 
-SENSITIVE_PATHS = (".git", ".codex", ".ato", ".pi", ".aws", ".ssh", ".env")
+SENSITIVE_PATHS = (".git", ".codex", ".cursor", ".ato", ".pi", ".aws", ".ssh", ".env")
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 
@@ -78,6 +78,8 @@ def validate_worker_result(value: object) -> dict:
     for key in required:
         if not isinstance(value[key], str):
             raise ValueError(f"worker result field {key} must be string")
+        if len(value[key]) > WORKER_RESULT_SCHEMA["properties"][key].get("maxLength", float("inf")):
+            raise ValueError(f"worker result field {key} is too long")
     if not value["summary"].strip():
         raise ValueError("worker summary must be non-empty")
     return value
@@ -172,6 +174,9 @@ def get_worker_runner(kind: str):
     if kind == "claude":
         from ato.adapters.claude import run_worker
         return run_worker
+    if kind == "cursor":
+        from ato.adapters.cursor import run_worker
+        return run_worker
     if kind in ("pi", "acp_pi"):
         from ato.adapters.pi_acp import run_worker
         return run_worker
@@ -192,7 +197,7 @@ def get_reviewer_runner(kind: str):
 
 
 def doctor_all(*, probe_versions: bool = False) -> dict:
-    """Inspect local availability for codex, claude, agy, pi, and acp_pi."""
+    """Inspect local availability for codex, claude, cursor, agy, pi, and acp_pi."""
     def _probe(kind: str) -> dict:
         exe = config.resolve_executable(kind)
         info: dict = {"kind": kind, "available": bool(exe), "executable": exe, "version": None}
@@ -213,6 +218,7 @@ def doctor_all(*, probe_versions: bool = False) -> dict:
         "worker": {
             "codex": _probe("codex"),
             "claude": _probe("claude"),
+            "cursor": _probe("cursor"),
             "pi": _probe("pi"),
             "acp_pi": {"kind": "acp_pi", "available": bool(acp_sdk and node_bin and pi_bin),
                        "acp_sdk": acp_sdk, "node": node_bin, "pi": pi_bin},
