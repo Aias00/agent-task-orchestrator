@@ -9,7 +9,7 @@ import sys
 from ato import __version__, config, executor, inbox, observer, product
 from ato.adapters.base import doctor_all
 from ato.spec import (
-    EFFORTS, REVIEWER_KINDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
+    DEFAULT_MAX_REVIEW_ROUNDS, EFFORTS, REVIEWER_KINDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
     TaskError, normalize_repository, normalize_spec,
     read_regular_file, require, require_id, result_envelope,
 )
@@ -197,7 +197,7 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
                 agent_cfg["model"] = args.model
             if effort:
                 agent_cfg["effort"] = effort
-            existing = dict(task.get("reviewer") or {"session_mode": "fresh_only", "max_review_rounds": 1, "timeout_seconds": 300, "checklist": [], "design_docs": []})
+            existing = dict(task.get("reviewer") or {"session_mode": "fresh_only", "max_review_rounds": DEFAULT_MAX_REVIEW_ROUNDS, "timeout_seconds": 300, "checklist": [], "design_docs": []})
             existing["agent"] = agent_cfg
             existing["allowed_kinds"] = sorted(set(existing.get("allowed_kinds") or []) | {args.kind})
             st.update_task(args.task_id, reviewer=existing)

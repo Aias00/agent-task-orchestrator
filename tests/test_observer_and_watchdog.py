@@ -34,17 +34,17 @@ class ObserverAndWatchdogTests(unittest.TestCase):
             "progress": "p1",
             "baseline": False,
         }
-        # First sample: REPEATED_ATTEMPTS fires; EXECUTION_UNVERIFIED needs 2 consecutive samples.
+        # First sample: EXECUTION_FAILURE_RETRY fires; EXECUTION_UNVERIFIED needs 2 consecutive samples.
         # DIFF_UNAVAILABLE does NOT set sample_error (P1-4).
         st1, al1 = watchdog.reduce_sample(None, [], base_sample)
         self.assertIsNone(st1["sample_error"])
         self.assertEqual(st1["diff_error"], "DIFF_UNAVAILABLE")
-        self.assertEqual([a["code"] for a in al1], ["REPEATED_ATTEMPTS"])
+        self.assertEqual([a["code"] for a in al1], ["EXECUTION_FAILURE_RETRY"])
 
         # Second consecutive sample: EXECUTION_UNVERIFIED confirms!
         sample2 = dict(base_sample, sampled_at=1060.0)
         st2, al2 = watchdog.reduce_sample(st1, al1, sample2)
-        self.assertEqual({a["code"] for a in al2}, {"REPEATED_ATTEMPTS", "EXECUTION_UNVERIFIED"})
+        self.assertEqual({a["code"] for a in al2}, {"EXECUTION_FAILURE_RETRY", "EXECUTION_UNVERIFIED"})
 
         # Historical blocked task at observer startup gets baseline_only (no alert spam).
         hist = dict(base_sample, status="blocked", reason="WORKER_BLOCKED",
@@ -121,7 +121,8 @@ class ObserverAndWatchdogTests(unittest.TestCase):
                     self.assertEqual(sampled, tid)
                     self.assertIsNone(sampler.last_error)
                     pub = watchdog.public_status(store, tid)
-                    self.assertEqual(pub["state"], "observing")
+                    self.assertEqual(pub["state"], "settled")
+                    self.assertEqual(watchdog.public_status(store, tid, now=pub["sampled_at"] + 3600)["state"], "settled")
                     # Terminal settled task is now cached and skipped on next due cycle (P1-3).
                     self.assertIn(tid, sampler.terminal_scope)
                     sampler.due[tid] = 0.0

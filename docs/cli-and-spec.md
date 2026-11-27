@@ -50,7 +50,7 @@
   },
   "reviewer": {
     "agent": {"kind": "codex"},
-    "max_review_rounds": 1
+    "max_review_rounds": 10
   },
   "guardrails": {
     "protected_paths": ["README.md"],
@@ -99,3 +99,45 @@ runtime, and native `~/.cursor` state; read-only tasks cannot write the worktree
 Cursor's nested sandbox is disabled only inside this outer sandbox. Missing sandbox
 support blocks the task with `UNSUPPORTED_CAPABILITY`. Final output must contain a
 valid worker result JSON object, optionally enclosed in a single JSON code fence.
+
+
+## Rework, retries, and no progress
+
+`reviewer.max_review_rounds` defaults to **10** (integer range **1..50**), including
+reviewers selected with `ato agent reviewer`. This limits review turns, including
+the initial review. A `request_changes` verdict continues normal rework while
+progress is made; reaching the limit blocks with `REVIEW_CHANGES_REQUESTED`.
+Previous blocker findings are supplied to the next reviewer turn.
+
+`worker_contract.max_attempts` (default 3) caps execution failures separately from
+review rework. Only a failed worker execution increments `execution_failures`;
+exhaustion blocks with `WORKER_FAILED`. Guardrail and independent check failures
+use a separate `verification_failures` repair counter with the same cap, reset
+once both pass and execution advances to review. Normal review rework consumes
+neither failure budget. With `max_attempts=1`, advisory check failure still settles
+as `completed` with reason `CHECKS_FAILED`; guardrail violations still block.
+
+Optional `worker_contract.max_no_progress_rounds` defaults at runtime to **2**
+(integer range **1..10**). Omission adds no field to the normalized contract,
+preserving the existing canonical spec and digest. The first failure or blocker
+round establishes a baseline (streak 0). Consecutive identical execution, check,
+or guardrail failures on an unchanged tree increase the streak. Review rework
+also increases it when all previous blockers remain, even if the tree changed;
+blockers are matched by file, category, and case/whitespace-normalized title.
+Resolving a previous blocker resets the review streak. At streak 1, worker
+feedback warns about the repeated issue. At the configured limit the run pauses
+with `status=blocked`, `reason=REPEATED_NO_PROGRESS`, an actionable next step, a
+trace event, and a failure notice. Inspect the issue before resuming.
+
+`stage` exposes the category (`implement`, `execution_failure`, `review_rework`,
+`verification_repair`, or `repeated_no_progress`), monotonic `turn`/`attempts`,
+independent counters and limits, `progress_made`, `repeated_kind`, and
+`repeated_items`. Runtime directories use `attempt-{turn}` across all cycles.
+Watchdog's advisory `EXECUTION_FAILURE_RETRY` signals repeated execution failures;
+healthy review rework produces no failure alert. `REPEATED_NO_PROGRESS` signals a
+repeat from streak 1 or a run paused for that reason. `UNHANDLED_FAILURE` includes
+the failure category. Watchdog does not itself stop or resume execution.
+
+Once a terminal task has a matching successful sample and no active or pending
+alerts, Watchdog reports `state="settled"`. Cached settled samples stay settled
+even after the 180-second freshness window; changed tasks require a new sample.

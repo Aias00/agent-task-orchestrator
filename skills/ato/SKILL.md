@@ -36,3 +36,22 @@ plus reviewer timeout/source when configured. Worker/reviewer defaults are 600/3
 seconds. Run, resume, and status receipts show worker timeout/source in `execution`
 and `run_history`; `project trace` submission/resume events record them too.
 Single-run overrides report `resume_override`; old unknown sources report `legacy`.
+
+Review defaults to `max_review_rounds=10` (integer 1..50). Normal review rework
+has its own counter and does not consume the worker execution-failure budget
+(`max_attempts=3` by default). Guardrail/check repair uses a separate counter with
+the same cap, reset when verification passes. Task reviewer overrides also control
+the effective review limit; reaching it blocks with `REVIEW_CHANGES_REQUESTED`.
+
+Optional `worker_contract.max_no_progress_rounds` defaults to 2 (integer 1..10).
+Its omission preserves canonical spec/hash compatibility. The first issue sets a
+baseline; unchanged failures or unresolved review blockers increase the streak.
+At streak 1 the worker gets a repeated-issue warning; at the limit the executor
+pauses with `REPEATED_NO_PROGRESS`, records the issue, and queues a failure notice.
+Inspect `stage.category`, the separate failure/rework counters, `progress_made`,
+`no_progress_streak`, and `repeated_items` before deciding how to resume.
+
+Watchdog distinguishes `EXECUTION_FAILURE_RETRY` from `REPEATED_NO_PROGRESS`;
+healthy `review_rework` produces no failure alerts. Blocked alerts include their
+category. Terminal tasks with a matching successful sample and no active/pending
+alerts report Watchdog `state="settled"`, remaining settled after 180 seconds.
