@@ -337,6 +337,9 @@ def _worker_controller_args(store, task_id):
     origin = store.submission_origin(task_id)
     if origin is not None and origin.kind != "codex":
         return []
+    if origin is None and (os.environ.get("ATO_SUBMISSION_KIND") == "agy"
+                           or os.environ.get("ANTIGRAVITY_CONVERSATION_ID")):
+        return []
     thread = origin.session_id if origin is not None else os.environ.get("CODEX_THREAD_ID")
     return worker_config_args(store.native_home, thread)
 

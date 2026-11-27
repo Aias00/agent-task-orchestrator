@@ -411,6 +411,42 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertIs(caught.exception, error)
         opened.assert_called_once_with()
 
+    def test_p0_3_real_worker_args_preserves_sandbox_and_approval_defaults_when_controller_empty(self):
+        adapter_worker = ["codex", "exec", "--sandbox", "workspace-write", "-c", 'approval_policy="never"',
+                          "--json", "--output-schema", "/tmp/s", "-o", "/tmp/o", "--model", "m-spec",
+                          "-c", "sandbox_workspace_write.network_access=true", "-"]
+        # AGY / plain-shell submission: controller_args=() keeps workspace-write + approval_policy + spec model/perms.
+        built = ato_execution_host._real_worker_args("/bin/codex", adapter_worker, (), "/r/schema.json", "/r/result.json")
+        self.assertEqual(built[:10], ["/bin/codex", "exec", "--sandbox", "workspace-write",
+                                      "-c", 'approval_policy="never"', "--model", "m-spec",
+                                      "-c", "sandbox_workspace_write.network_access=true"])
+        # Read-only planner keeps --sandbox read-only.
+        adapter_planner = ["codex", "exec", "--sandbox", "read-only", "-c", 'approval_policy="never"', "--json", "-"]
+        planner_built = ato_execution_host._real_worker_args("/bin/codex", adapter_planner, (), "/r/s", "/r/r")
+        self.assertIn("--sandbox", planner_built)
+        self.assertEqual(planner_built[planner_built.index("--sandbox") + 1], "read-only")
+        # Explicit Codex controller_args override sandbox, approval_policy, and model without duplicates.
+        controller = ("-c", 'model="m-ctrl"', "-c", 'approval_policy="on-request"', "--sandbox", "danger-full-access")
+        inherited = ato_execution_host._real_worker_args("/bin/codex", adapter_worker, controller, "/r/s", "/r/r")
+        self.assertEqual(inherited.count("--sandbox"), 1)
+        self.assertEqual(inherited[inherited.index("--sandbox") + 1], "danger-full-access")
+        self.assertNotIn("m-spec", inherited)
+        self.assertNotIn('approval_policy="never"', inherited)
+        self.assertNotIn("sandbox_workspace_write.network_access=true", inherited)
+
+    def test_p1_7_worker_controller_args_ignores_ambient_codex_thread_under_agy_when_origin_missing(self):
+        task_id = self.create()
+        self.assertIsNone(self.store.submission_origin(task_id))
+        with patch.object(execution, "worker_config_args", return_value=["leaked"]) as cfg:
+            for env in ({"CODEX_THREAD_ID": "11111111-1111-1111-1111-111111111111", "ATO_SUBMISSION_KIND": "agy"},
+                        {"CODEX_THREAD_ID": "11111111-1111-1111-1111-111111111111", "ANTIGRAVITY_CONVERSATION_ID": "conv-1"}):
+                with patch.dict(os.environ, env, clear=False):
+                    self.assertEqual(execution._worker_controller_args(self.store, task_id), [])
+            cfg.assert_not_called()
+            with patch.dict(os.environ, {"CODEX_THREAD_ID": "11111111-1111-1111-1111-111111111111"}, clear=True):
+                self.assertEqual(execution._worker_controller_args(self.store, task_id), ["leaked"])
+            cfg.assert_called_once_with(self.store.native_home, "11111111-1111-1111-1111-111111111111")
+
     def test_independent_worktrees_run_concurrently_but_each_task_has_one_driver(self):
         first, second = self.create(), self.create()
         (self.worker_home / "mode").write_text("linger")

@@ -1,8 +1,24 @@
 """Version-bound compact notices and the scoped reader for the private runtime."""
+from pathlib import Path
 import shlex
 
 from ato_common.ato_config import private_runtime_command
 from ato_task.ato_task_store import DELIVERY_OUTCOMES, TaskError, _identifier, _require, _sha, canonical_json
+
+
+def _valid_notice_body(body, ref):
+    if not isinstance(body, str):
+        return False
+    lines = body.split("\n")
+    if len(lines) != 2 or lines[0] != f"[ato handoff {ref}]":
+        return False
+    try:
+        tokens = shlex.split(lines[1])
+    except ValueError:
+        return False
+    return (len(tokens) >= 4 and Path(tokens[-3]).name == "ato_runtime.py"
+            and tokens[-2:] == ["read-handoff", ref]
+            and all(flag.startswith("-") for flag in tokens[1:-3]))
 
 
 def handoff_id(task, binding, phase, correlation, item, target):
@@ -47,7 +63,8 @@ def read_handoff(host, proof, ref):
                         task, binding, phase, correlation, item, target):
                     continue
                 _require(notice and not notice["superseded"] and notice["binding_revision"] == binding["revision"]
-                         and notice["body"] == render_notice(task, binding, phase, correlation, item, target),
+                         and (notice["body"] == render_notice(task, binding, phase, correlation, item, target)
+                              or _valid_notice_body(notice["body"], ref)),
                          "STALE_REQUEST")
                 _require(task["stop_epoch"] == notice["stop_epoch"] and task["run_id"] == notice["run_id"]
                          and item["generation"] == notice["generation"], "STALE_REQUEST")

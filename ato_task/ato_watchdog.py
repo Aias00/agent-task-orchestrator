@@ -12,7 +12,7 @@ import time
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ato_task import ato_product
+from ato_task import ato_process, ato_product
 from ato_common import ato_config
 from ato_workflow import notification_state
 from ato_workflow.message_bus import MailboxError
@@ -33,6 +33,31 @@ def scope(task, binding):
                 runtime_seal=task["creation"]["runtime_seal"])
 
 
+def _validate_record(record, task_id):
+    _require(isinstance(record, dict) and record.get("version") == 1 and record.get("task_id") == task_id
+             and isinstance(record.get("alerts"), list), "STATE_CORRUPT")
+    if "scope" in record and record["scope"] is not None:
+        _require(isinstance(record["scope"], dict), "STATE_CORRUPT")
+    if record.get("sampled_at") is not None:
+        _require(isinstance(record.get("scope"), dict) and all(
+            key in record["scope"] for key in ("run_id", "stop_epoch", "revision", "runtime_seal")),
+            "STATE_CORRUPT")
+    if "pending" in record and record["pending"] is not None:
+        _require(isinstance(record["pending"], dict) and all(
+            isinstance(k, str) and type(v) is int for k, v in record["pending"].items()),
+            "STATE_CORRUPT")
+    if "metrics" in record and record["metrics"] is not None:
+        _require(isinstance(record["metrics"], dict), "STATE_CORRUPT")
+    required_alert = ("id", "code", "state", "first_seen", "last_seen", "resolved_at",
+                      "evidence", "scope", "notification")
+    for row in record["alerts"]:
+        _require(isinstance(row, dict) and all(key in row for key in required_alert)
+                 and isinstance(row["scope"], dict) and "run_id" in row["scope"]
+                 and isinstance(row["notification"], dict)
+                 and isinstance(row["notification"].get("state"), str), "STATE_CORRUPT")
+    return record
+
+
 def read(store, task_id):
     _identifier(task_id, "task")
     try:
@@ -40,9 +65,7 @@ def read(store, task_id):
             record = _read_json(fd, task_id + ".json")
     except FileNotFoundError:
         return None
-    _require(isinstance(record, dict) and record.get("version") == 1 and record.get("task_id") == task_id
-             and isinstance(record.get("alerts"), list), "STATE_CORRUPT")
-    return record
+    return _validate_record(record, task_id)
 
 
 def save(store, record):
@@ -59,7 +82,7 @@ def public_status(store, task_id, *, now=None):
         if record is None:
             return dict(state="not_observed", alerts=[])
         sampled = record.get("sampled_at")
-        current = record.get("scope", {})
+        current = record.get("scope") or {}
         matches = all(current.get(key) == value for key, value in (
             ("run_id", task["run_id"]), ("stop_epoch", task["stop_epoch"]),
             ("revision", task["revision"]), ("runtime_seal", task["creation"]["runtime_seal"])))
@@ -79,10 +102,10 @@ def public_status(store, task_id, *, now=None):
                                     if key in {"state", "error"}}
             alerts.append(item)
         return dict(state=state, sampled_at=sampled, sample_error=record.get("sample_error"),
-                    alerts=alerts, metrics=record.get("metrics"),
+                    diff_error=record.get("diff_error"), alerts=alerts, metrics=record.get("metrics"),
                     last_progress_at=record.get("last_progress_at"),
                     evidence_complete=record.get("evidence_complete", False))
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return dict(state="unavailable", alerts=[], sample_error="MONITOR_RECORD_UNAVAILABLE")
 
 
@@ -200,14 +223,41 @@ def reduce_sample(previous, sample):
     record.update(scope=sample["scope"], sampled_at=now, status=sample["status"],
                   progress=sample["progress"], pending=pending, metrics=metrics,
                   generation=sample["generation"], evidence_complete=sample["evidence_complete"],
-                  sample_error=sample["diff_error"])
+                  diff_error=sample["diff_error"], sample_error=None)
     return record
 
 
 def record_failure(store, task_id, code):
-    record = read(store, task_id) or dict(version=1, task_id=task_id, alerts=[], sampled_at=None)
+    try:
+        record = read(store, task_id)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        record = None
+    record = record or dict(version=1, task_id=task_id, alerts=[], sampled_at=None)
     record.update(sample_error=code, sample_failed_at=time.time(), pending={})
     save(store, record)
+
+
+def _probe_exited(process):
+    if isinstance(process, subprocess.Popen):
+        if process.returncode is not None:
+            return True
+        try:
+            _, zombie, _ = ato_process._observe(process.pid)
+            return zombie
+        except (OSError, ValueError, IndexError):
+            if ato_process._darwin_zombie(process.pid):
+                return True
+            return process.poll() is not None
+    return process.poll() is not None
+
+
+def _task_scope_key(task):
+    return (task["run_id"], task["stop_epoch"], task["revision"], task["creation"]["runtime_seal"])
+
+
+def _record_scope_key(record):
+    current = record.get("scope") or {}
+    return (current.get("run_id"), current.get("stop_epoch"), current.get("revision"), current.get("runtime_seal"))
 
 
 class Sampler:
@@ -216,55 +266,78 @@ class Sampler:
     def __init__(self, host, *, clock=time.monotonic):
         self.host, self.clock = host, clock
         self.due = {}
+        self.terminal_scope = {}
         self.job = None
         self.last_error = None
         self.started_at = time.time()
 
     def _close_job(self, *, kill=False):
         job = self.job
-        if kill:
+        try:
+            process = job["process"]
+            reaped = isinstance(process, subprocess.Popen) and process.returncode is not None
+            if kill and not reaped:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if not reaped:
+                process.wait()
+        finally:
             try:
-                os.killpg(job["process"].pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        job["process"].wait()
-        job["output"].close()
-        self.job = None
+                job["output"].close()
+            finally:
+                self.job = None
 
     def close(self):
         if self.job is not None:
             self._close_job(kill=True)
 
-    def poll(self):
-        now = self.clock()
-        if self.job is not None:
-            job = self.job
-            if job["process"].poll() is None and now - job["started"] < SAMPLE_TIMEOUT:
-                return None
-            task_id = job["task_id"]
-            try:
-                _require(job["process"].poll() == 0, "BUSY")
-                job["output"].seek(0)
-                encoded = job["output"].read(MAX_RECORD + 1)
-                _require(len(encoded) <= MAX_RECORD, "STATE_CORRUPT")
-                sample = json.loads(encoded)
-                _require(sample["task_id"] == task_id, "STATE_CORRUPT")
-                task, _, binding = self.host.interaction._task(task_id)
-                _require(sample["scope"] == scope(task, binding), "BUSY")
-                sample["baseline"] = task["created_at"] < self.started_at
-                save(self.host.store, reduce_sample(read(self.host.store, task_id), sample))
-                self.last_error = None
-            except (OSError, ValueError, KeyError, TypeError):
-                self.last_error = "SAMPLE_UNAVAILABLE"
-                record_failure(self.host.store, task_id, self.last_error)
-            finally:
-                self._close_job(kill=True)
-                self.due[task_id] = now + INTERVAL
-            return task_id
-        tasks = self.host.interaction._task_ids()
-        self.due = {key: value for key, value in self.due.items() if key in tasks}
-        ready = sorted((self.due.get(key, 0), key) for key in tasks if self.due.get(key, 0) <= now)
-        for _, task_id in ready:
+    def _is_settled_terminal(self, record):
+        return (record is not None and record.get("status") in TERMINAL
+                and record.get("sample_error") is None
+                and all(row["state"] != "active"
+                        and row["notification"]["state"] not in {"pending", "queued", "claimed", "dispatching"}
+                        for row in record["alerts"]))
+
+    def _classify_task(self, task_id):
+        try:
+            task = self.host.store.load_task(task_id)
+            key = _task_scope_key(task)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False, False
+        settled = self.terminal_scope.get(task_id)
+        if settled is not None:
+            if settled == key:
+                return True, True
+            self.terminal_scope.pop(task_id, None)
+        try:
+            record = read(self.host.store, task_id)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False, False
+        if self._is_settled_terminal(record) and _record_scope_key(record) == key:
+            self.terminal_scope[task_id] = key
+            return True, True
+        return bool(record and record.get("status") in TERMINAL), False
+
+    def _start_next(self, now):
+        interaction = getattr(self.host, "interaction", None)
+        if interaction is None or self.job is not None:
+            return
+        tasks = interaction._task_ids()
+        live = set(tasks)
+        self.due = {key: value for key, value in self.due.items() if key in live}
+        self.terminal_scope = {key: value for key, value in self.terminal_scope.items() if key in live}
+        ready = []
+        for task_id in tasks:
+            is_terminal, unchanged_terminal = self._classify_task(task_id)
+            if unchanged_terminal:
+                continue
+            due_at = self.due.get(task_id, 0)
+            if due_at <= now:
+                ready.append((1 if is_terminal else 0, due_at, task_id))
+        ready.sort()
+        for _, _, task_id in ready:
             self.due[task_id] = now + INTERVAL
             output = tempfile.TemporaryFile()
             environment = dict(os.environ, ATO_HOME=str(self.host.store.home),
@@ -278,9 +351,66 @@ class Sampler:
                 output.close()
                 self.last_error = "SAMPLE_START_FAILED"
                 record_failure(self.host.store, task_id, self.last_error)
-                return None
+                return
             self.job = dict(process=process, output=output, task_id=task_id, started=now)
-            break
+            return
+
+    def poll(self):
+        now = self.clock()
+        if self.job is not None:
+            job = self.job
+            process = job["process"]
+            exited = _probe_exited(process)
+            if not exited and now - job["started"] < SAMPLE_TIMEOUT:
+                return None
+            task_id = job["task_id"]
+            retry_delay = INTERVAL
+            try:
+                if exited:
+                    if isinstance(process, subprocess.Popen) and process.returncode is None:
+                        # Sweep lingering descendants while leader is still an unreaped zombie.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        returncode = process.wait()
+                    else:
+                        returncode = process.poll()
+                else:
+                    returncode = None
+                _require(returncode == 0, "SAMPLE_FAILED")
+                job["output"].seek(0)
+                encoded = job["output"].read(MAX_RECORD + 1)
+                _require(len(encoded) <= MAX_RECORD, "STATE_CORRUPT")
+                sample = json.loads(encoded)
+                _require(isinstance(sample, dict) and sample.get("task_id") == task_id, "STATE_CORRUPT")
+                task, _, binding = self.host.interaction._task(task_id)
+                _require(sample["scope"] == scope(task, binding), "BUSY")
+                sample["baseline"] = task["created_at"] < self.started_at
+                try:
+                    previous = read(self.host.store, task_id)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    previous = None
+                updated = reduce_sample(previous, sample)
+                save(self.host.store, updated)
+                if self._is_settled_terminal(updated):
+                    self.terminal_scope[task_id] = _record_scope_key(updated)
+                else:
+                    self.terminal_scope.pop(task_id, None)
+                self.last_error = None
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                if getattr(exc, "code", None) == "BUSY":
+                    self.last_error = "BUSY"
+                    retry_delay = 5
+                else:
+                    self.last_error = "SAMPLE_UNAVAILABLE"
+                    record_failure(self.host.store, task_id, self.last_error)
+            finally:
+                self._close_job(kill=not exited)
+                self.due[task_id] = now + retry_delay
+            self._start_next(now)
+            return task_id
+        self._start_next(now)
         return None
 
 
@@ -310,13 +440,18 @@ def _deliver_alert(host, task, binding, record, alert, dispatch):
         return
     # Recover expired leases and messages, including a crash after enqueue.
     bus.recover()
-    current = (alert["state"] == "active" and record["scope"] == scope(task, binding)
-               and all(alert["scope"][key] == record["scope"][key] for key in
-                       ("run_id", "stop_epoch", "binding_revision", "spec_sha256", "runtime_seal"))
-               and 0 <= time.time() - record["sampled_at"] <= STALE_SECONDS and not record.get("sample_error"))
+    live_scope = scope(task, binding)
+    identity_keys = ("run_id", "stop_epoch", "binding_revision", "spec_sha256", "runtime_seal")
+    same_identity = (alert["state"] == "active"
+                     and all(record["scope"].get(key) == live_scope[key] for key in identity_keys)
+                     and all(alert["scope"].get(key) == live_scope[key] for key in identity_keys))
+    fresh = (record["scope"] == live_scope
+             and record.get("sampled_at") is not None
+             and 0 <= time.time() - record["sampled_at"] <= STALE_SECONDS
+             and not record.get("sample_error"))
     muted = _muted(host, task)
     reservation = notification.get("reservation")
-    if reservation is not None and (not current or muted):
+    if reservation is not None and (not same_identity or muted):
         sender = host.delivery_sender(service._scope_record(task), reservation)
         if sender is not None:
             _cancel_notification(bus, sender, notification)
@@ -325,12 +460,21 @@ def _deliver_alert(host, task, binding, record, alert, dispatch):
         else:
             notification["state"] = "cancelled"
         return
-    if not current or muted:
-        notification["state"] = "muted" if muted else "cancelled"
+    if muted:
+        notification["state"] = "muted"
+        return
+    if not same_identity:
+        notification["state"] = "cancelled"
+        return
+    if not fresh:
+        # Defer on transient revision bumps, backward NTP steps, or sample errors.
         return
     origin = host.store.submission_origin(task_id)
     if origin is None or origin.kind != "codex" or origin.session_id is None:
         notification["state"] = "unsupported" if origin and origin.kind == "agy" else "unavailable"
+        return
+    if record.get("generation") is None:
+        notification["state"] = "unavailable"
         return
     item = dict(created_at=alert["first_seen"], generation=record["generation"])
     route = host.local_completion_route(service._scope_record(task), binding, item)
@@ -347,23 +491,20 @@ def _deliver_alert(host, task, binding, record, alert, dispatch):
         save(host.store, record)
     _require((route.sender.endpoint_id, route.target.endpoint_id, route.source_ref) ==
              (reservation["sender"], reservation["target"], reservation["source_ref"]), "STALE_REQUEST")
+    if reservation.get("generation") is None:
+        notification["state"] = "unavailable"
+        return
+    watchdog_contract = "watchdog:" + task["spec_sha256"]
     if notification["message_id"] is None:
-        # Share the existing FIFO endpoint without advancing its business route.
-        with bus._transaction() as connection:
-            existing = connection.execute(
-                "select generation,route_generation from bindings where sender=? and target=? "
-                "and task_id=? and contract_hash=?",
-                (reservation["sender"], reservation["target"], task_id, task["spec_sha256"])).fetchone()
-        if existing is not None:
-            _require(json.loads(existing["generation"]) == reservation["generation"], "STALE_REQUEST")
+        # Use a dedicated watchdog binding namespace so generation advances never
+        # collide with business completion routes.
         bound = bus.bind_route(sender=reservation["sender"], target=reservation["target"],
-            task_id=task_id, contract_hash=task["spec_sha256"], source=reservation["source_ref"],
-            generation=reservation["generation"], advance=False,
-            route_generation=existing["route_generation"] if existing is not None else 0,
+            task_id=task_id, contract_hash=watchdog_contract, source=reservation["source_ref"],
+            generation=reservation["generation"], advance=True,
             cross_project=route.sender.project != route.target.project)
         message = bus.enqueue(route.sender, binding_id=bound["id"], target=reservation["target"],
             kind="ato_watchdog", body=reservation["body"], idempotency_key="watchdog:" + alert["id"],
-            task_id=task_id, contract_hash=task["spec_sha256"], correlation_id=alert["id"],
+            task_id=task_id, contract_hash=watchdog_contract, correlation_id=alert["id"],
             protocol=2, generation=reservation["generation"], canonical_id=alert["id"],
             authority_source=reservation["source_ref"], expires_at=reservation["expires_at"])
         notification.update(message_id=message["id"], state=message["state"])
@@ -387,8 +528,15 @@ def _deliver_alert(host, task, binding, record, alert, dispatch):
                 except MailboxError:
                     pass
                 raise
-        dispatch(host, bus, route, message["id"], guard)
-    notification["state"] = bus.message(message["id"])["state"]
+        try:
+            dispatch(host, bus, route, message["id"], guard)
+        finally:
+            try:
+                notification["state"] = bus.message(message["id"])["state"]
+            except MailboxError:
+                pass
+    else:
+        notification["state"] = message["state"]
 
 
 def deliver(host, task_id, dispatch):
@@ -404,7 +552,7 @@ def deliver(host, task_id, dispatch):
         try:
             _deliver_alert(host, task, binding, record, alert, dispatch)
             notification.pop("error", None)
-        except (OSError, ValueError, MailboxError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, MailboxError):
             notification["error"] = "NOTIFICATION_UNAVAILABLE"
         save(host.store, record)
 

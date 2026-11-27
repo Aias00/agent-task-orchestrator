@@ -55,7 +55,8 @@ if sys.argv[1:] == ["--version"]:
     print("codex-cli 0.171.0")
     sys.exit(0)
 assert sys.argv[1] == "exec"
-assert "--sandbox" not in sys.argv
+assert "--sandbox" in sys.argv and sys.argv[sys.argv.index("--sandbox") + 1] == "workspace-write"
+assert 'approval_policy="never"' in sys.argv
 assert not any('ato-host' in value or '--ignore-user-config' == value for value in sys.argv)
 assert "ATO_ACTOR_FILE" not in os.environ
 assert os.environ.get("OPENAI_API_KEY") == "private-fixture-environment-token"

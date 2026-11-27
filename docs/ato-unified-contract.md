@@ -119,7 +119,7 @@ as well.
 
 | Exit | Meaning and v1 error codes |
 | --- | --- |
-| 0 | Operation succeeded or repeated an identical authorized decision. For foreground `run`, settled successfully in `completed`. A recorded STOP or human answer can return 0 with unresolved cleanup or delivery explicitly represented in its result. |
+| 0 | Operation succeeded or repeated an identical authorized decision. For foreground `run`, settled in `completed` (inspect `reason` and `checks` because advisory host checks report failed criteria as `reason="CHECKS_FAILED"` separately from implementation completion). A recorded STOP or human answer can return 0 with unresolved cleanup or delivery explicitly represented in its result. |
 | 2 | Invalid invocation or data. `USAGE`, `INVALID_ID`, `INVALID_REPO`, `INVALID_JSON`, `UNSUPPORTED_VERSION`, `INVALID_SPEC`, `INVALID_EVIDENCE`, `UNSUPPORTED_CAPABILITY`. |
 | 3 | `AUTH_REQUIRED` for missing/invalid credentials, `NOT_FOUND` for absent or out-of-scope IDs, `FORBIDDEN` for a visible object and an unauthorized action. |
 | 4 | Valid operation cannot proceed or its foreground work reached a non-success boundary. `BUSY`, `NOT_RESUMABLE`, `STOPPED`, `STALE_REQUEST`, `BINDING_CHANGED`, `DECISION_CONFLICT`, `PRODUCT_CHANGED`, `GUARDRAIL_VIOLATION`, `CHECKS_REQUIRED`, `LAUNCH_FAILED`, `CLEANUP_BLOCKED`, `DELIVERY_UNKNOWN`, `RUN_UNSETTLED`. |
@@ -577,14 +577,16 @@ outcome, and content digests of retained logs. Only the owning independent
 host creates technical receipts. Capture authoritative evidence before
 allowing further worktree mutations. The current `checks_sha256` hashes
 the canonical ordered receipt references for **all** original command
-criteria. For required review, retain its structured verdict, product
-and review revision, Run provenance and the check-set digest reviewed.
-If a recheck produces a different check-set digest, establish a matching
-required review before accepting. No Worker-written status, stdout
-claim, arbitrary path or manual off-record waiver substitutes for a passed
-check set. Capture canonical bytes once, publish as private immutable
-content-addressed blobs, and verify existence and digest every time a
-current receipt is consumed.
+criteria. When strict review verification is enabled (fixture or explicit review
+verification), retain its structured verdict, product and review revision, Run
+provenance and the check-set digest reviewed; ordinary local advisory
+completion records command check outcomes separately (`CHECKS_FAILED` on
+failure) and does not invoke the Reviewer. If a recheck produces a different
+check-set digest under strict verification, establish a matching required
+review before accepting. No Worker-written status, stdout claim, arbitrary path
+or manual off-record waiver substitutes for host-recorded check receipts. Capture
+canonical bytes once, publish as private immutable content-addressed blobs, and
+verify existence and digest every time a current receipt is consumed.
 
 A general edit, worktree substitution, changed index, missing evidence,
 or new check set invalidates a previous acceptance for the current
@@ -657,9 +659,10 @@ authorize the decision independently of the strings in the file.
 }
 ```
 
-Require current scope, settled execution, matched product, passed complete independent
-checks and any required matching review. Match and pin the review receipt
-when needed. Record source bytes' digest and
+Require current scope, settled execution, matched product, verified
+independent check receipts (passed under strict verification, or matching the
+retained advisory check set for advisory completions) and any required matching
+review when present. Match and pin the review receipt when needed. Record source bytes' digest and
 the verified, non-secret actor audit reference. Normalize criterion order
 for comparison. The decision key is Task, spec, product, check set, the
 normalized decision fields and the verified user principal. Repeating the

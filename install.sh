@@ -45,11 +45,17 @@ EOF
 
     command -v git >/dev/null 2>&1 || fail 'ATO requires Git. Install Git and rerun the installer.'
     ato_python=$(find_python)
-    if [ -z "${ATO_INSTALL_REF:-}" ] && [ -f "$0" ]; then
-        ato_source=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)
-        if [ -f "$ato_source/scripts/quick_install.py" ]; then
-            exec "$ato_python" -IB "$ato_source/scripts/quick_install.py" "$@"
-        fi
+    if [ -z "${ATO_INSTALL_REF:-}" ]; then
+        case "$(basename -- "$0")" in
+            install.sh)
+                if [ -f "$0" ]; then
+                    ato_source=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)
+                    if [ -f "$ato_source/scripts/quick_install.py" ]; then
+                        exec "$ato_python" -IB "$ato_source/scripts/quick_install.py" "$@"
+                    fi
+                fi
+                ;;
+        esac
     fi
 
     ato_checkout=$(mktemp -d "${TMPDIR:-/tmp}/ato-install.XXXXXXXX")

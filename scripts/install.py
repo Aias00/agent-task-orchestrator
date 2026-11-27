@@ -3,22 +3,39 @@
 import argparse
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import stat
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_ROOT = str(Path(__file__).resolve().parents[1])
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from ato_common.ato_core import ensure_private_dir
 
-from release_snapshot import (
+from scripts.release_snapshot import (
     ENTRIES, PUBLIC, SURFACE, Refused, atomic_entry, atomic_bytes, entry_set,
     entrypoints, release_lock, require, safe_record, snapshot_source,
 )
 
 
+def _check_existing_skill_dir(directory):
+    if not directory.exists() and not directory.is_symlink():
+        return
+    info = directory.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not (info.st_mode & 0o022),
+            'Skill directory must be owned and not group/world writable')
+
+
 def install(root, bin_dir, skills_dir=None):
+    root = Path(root).resolve()
+    require(bin_dir.is_absolute() and bin_dir.resolve() == bin_dir and not bin_dir.is_relative_to(root),
+            'installation requires a canonical bin directory outside the snapshot')
+    if skills_dir is not None:
+        require(skills_dir.is_absolute() and skills_dir.resolve() == skills_dir
+                and not skills_dir.is_relative_to(root) and skills_dir != bin_dir,
+                'installation requires a distinct canonical skills directory outside the snapshot')
     source = snapshot_source(root)
     require(source['surface'] == SURFACE, 'installation requires a qualified unified snapshot')
     entry = entry_set(source)[PUBLIC]
@@ -32,6 +49,7 @@ def install(root, bin_dir, skills_dir=None):
         require(current[PUBLIC] in (None, entry), 'existing ato requires journaled cutover')
         if skill:
             require(skill.parent.resolve() == skill.parent, 'Skill target is indirect')
+            _check_existing_skill_dir(skill.parent)
             try:
                 data, info = safe_record(skill)
             except FileNotFoundError:
@@ -52,6 +70,8 @@ def install(root, bin_dir, skills_dir=None):
         if skill:
             if not skill.parent.exists():
                 ensure_private_dir(skill.parent)
+            else:
+                _check_existing_skill_dir(skill.parent)
             if not skill.exists():
                 atomic_bytes(skill, skill_data, 0o644)
         if current[PUBLIC] is None:

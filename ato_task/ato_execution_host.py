@@ -139,6 +139,59 @@ class _FixtureReview:
         return hub_sandbox.checked_turn(request, invoke)
 
 
+def _real_worker_args(executable, adapter_args, controller_args, safe_schema, result_path):
+    """Preserve controller overrides while keeping adapter sandbox/approval defaults."""
+    controller = list(controller_args)
+    has_sandbox = False
+    has_approval = False
+    has_model = False
+    index = 0
+    while index < len(controller):
+        token = controller[index]
+        if token in ("--sandbox", "-s", "--dangerously-bypass-approvals-and-sandbox") or token.startswith(
+                ("--sandbox=", "-s=")):
+            has_sandbox = True
+        elif token in ("--model", "-m") or token.startswith(("--model=", "-m=")):
+            has_model = True
+        elif token == "-c" and index + 1 < len(controller):
+            setting = controller[index + 1]
+            if setting.startswith("sandbox_mode="):
+                has_sandbox = True
+            elif setting.startswith("approval_policy="):
+                has_approval = True
+            elif setting.startswith("model="):
+                has_model = True
+            index += 1
+        index += 1
+    fallback = []
+    index = 2  # Skip [<codex>, "exec"].
+    while index < len(adapter_args):
+        token = adapter_args[index]
+        if token == "--sandbox" and index + 1 < len(adapter_args):
+            if not has_sandbox:
+                fallback.extend((token, adapter_args[index + 1]))
+            index += 2
+            continue
+        if token == "--model" and index + 1 < len(adapter_args):
+            if not has_model:
+                fallback.extend((token, adapter_args[index + 1]))
+            index += 2
+            continue
+        if token == "-c" and index + 1 < len(adapter_args):
+            setting = adapter_args[index + 1]
+            if setting.startswith("approval_policy="):
+                if not has_approval:
+                    fallback.extend((token, setting))
+            elif setting.startswith("sandbox_workspace_write."):
+                if not has_sandbox:
+                    fallback.extend((token, setting))
+            index += 2
+            continue
+        index += 1
+    return [executable, "exec", *fallback, *controller,
+            "--json", "--output-schema", str(safe_schema), "-o", str(result_path), "-"]
+
+
 class CommandHost:
     """Receipts precede launch and retain identities if cleanup is ambiguous."""
 
@@ -237,8 +290,8 @@ class CommandHost:
             _require(output.parent == owner.dir / "checkpoints")
             args[destination] = str(runtime / "result.json")
             if not self.profile.fixture:
-                args = [self.profile.worker_executable, "exec", *self.controller_args,
-                        "--json", "--output-schema", str(safe_schema), "-o", str(runtime / "result.json"), "-"]
+                args = _real_worker_args(self.profile.worker_executable, args, self.controller_args,
+                                         safe_schema, runtime / "result.json")
         executable = args[0]
         # Resolve frozen relative paths from the actual worktree. Bare
         # command names use the PATH inherited by the Run driver.

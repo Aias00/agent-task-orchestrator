@@ -48,6 +48,6 @@ py-modules = [
   "integrations/pi-acp/package-lock.json"
 ]
 
-"share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py", "scripts/ato_host_setup.py"]
+"share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py", "scripts/ato_host_setup.py", "scripts/derive_pi_acp.py"]
 
 "share/agent-task-orchestrator/skills/ato" = ["skills/ato/SKILL.md"]

@@ -226,7 +226,6 @@ def reconcile_delivery(host, args):
     task = host.store.load_task(task_id)
     with _repo_gate(host.store, task):
         task = host.store.load_task(task_id)
-        _require(task["creation"]["runtime_seal"] == host.store.runtime_seal, "RUNTIME_MISMATCH")
         bus = host.mailbox()
         _require(bus is not None, "NOT_FOUND")
         selected = bus.message(args.message_id)

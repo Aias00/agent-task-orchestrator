@@ -258,6 +258,20 @@ class PublicCLI(unittest.TestCase):
         self.assertEqual(read_handoff(app.host, proof_for(user), old_locator)["request_id"], request)
         with patch.object(app.host.store, "runtime_seal", "f" * 64):
             self.assertEqual(read_handoff(app.host, proof_for(user), old_locator)["request_id"], request)
+            # Distinct snapshot path in render_notice() (real multi-snapshot upgrade, P1-5).
+            with patch("ato_task.ato_private.render_notice",
+                       return_value=f"[ato handoff {old_locator}]\n/snapshots/release-2/.venv/bin/python -IB /snapshots/release-2/ato_runtime.py read-handoff {old_locator}"):
+                self.assertEqual(read_handoff(app.host, proof_for(user), old_locator)["request_id"], request)
+        from ato_task import ato_private
+        self.assertFalse(ato_private._valid_notice_body(f"[ato handoff {old_locator}]\n/bin/sh -c evil", old_locator))
+        self.assertFalse(ato_private._valid_notice_body(
+            f"[ato handoff handoff-{'0'*32}]\n/p/python -IB /p/ato_runtime.py read-handoff {old_locator}", old_locator))
+        # P1-5: reconcile_delivery does not reject prior-release tasks with RUNTIME_MISMATCH.
+        from scripts import ato_host_setup
+        with patch.object(app.host.store, "runtime_seal", "f" * 64), self.assertRaises(TaskError) as caught:
+            ato_host_setup.reconcile_delivery(
+                app.host, SimpleNamespace(task_id=task_id, message_id=old_message["id"], source="fixture"))
+        self.assertEqual(caught.exception.code, "FORBIDDEN")  # Passed seal check; stopped only because external_possible=False.
 
         evidence = write(self.fixture, "handoff.json", json.dumps({
             "schema_version": 1, "task_id": task_id, "spec_sha256": normalized.spec_sha256,

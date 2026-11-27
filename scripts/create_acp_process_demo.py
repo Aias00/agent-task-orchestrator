@@ -7,9 +7,13 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 BUILD = ROOT/'build/acp-process'
 REPO = BUILD/'demo-repo'
 CLI = ROOT/'tests/fixtures/acp_fixture_cli.py'
+
+from ato_workflow import task_trace
+
 
 def main():
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -30,7 +34,7 @@ def main():
     state = json.loads((run/'state.json').read_text())
     if state['status'] != 'completed':
         raise RuntimeError('demo did not complete; inspect saved run')
-    trace = json.loads(subprocess.check_output([sys.executable, str(ROOT/'runner.py'), 'trace', str(run), '--json'], text=True))
+    trace = task_trace.query(run)
     if trace['summary']['tool_call_count'] != 1 or not any(e['kind'] == 'check_passed' for e in trace['events']):
         raise RuntimeError('demo trace did not contain required fixture and check events')
     (BUILD/'demo.json').write_text(json.dumps({'run_dir': str(run.relative_to(ROOT))}, indent=2)+'\n')

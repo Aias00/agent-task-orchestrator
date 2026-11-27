@@ -53,6 +53,7 @@ def disabled_codex():
     decide this boundary. Restore all probes for offline in-process tests.
     """
     from ato_adapters import appserver, codex_session_adapter
+    import codex_legacy
     import sqlite3
     from urllib.parse import unquote, urlsplit
     native_root = Path(os.environ['CODEX_HOME']).resolve()
@@ -70,6 +71,8 @@ def disabled_codex():
     with ExitStack() as stack:
         for name in ('session_path', 'queue', 'create_session', 'current', 'observe_recovery', 'observe_reply'):
             stack.enter_context(patch.object(codex_session_adapter, name, side_effect=forbidden))
+            if hasattr(codex_legacy, name):
+                stack.enter_context(patch.object(codex_legacy, name, side_effect=forbidden))
         for name in ('session_path', 'create_session', 'current_locator', 'observe_recovery', 'observe_reply'):
             stack.enter_context(patch.object(codex_session_adapter.CodexSessionAdapter, name, staticmethod(forbidden)))
         stack.enter_context(patch.object(appserver, 'Client', side_effect=forbidden))
@@ -201,24 +204,52 @@ class ScriptedModel:
             await asyncio.gather(*list(self.handlers), return_exceptions=True)
 
 
+def _dispatch_api(repo, *args):
+    """Invoke the canonical kernel/interaction Python APIs directly."""
+    from ato_adapters import local_session_adapter
+    from ato_workflow import interaction, workflow
+    import runner
+
+    command, *rest = args
+    def flag(name, default=None):
+        if name in rest:
+            return rest[rest.index(name) + 1]
+        return default
+
+    if command == 'local-session-create':
+        return local_session_adapter.create(
+            flag('--project'), flag('--role'), flag('--source'),
+            flag('--credential-file'), flag('--user-credential-file'))
+    if command == 'local-session-grant':
+        return local_session_adapter.grant(
+            flag('--credential-file'), flag('--workflow'), flag('--output'), flag('--source'))
+    if command == 'workflow-create':
+        return str(workflow.create(flag('--repo'), flag('--plan'), origin_ref=flag('--origin-ref')))
+    actor_file = flag('--actor-file')
+    proof, reference, bound_workflow = (
+        local_session_adapter.load_actor_file(actor_file) if actor_file else (None, None, None))
+    if command == 'hub':
+        return interaction.configure_session(flag('--session-ref'), flag('--source'), actor_proof=proof)
+    if command == 'ask':
+        return interaction.ask(rest[0], flag('--question'), '', '', None, actor_proof=proof)
+    if command == 'inbox':
+        return interaction.inbox(actor_proof=proof, reference=reference, workflow=bound_workflow)
+    if command == 'read':
+        return interaction.read_question(rest[0], actor_proof=proof, presented_source=flag('--presented-source'))
+    if command == 'respond':
+        return interaction.answer(rest[0], flag('--answer'), flag('--source'), actor_proof=proof)
+    if command == 'accept-answer':
+        return interaction.accept(rest[0], actor_proof=proof)
+    if command == 'continue-task':
+        workflow.Workflow(rest[0]).execute(continuation=(flag('--accepted-answer'), proof))
+        return runner.status(rest[0])
+    raise ValueError('unsupported local smoke command: ' + str(command))
+
+
 async def cli(repo, *args, data=True):
-    """Actual candidate entrypoint, with only temporary identities/configuration."""
-    process = await asyncio.create_subprocess_exec(sys.executable, '-B', str(ROOT/'runner.py'),
-        *map(str, args), cwd=repo, env=dict(os.environ), stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True)
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), 20)
-        require(process.returncode == 0, 'candidate CLI failed: '+str(args[0])+' (output withheld)')
-        require(len(stdout) < MAX_REQUEST, 'oversized CLI output')
-        return json.loads(stdout) if data else stdout.decode().strip()
-    finally:
-        if process.returncode is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(process.wait(), 2)
-            except asyncio.TimeoutError:
-                os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+    """Actual candidate API dispatch, with only temporary identities/configuration."""
+    result = await asyncio.to_thread(_dispatch_api, repo, *args)
+    return result if data else str(result)
 
 
 def safe_events(host):

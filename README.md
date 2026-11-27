@@ -2,9 +2,10 @@
 
 `ato` submits and manages durable agent work in isolated Git worktrees. One
 Task ID follows the specification, execution attempts, STOP, independent
-checks, human questions and delivery. A Task completes when its independent
-checks and any required technical review pass. Users can record approval
-separately.
+checks, human questions and delivery. A Task runs its declared stages and
+records independent checks separately; failed checks are surfaced as
+`reason="CHECKS_FAILED"` on the completed status, so inspect `reason` and
+`checks` alongside `status`. Users can record approval separately.
 
 Specs can optionally protect paths or forbid deletions with `guardrails`.
 

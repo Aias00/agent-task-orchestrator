@@ -135,12 +135,11 @@ def _dispatch(host, bus, route, message_id, guard, *, observe_only=False):
 def _dispatch_selected(host, bus, route, endpoint, adapter, message, guard):
     if _observe(host, bus, route, endpoint, adapter, message, guard) or message["state"] != "queued":
         return
-    owner = bus.acquire_endpoint(route.target, owner="ato-observer:" + str(os.getpid()), lease_seconds=_LEASE_SECONDS)
-    try:
-        transport.dispatch_one(bus, route.target, owner, {endpoint["kind"]: adapter},
-                               message_id=message["id"], guard=guard, lease_seconds=_LEASE_SECONDS)
-    finally:
-        bus.release_endpoint(route.target, owner)
+    # Reuse the shared observer endpoint lease without releasing/rotating it so
+    # advisory dispatches cannot livelock or fence in-flight business observation.
+    owner = _owner(host, bus, route.target, message, queued=True)
+    transport.dispatch_one(bus, route.target, owner, {endpoint["kind"]: adapter},
+                           message_id=message["id"], guard=guard, lease_seconds=_LEASE_SECONDS)
 
 
 def _remove_terminal_cursor(host, message):
@@ -248,6 +247,19 @@ def observe(seal):
             _watch(host, config, fd, seal, birth, stop)
 
 
+def _counts_for_health(host, seal, task_failures):
+    if task_failures is None:
+        return True
+    for task_id in task_failures:
+        try:
+            task = host.store.load_task(task_id)
+        except (OSError, ValueError, KeyError, TypeError):
+            return True
+        if task["creation"]["runtime_seal"] == seal:
+            return True
+    return False
+
+
 def _watch(host, config, fd, seal, birth, stop):
     row = dict(pid=os.getpid(), pid_identity=birth, release=seal, consecutive_failures=0,
                failed_task_count=0, first_task_failure=None)
@@ -270,12 +282,12 @@ def _watch(host, config, fd, seal, birth, stop):
             except (OSError, ValueError, sqlite3.Error):
                 task_failures = None
             try:
-                if sampled_task := sampler.poll():
+                if (sampled_task := sampler.poll()) and sampler.last_error is None:
                     ato_watchdog.deliver(host, sampled_task, _dispatch)
                 watchdog_error = sampler.last_error
-            except (OSError, ValueError, sqlite3.Error, KeyError, TypeError, MailboxError):
+            except (OSError, ValueError, sqlite3.Error, KeyError, TypeError, AttributeError, MailboxError):
                 watchdog_error = "MONITOR_UNAVAILABLE"
-            failed = task_failures is None or bool(task_failures)
+            failed = _counts_for_health(host, seal, task_failures)
             first = next(iter(task_failures.items())) if task_failures else None
             row.update(heartbeat=time.time(), state="watching", watchdog_error=watchdog_error,
                        consecutive_failures=row["consecutive_failures"] + 1 if failed else 0,

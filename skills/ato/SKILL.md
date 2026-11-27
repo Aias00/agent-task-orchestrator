@@ -31,11 +31,14 @@ operations.
 3. Use `ato inbox` from the verified interaction endpoint. Relay the actual
    request to the user. The enrolled user records their decision using
    `ato answer REQUEST_ID --answer TEXT`.
-4. Report completion and the product location once `ato status` shows
-   `completed`. The Observer can notify the verified submitting Codex session
-   on the first successful completion. Record optional approval only when the
-   user explicitly wants a receipt. Use `ato accept TASK_ID` for a local task or
-   `ato accept TASK_ID --evidence FILE` for a scoped task.
+4. When `ato status TASK_ID` shows `completed`, inspect `reason` and
+   `checks[*].state` before reporting success: independent host checks run
+   separately and a failed check appears as `reason="CHECKS_FAILED"` even on a
+   `completed` status. Report completion, check results and the product
+   location accurately. The Observer can notify the verified submitting Codex
+   session on the first successful completion. Record optional approval only
+   when the user explicitly wants a receipt. Use `ato accept TASK_ID` for a
+   local task or `ato accept TASK_ID --evidence FILE` for a scoped task.
 5. Use `ato stop TASK_ID` for an authorized STOP. Verify cleanup in status.
    Use `ato resume TASK_ID` only for an explicit authorized continuation.
    An unresolved delivery or execution result requires reconciliation before
