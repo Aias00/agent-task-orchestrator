@@ -14,7 +14,8 @@ from ato import codex_notify, config, inbox, process, product, reviewer, worktre
 from ato.adapters.base import WorkerRequest, get_worker_runner, safe_review_detail, secret_values
 from ato.spec import (
     DEFAULT_WORKER_TIMEOUT_SECONDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
-    TaskError, new_id, normalize_spec, require,
+    DEFAULT_MAX_REVIEW_ROUNDS, DEFAULT_MAX_NO_PROGRESS_ROUNDS,
+    TaskError, blocker_fingerprint, canonical_json, new_id, normalize_spec, require, sha256_bytes,
 )
 from ato.store import Store
 
@@ -221,43 +222,111 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
     runner = worker_runner or get_worker_runner(worker_kind)
 
     feedback: str | None = None
-    attempt = 0
+    turn = 0
+    execution_failures = verification_failures = review_rework_rounds = 0
     review_session: str | None = None
+    review_kind: str | None = None
     review_round = 0
-    max_review_rounds = (active_reviewer or {}).get("max_review_rounds", 1)
+    max_review_rounds = (active_reviewer or {}).get("max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS)
+    max_no_progress = contract.get("max_no_progress_rounds", DEFAULT_MAX_NO_PROGRESS_ROUNDS)
+    no_progress_streak = 0
+    progress_made = True
+    repeated_kind = None
+    repeated_items: list = []
+    prev_failure_signature = None
+    prev_blocker_fp = None
+    prev_blocker_keys: set = set()
+    previous_findings: list[dict] = []
+    category = "implement"
+    prod = task.get("product")
+    wt = Path(task["worktree_path"]).resolve()
+    ignored = worktree.shared_links_for(task)
+
+    def stage(*, state="running", stage_id=None, step_id="worker") -> dict:
+        sid = stage_id or category
+        return {
+            "stage_id": sid, "category": category, "turn": turn,
+            "attempts": turn, "max_attempts": max_attempts,
+            "execution_failures": execution_failures, "max_execution_failures": max_attempts,
+            "verification_failures": verification_failures,
+            "review_rework_rounds": review_rework_rounds, "max_review_rounds": max_review_rounds,
+            "no_progress_streak": no_progress_streak, "max_no_progress": max_no_progress,
+            "progress_made": progress_made, "repeated_kind": repeated_kind,
+            "repeated_items": repeated_items,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "remaining_stage_ids": [],
+            "steps": [{"stage_id": sid, "step_id": step_id, "state": state, "attempts": turn}],
+        }
+
+    def settle_blocked(reason, next_step, *, outcome="blocked") -> dict:
+        store.update_run(run_id, phase="settled", outcome=outcome, error_code=reason, settled_at=time.time())
+        store.update_task(task_id, status="blocked", reason=reason, product=prod,
+                          next_step=next_step, stage=stage(state="blocked"))
+        _enqueue_terminal_notice(store, store.get_task(task_id), run_id, kind="failure",
+                                 body=f"ATO 任务 {task_id} 受阻（{reason}）。请用 ato status {task_id} 查看详情。")
+        return store.get_task(task_id)
+
+    def reset_progress() -> None:
+        nonlocal no_progress_streak, progress_made, repeated_kind, repeated_items, prev_failure_signature
+        no_progress_streak = 0
+        progress_made = True
+        repeated_kind = None
+        repeated_items = []
+        prev_failure_signature = None
+
+    def failure_progress(kind, details, items) -> None:
+        nonlocal prev_failure_signature, no_progress_streak, progress_made, repeated_kind, repeated_items
+        signature = (kind, worktree.tree_fingerprint(wt, ignored=ignored), canonical_json(details))
+        no_progress_streak = no_progress_streak + 1 if signature == prev_failure_signature else 0
+        prev_failure_signature = signature
+        progress_made = no_progress_streak == 0
+        repeated_kind = kind if no_progress_streak else None
+        repeated_items = items if no_progress_streak else []
+
+    def phase_passed(kind) -> None:
+        # A successful worker must not clear a repeated host-check or review failure.
+        if prev_failure_signature is not None and prev_failure_signature[0] == kind:
+            reset_progress()
+
+    def repeated_pause() -> dict | None:
+        nonlocal category, feedback
+        if not no_progress_streak:
+            return None
+        warning = (f"Repeated issue ({repeated_kind}, no-progress streak {no_progress_streak}/{max_no_progress}): "
+                   + json.dumps(repeated_items, ensure_ascii=False)
+                   + ". Resolve these issues with a substantive change before retrying.")
+        feedback = (feedback or "") + "\nWARNING: " + warning
+        if no_progress_streak < max_no_progress:
+            return None
+        category = "repeated_no_progress"
+        store.append_event(task_id, "repeated_no_progress",
+                           {"kind": repeated_kind, "streak": no_progress_streak, "items": repeated_items},
+                           run_id=run_id)
+        return settle_blocked("REPEATED_NO_PROGRESS", warning)
 
     try:
-        while attempt < max_attempts:
+        while True:
             if stop_requested():
                 raise TaskError("STOPPED", task_id)
-            attempt += 1
-            store.update_task(
-                task_id,
-                stage={"stage_id": "implement", "attempts": attempt, "max_attempts": max_attempts,
-                       "elapsed_seconds": round(time.monotonic() - started, 3),
-                       "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "running", "attempts": attempt}]},
-            )
-            rt = config.ensure_private_dir(config.runtime_dir() / task_id / run_id / f"attempt-{attempt}")
+            turn += 1
+            task = store.get_task(task_id)
+            active_reviewer = task.get("reviewer") or spec.get("reviewer")
+            max_review_rounds = (active_reviewer or {}).get("max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS)
+            store.update_task(task_id, stage=stage())
+            rt = config.ensure_private_dir(config.runtime_dir() / task_id / run_id / f"attempt-{turn}")
             req = WorkerRequest(
-                task_id=task_id,
-                kind=worker_kind,
-                worktree=Path(task["worktree_path"]).resolve(),
-                runtime_dir=rt,
-                prompt=_build_worker_prompt(task, spec, attempt=attempt, feedback=feedback, answers=answers),
-                sandbox=contract.get("sandbox", "workspace-write"),
-                model=model,
-                permissions=contract.get("permissions"),
-                controller_args=controller_args,
-                timeout_seconds=timeout["timeout_seconds"],
-                stop_check=stop_requested, on_child=on_child,
+                task_id=task_id, kind=worker_kind, worktree=wt, runtime_dir=rt,
+                prompt=_build_worker_prompt(task, spec, attempt=turn, feedback=feedback, answers=answers),
+                sandbox=contract.get("sandbox", "workspace-write"), model=model,
+                permissions=contract.get("permissions"), controller_args=controller_args,
+                timeout_seconds=timeout["timeout_seconds"], stop_check=stop_requested, on_child=on_child,
             )
-            store.append_event(task_id, "worker_started", {"attempt": attempt, "kind": worker_kind}, run_id=run_id)
+            store.append_event(task_id, "worker_started", {"attempt": turn, "kind": worker_kind}, run_id=run_id)
             wres = runner(req)
-            store.append_event(task_id, "worker_finished", {"attempt": attempt, "status": wres.status}, run_id=run_id)
+            store.append_event(task_id, "worker_finished", {"attempt": turn, "status": wres.status}, run_id=run_id)
 
             if stop_requested() or wres.blocker == "STOPPED":
                 raise TaskError("STOPPED", task_id)
-
             if wres.status == "needs_input":
                 q = inbox.ask_question(
                     store, task_id, kind="clarification",
@@ -267,85 +336,98 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
                 store.update_task(
                     task_id, status="waiting_input", reason="NEEDS_INPUT",
                     next_step=f"Answer {q['id']} via `ato answer {q['id']} --answer ...` then `ato resume {task_id}`",
-                    stage={"stage_id": "implement", "attempts": attempt, "elapsed_seconds": round(time.monotonic() - started, 3),
-                           "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "waiting", "attempts": attempt}]},
+                    stage=stage(state="waiting"),
                 )
                 return store.get_task(task_id)
-
             if wres.status == "blocked":
-                store.update_run(run_id, phase="settled", outcome="blocked", error_code=wres.blocker or "BLOCKED", settled_at=time.time())
-                store.update_task(
-                    task_id, status="blocked", reason=wres.blocker or "WORKER_BLOCKED",
-                    next_step=wres.next_step or wres.summary,
-                    stage={"stage_id": "implement", "attempts": attempt, "elapsed_seconds": round(time.monotonic() - started, 3),
-                           "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "blocked", "attempts": attempt}]},
-                )
-                _enqueue_terminal_notice(store, store.get_task(task_id), run_id, kind="failure",
-                                         body=f"ATO 任务 {task_id} 受阻（{wres.blocker or 'WORKER_BLOCKED'}）。请用 ato status {task_id} 查看详情。")
-                return store.get_task(task_id)
-
+                return settle_blocked(wres.blocker or "WORKER_BLOCKED", wres.next_step or wres.summary)
             if wres.status == "failed":
+                execution_failures += 1
+                category = "execution_failure"
                 feedback = f"Worker failed: {wres.summary}\n{wres.blocker}"
-                if attempt < max_attempts:
-                    continue
-                store.update_run(run_id, phase="settled", outcome="failed", error_code="WORKER_FAILED", settled_at=time.time())
-                store.update_task(task_id, status="blocked", reason="WORKER_FAILED", next_step=wres.summary)
-                _enqueue_terminal_notice(store, store.get_task(task_id), run_id, kind="failure",
-                                         body=f"ATO 任务 {task_id} 执行失败。请用 ato status {task_id} 查看详情。")
-                return store.get_task(task_id)
+                failure_progress("execution_failure", [wres.blocker, " ".join(wres.summary.split())],
+                                 [{"blocker": wres.blocker, "summary": wres.summary}])
+                paused = repeated_pause()
+                if paused is not None:
+                    return paused
+                if execution_failures >= max_attempts:
+                    return settle_blocked("WORKER_FAILED", wres.summary, outcome="failed")
+                store.update_task(task_id, stage=stage())
+                continue
+            phase_passed("execution_failure")
 
-            # Worker reported completed -> run opt-in guardrails and independent host checks.
+            # Worker completion is only a claim; guardrails and host checks remain independent.
             task = store.get_task(task_id)
+            store.update_task(task_id, stage=stage(stage_id="verify", step_id="checks"))
             diff_data = product.collect_diff(task)
             violations = product.check_guardrails(task, spec, diff=diff_data)
             if violations:
+                verification_failures += 1
+                category = "verification_repair"
                 feedback = "Guardrail violations detected: " + json.dumps(violations)
-                store.append_event(task_id, "guardrail_violation", {"attempt": attempt, "violations": violations}, run_id=run_id)
-                if attempt < max_attempts:
-                    continue
-                store.update_run(run_id, phase="settled", outcome="blocked", error_code="GUARDRAIL_VIOLATION", settled_at=time.time())
-                store.update_task(task_id, status="blocked", reason="GUARDRAIL_VIOLATION",
-                                  next_step=f"Inspect violations with `ato project diff {task_id} --stat`")
-                _enqueue_terminal_notice(store, store.get_task(task_id), run_id, kind="failure",
-                                         body=f"ATO 任务 {task_id} 触发 guardrail 保护规则。请用 ato status {task_id} 查看。")
-                return store.get_task(task_id)
+                store.append_event(task_id, "guardrail_violation", {"attempt": turn, "violations": violations}, run_id=run_id)
+                failure_progress("guardrail", sorted(violations, key=canonical_json), violations)
+                paused = repeated_pause()
+                if paused is not None:
+                    return paused
+                if verification_failures >= max_attempts:
+                    return settle_blocked("GUARDRAIL_VIOLATION",
+                                          f"Inspect violations with `ato project diff {task_id} --stat`")
+                store.update_task(task_id, stage=stage())
+                continue
+            phase_passed("guardrail")
 
             check_rows, checks_passed = product.run_checks(task, spec, stop_check=stop_requested, on_child=on_child)
             if stop_requested():
                 raise TaskError("STOPPED", task_id)
             store.save_checks(task_id, run_id, check_rows)
             prod = product.build_product(task, check_rows, diff_data=diff_data)
-            store.append_event(task_id, "checks_finished", {"attempt": attempt, "passed": checks_passed}, run_id=run_id)
-
+            store.append_event(task_id, "checks_finished", {"attempt": turn, "passed": checks_passed}, run_id=run_id)
             if not checks_passed:
-                failed_ids = [c["criterion_id"] for c in check_rows if c["state"] != "passed"]
+                verification_failures += 1
+                category = "verification_repair"
+                failed = [c for c in check_rows if c["state"] != "passed"]
+                failed_ids = sorted(c["criterion_id"] for c in failed)
                 feedback = "Failed independent checks: " + ", ".join(failed_ids) + "\n" + "\n".join(
-                    f"[{c['criterion_id']}]\n{c['output_excerpt'][-1000:]}" for c in check_rows if c["state"] != "passed"
+                    f"[{c['criterion_id']}]\n{c['output_excerpt'][-1000:]}" for c in failed
                 )
-                if attempt < max_attempts:
+                details = sorted((c["criterion_id"], c["state"],
+                                  sha256_bytes(" ".join(c["output_excerpt"].split()).encode())) for c in failed)
+                failure_progress("checks", details, failed_ids)
+                paused = repeated_pause()
+                if paused is not None:
+                    return paused
+                if verification_failures < max_attempts:
+                    store.update_task(task_id, stage=stage())
                     continue
-                # Advisory settlement: preserve product & surface CHECKS_FAILED honestly, skip reviewer.
+                # Advisory settlement remains available when the repair cap is reached without repetition.
                 if advisory_checks:
                     store.update_run(run_id, phase="settled", outcome="completed", settled_at=time.time())
-                    store.update_task(
-                        task_id, status="completed", reason="CHECKS_FAILED", product=prod, next_step=None,
-                        stage={"stage_id": "implement", "attempts": attempt, "elapsed_seconds": round(time.monotonic() - started, 3),
-                               "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "completed", "attempts": attempt}]},
-                    )
+                    store.update_task(task_id, status="completed", reason="CHECKS_FAILED", product=prod,
+                                      next_step=None, stage=stage(state="completed"))
                     _enqueue_terminal_notice(
                         store, store.get_task(task_id), run_id, kind="completion",
                         body=f"ATO 任务 {task_id} 已结束（reason=CHECKS_FAILED）。请用 ato status {task_id} 核对检查结果与产物。",
                     )
                     return store.get_task(task_id)
-                store.update_run(run_id, phase="settled", outcome="blocked", error_code="CHECKS_FAILED", settled_at=time.time())
-                store.update_task(task_id, status="blocked", reason="CHECKS_FAILED", product=prod)
-                return store.get_task(task_id)
+                return settle_blocked("CHECKS_FAILED", "Fix failed independent checks: " + ", ".join(failed_ids))
+            phase_passed("checks")
+            verification_failures = 0
 
-            # Optional read-only technical review loop.
+            # Each review uses the effective task override and receives prior blocker findings.
+            task = store.get_task(task_id)
+            active_reviewer = task.get("reviewer") or spec.get("reviewer")
+            uses_acpx = bool(active_reviewer and active_reviewer["agent"]["kind"] == "codex_acpx")
             if active_reviewer is not None:
+                max_review_rounds = active_reviewer.get("max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS)
+                if review_kind != active_reviewer["agent"]["kind"]:
+                    review_session = None
+                review_kind = active_reviewer["agent"]["kind"]
                 review_round += 1
+                category = "review_rework"
+                store.update_task(task_id, stage=stage(stage_id="review", step_id="reviewer"))
                 rev = reviewer.run_review_turn(
-                    task, spec, run_id, round_num=review_round,
+                    task, spec, run_id, round_num=review_round, previous_findings=previous_findings,
                     resume_session_id=review_session, stop_check=stop_requested, on_child=on_child,
                     runner_override=reviewer_runner, store=store,
                 )
@@ -354,59 +436,66 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
                 if not rev.ok or rev.verdict is None:
                     detail = safe_review_detail(ValueError(rev.detail), secret_values())
                     store.append_event(task_id, "review_failed", {"code": rev.code, "detail": detail}, run_id=run_id)
-                    store.update_run(run_id, phase="settled", outcome="blocked", error_code=rev.code, settled_at=time.time())
-                    store.update_task(task_id, status="blocked", reason=rev.code, product=prod,
-                                      next_step=detail)
-                    return store.get_task(task_id)
+                    return settle_blocked(rev.code, detail)
                 review_session = rev.session_id or review_session
-                store.add_review(task_id, run_id, review_round, active_reviewer["agent"]["kind"], rev.verdict, session_id=review_session)
+                store.add_review(task_id, run_id, review_round, review_kind, rev.verdict, session_id=review_session)
                 store.append_event(task_id, "review_finished", {"round": review_round, "verdict": rev.verdict["verdict"]}, run_id=run_id)
+                previous_findings = [f for f in rev.verdict["findings"] if f["severity"] == "blocker"]
                 if rev.verdict["verdict"] == "request_changes":
-                    if review_round < max_review_rounds and attempt < max_attempts:
-                        feedback = "Reviewer requested changes:\n" + json.dumps(rev.verdict["findings"], ensure_ascii=False)
-                        continue
-                    store.update_run(run_id, phase="settled", outcome="blocked", error_code="REVIEW_CHANGES_REQUESTED", settled_at=time.time())
-                    store.update_task(task_id, status="blocked", reason="REVIEW_CHANGES_REQUESTED", product=prod)
-                    return store.get_task(task_id)
+                    review_rework_rounds += 1
+                    tree_fp = worktree.tree_fingerprint(wt, ignored=ignored)
+                    blocker_fp = blocker_fingerprint(tree_fp, rev.verdict)
+                    blocker_keys = {(f["file"], f["category"], " ".join(f["title"].casefold().split()))
+                                    for f in previous_findings}
+                    if prev_blocker_fp is not None and (blocker_fp == prev_blocker_fp
+                                                       or (prev_blocker_keys and prev_blocker_keys <= blocker_keys)):
+                        no_progress_streak += 1
+                        progress_made = False
+                        repeated_kind = "review_blocker"
+                        repeated_items = [{"file": f, "title": title} for f, _, title
+                                          in sorted(prev_blocker_keys & blocker_keys)]
+                    else:
+                        reset_progress()
+                    prev_blocker_fp, prev_blocker_keys = blocker_fp, blocker_keys
+                    feedback = "Reviewer requested changes:\n" + json.dumps(rev.verdict["findings"], ensure_ascii=False)
+                    paused = repeated_pause()
+                    if paused is not None:
+                        return paused
+                    if review_round >= max_review_rounds:
+                        return settle_blocked("REVIEW_CHANGES_REQUESTED", "Resolve reviewer blockers: "
+                                              + "; ".join(f"{f['file']}: {f['title']}" for f in previous_findings))
+                    store.update_task(task_id, stage=stage())
+                    continue
                 if rev.verdict["verdict"] == "blocked":
-                    store.update_run(run_id, phase="settled", outcome="blocked", error_code="REVIEW_BLOCKED", settled_at=time.time())
-                    store.update_task(task_id, status="blocked", reason="REVIEW_BLOCKED", product=prod)
-                    return store.get_task(task_id)
+                    return settle_blocked("REVIEW_BLOCKED", rev.verdict["summary"])
 
             if stop_requested():
                 raise TaskError("STOPPED", task_id)
             # All checks (and optional review) passed -> settle completed!
-            stage = {"stage_id": "implement", "attempts": attempt, "elapsed_seconds": round(time.monotonic() - started, 3),
-                     "remaining_stage_ids": [], "steps": [{"stage_id": "implement", "step_id": "worker", "state": "completed", "attempts": attempt}]}
+            reset_progress()
+            completed_stage = stage(state="completed")
             if uses_acpx:
-                if not store.complete_acpx_run(task_id, run_id, prod, stage=stage):
+                if not store.complete_acpx_run(task_id, run_id, prod, stage=completed_stage):
                     raise TaskError("STOPPED", task_id)
             else:
                 store.update_run(run_id, phase="settled", outcome="completed", settled_at=time.time())
-                store.update_task(task_id, status="completed", reason=None, product=prod, next_step=None, stage=stage)
+                store.update_task(task_id, status="completed", reason=None, product=prod, next_step=None,
+                                  stage=completed_stage)
             _enqueue_terminal_notice(
                 store, store.get_task(task_id), run_id, kind="completion",
                 body=f"ATO 任务 {task_id} 已完成。请用 ato status {task_id} 查看产物和检查结果。",
             )
             return store.get_task(task_id)
-
-        store.update_run(run_id, phase="settled", outcome="blocked", error_code="MAX_ATTEMPTS", settled_at=time.time())
-        store.update_task(task_id, status="blocked", reason="MAX_ATTEMPTS")
-        return store.get_task(task_id)
     except TaskError as exc:
         if exc.code == "STOPPED":
             if store.get_task(task_id)["active_run_id"] != run_id:
                 return store.get_task(task_id)
             store.update_run(run_id, phase="settled", outcome="stopped", error_code="STOPPED", settled_at=time.time())
-            store.update_task(task_id, status="stopped", reason="STOPPED")
+            store.update_task(task_id, status="stopped", reason="STOPPED", stage=stage(state="stopped"))
             return store.get_task(task_id)
-        store.update_run(run_id, phase="settled", outcome="failed", error_code=exc.code, settled_at=time.time())
-        store.update_task(task_id, status="blocked", reason=exc.code)
-        return store.get_task(task_id)
+        return settle_blocked(exc.code, f"Inspect status and trace for {exc.code}.", outcome="failed")
     except Exception:
-        store.update_run(run_id, phase="settled", outcome="failed", error_code="INTERNAL_ERROR", settled_at=time.time())
-        store.update_task(task_id, status="blocked", reason="INTERNAL_ERROR")
-        return store.get_task(task_id)
+        return settle_blocked("INTERNAL_ERROR", "Inspect executor logs and task trace.", outcome="failed")
 
 
 def request_stop(store: Store, task_id: str) -> dict:

@@ -59,6 +59,10 @@ MODEL_RE = re.compile(
 )
 WORKER_KINDS = ("codex", "claude", "cursor", "pi")
 REVIEWER_KINDS = ("codex", "claude", "agy", "codex_acpx")
+DEFAULT_MAX_REVIEW_ROUNDS = 10
+MAX_REVIEW_ROUNDS = 50
+DEFAULT_MAX_NO_PROGRESS_ROUNDS = 2
+MAX_NO_PROGRESS_ROUNDS = 10
 SESSION_MODES = ("fresh_only", "resume_if_supported", "require_resume")
 EFFORTS = (None, "minimal", "low", "medium", "high", "xhigh", "max")
 SHARED_ENV_LINKS = frozenset((".venv", "venv", "node_modules"))
@@ -340,7 +344,7 @@ def _normalize_worker_contract(raw: object) -> dict:
     _fields(
         raw,
         ("objective", "scope", "authorization", "acceptance"),
-        ("agent", "model", "sandbox", "permissions", "max_attempts", "timeout_seconds", "memory"),
+        ("agent", "model", "sandbox", "permissions", "max_attempts", "max_no_progress_rounds", "timeout_seconds", "memory"),
         code="INVALID_SPEC",
     )
     assert isinstance(raw, dict)
@@ -382,6 +386,10 @@ def _normalize_worker_contract(raw: object) -> dict:
     max_attempts = raw.get("max_attempts", 3)
     require(type(max_attempts) is int and 1 <= max_attempts <= 10, "INVALID_SPEC")
     contract["max_attempts"] = max_attempts
+    if "max_no_progress_rounds" in raw:
+        no_progress = raw["max_no_progress_rounds"]
+        require(type(no_progress) is int and 1 <= no_progress <= MAX_NO_PROGRESS_ROUNDS, "INVALID_SPEC")
+        contract["max_no_progress_rounds"] = no_progress
     timeout = raw.get("timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
     require(type(timeout) is int and MIN_WORKER_TIMEOUT_SECONDS <= timeout <= MAX_WORKER_TIMEOUT_SECONDS, "INVALID_SPEC")
     contract["timeout_seconds"] = timeout
@@ -439,8 +447,8 @@ def _normalize_reviewer(raw: object, repo: Path, base: str) -> dict | None:
     if agent["kind"] == "codex_acpx":
         require(session_mode == "fresh_only" and set(norm_agent) == {"kind"}, "INVALID_SPEC",
                 detail="codex_acpx requires fresh_only with the host launcher defaults.")
-    rounds = raw.get("max_review_rounds", 1)
-    require(type(rounds) is int and 1 <= rounds <= 20, "INVALID_SPEC")
+    rounds = raw.get("max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS)
+    require(type(rounds) is int and 1 <= rounds <= MAX_REVIEW_ROUNDS, "INVALID_SPEC")
     timeout = raw.get("timeout_seconds", DEFAULT_REVIEWER_TIMEOUT_SECONDS)
     require(type(timeout) is int and 5 <= timeout <= 3600, "INVALID_SPEC")
     checklist = raw.get("checklist", [])

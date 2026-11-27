@@ -38,6 +38,10 @@ def public_status(store: Store, task_id: str, *, now: float | None = None) -> di
             state = "unavailable"
         elif not matches:
             state = "awaiting_sample"
+        elif (task["status"] in TERMINAL and rec.get("status") in TERMINAL
+              and not rec.get("sample_error")
+              and all(a["state"] != "active" and a["notification_state"] != "pending" for a in alerts)):
+            state = "settled"
         elif not (0 <= now - sampled <= STALE_SECONDS) or rec.get("sample_error"):
             state = "stale"
         pub_alerts = [
@@ -117,20 +121,39 @@ def findings(sample: dict) -> dict[str, dict]:
     execution, stage, history = sample["execution"], sample["stage"], sample["run_history"]
     if execution["state"] == "unknown" and history and history[-1]["phase"] != "settled":
         found["EXECUTION_UNVERIFIED"] = {"run_id": execution["run_id"], "state": execution["state"]}
+    category = stage.get("category")
+    legacy = "category" not in stage and "execution_failures" not in stage
     repeated = [
         {"stage_id": s["stage_id"], "step_id": s["step_id"], "attempts": s["attempts"]}
         for s in stage.get("steps", [])
         if s["attempts"] >= 3 and s["state"] not in {"completed", "passed", "succeeded"}
-    ]
-    if repeated and sample["status"] not in TERMINAL:
-        found["REPEATED_ATTEMPTS"] = {"steps": repeated[:32]}
+        and s["stage_id"] != "review_rework" and s["step_id"] != "review_rework"
+    ] if legacy and stage.get("stage_id") != "review_rework" else []
+    healthy_rework = category == "review_rework" and stage.get("no_progress_streak", 0) == 0
+    if (sample["status"] not in TERMINAL and not healthy_rework
+            and (stage.get("execution_failures", 0) >= 2 or repeated)):
+        found["EXECUTION_FAILURE_RETRY"] = {"execution_failures": stage.get("execution_failures", 0),
+                                            "steps": repeated[:32]}
+    if (sample["reason"] == "REPEATED_NO_PROGRESS"
+            or (sample["status"] not in TERMINAL and stage.get("no_progress_streak", 0) >= 1)):
+        found["REPEATED_NO_PROGRESS"] = {"kind": stage.get("repeated_kind"),
+                                         "streak": stage.get("no_progress_streak", 0),
+                                         "items": stage.get("repeated_items", [])}
     if sample["violations"]:
         found["DECLARED_SCOPE_CHANGED"] = {"violations": sample["violations"], "complete": sample["evidence_complete"]}
     remaining = stage.get("remaining_stage_ids", [])
     if sample["reason"] == "STAGES_INCOMPLETE" or (sample["status"] == "completed" and remaining):
         found["STAGES_INCOMPLETE"] = {"remaining_stage_ids": remaining[:32]}
     if sample["status"] == "blocked" and execution["state"] != "active":
-        found["UNHANDLED_FAILURE"] = {"reason": sample["reason"], "next_action": "inspect_status"}
+        failure_category = {
+            "WORKER_FAILED": "execution_failure", "REPEATED_NO_PROGRESS": "repeated_no_progress",
+            "REVIEW_CHANGES_REQUESTED": "review_rework", "REVIEW_BLOCKED": "review_rework",
+            "CHECKS_FAILED": "verification_repair", "GUARDRAIL_VIOLATION": "verification_repair",
+        }.get(sample["reason"], category)
+        if failure_category not in {"execution_failure", "repeated_no_progress", "review_rework", "verification_repair"}:
+            failure_category = "blocked"
+        found["UNHANDLED_FAILURE"] = {"reason": sample["reason"], "category": failure_category,
+                                      "next_action": "inspect_status"}
     return found
 
 
