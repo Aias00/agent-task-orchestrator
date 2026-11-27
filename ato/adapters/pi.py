@@ -111,8 +111,11 @@ def run_worker(req: WorkerRequest) -> WorkerResult:
     ]
     if req.model:
         argv.extend(["--model", req.model])
-    env = dict(
-        os.environ,
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("CODEX_THREAD_ID", "ATO_SUBMISSION_KIND", "ANTIGRAVITY_CONVERSATION_ID", "ATO_ACTOR_FILE")
+    }
+    env.update(
         TMPDIR=str(req.runtime_dir / "tmp"),
         JITI_CACHE=str(req.runtime_dir / "jiti"),
         PI_TELEMETRY="0",

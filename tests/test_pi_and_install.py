@@ -118,7 +118,7 @@ class PiWorkerAndInstallTests(unittest.TestCase):
         idx = ro["argv"].index("--tools")
         self.assertEqual(ro["argv"][idx + 1], "read,grep,find,ls")
         prof = (self.runtime / "sandbox.sb").read_text()
-        self.assertNotIn("workspace-write allow", prof)
+        self.assertNotIn(str(self.worktree.resolve()), prof)
 
         self.runtime = self.root / "runtime-ws"
         req = base.WorkerRequest(self.req.task_id, "pi", self.worktree, self.runtime, self.req.prompt)
