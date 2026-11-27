@@ -153,6 +153,53 @@ class ServiceTests(ServerFixture, unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "USAGE")
 
+    def test_invalid_submission_does_not_consume_key_and_replay_rechecks_authority(self):
+        args = {"repo": "demo", "spec": self.spec(), "request_id": "validated-first"}
+        invalid = {**args, "spec": {**args["spec"], "unexpected": True}}
+        self.assertFalse(self.call("submit", invalid)["ok"])
+        with sqlite3.connect(self.service.journal.path) as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM requests").fetchone()[0], 0)
+        result = self.call("submit", args)
+        self.assertTrue(result["ok"], result)
+        restricted = replace(self.bot, repositories=frozenset({"other"}))
+        cfg = replace(self.cfg, principals={**self.cfg.principals, "bot": restricted})
+        restarted = Service(cfg, self.db)
+        denied = restarted.call(restricted, "submit", args, origin="mcp")
+        self.assertEqual(denied["error"]["code"], "NOT_FOUND")
+        self.assertIsNone(denied["data"])
+        read_only = replace(self.bot, scopes=frozenset({"read"}))
+        cfg = replace(self.cfg, principals={**self.cfg.principals, "bot": read_only})
+        self.assertEqual(Service(cfg, self.db).call(read_only, "submit", args, origin="api")["error"]["code"],
+                         "FORBIDDEN")
+        self.spawn.assert_called_once()
+
+    def test_mcp_submission_has_neutral_origin_and_scrubs_all_bindings(self):
+        env = {"COPIED_SECRET": "Bearer " + BOT_TOKEN, "ATO_SERVER_MISC": "private",
+               "ATO_SUBMISSION_KIND": "codex", "ANTIGRAVITY_CONVERSATION_ID": "ambient",
+               "ATO_ACTOR_FILE": "/synthetic/actor"}
+        with patch.dict(os.environ, env):
+            result = self.call("submit", {"repo": "demo", "spec": self.spec(), "request_id": "mcp-origin"},
+                               origin="mcp")
+        self.assertTrue(result["ok"], result)
+        task = self.store.get_task(result["data"]["task_id"])
+        self.assertEqual((task["origin_kind"], task["origin_session_id"]), ("mcp", None))
+        child_env = self.spawn.call_args.kwargs["child_env"]
+        self.assertFalse(set(env) & child_env.keys())
+        self.assertNotIn("CODEX_THREAD_ID", child_env)
+        self.assertFalse(any(k.startswith("ATO_SERVER_") for k in child_env))
+
+    def test_duplicate_credentials_roots_and_missing_stdio_credentials_fail_closed(self):
+        with patch.dict(os.environ, {"ATO_SERVER_TOKEN_HUMAN": BOT_TOKEN}):
+            with self.assertRaises(TaskError):
+                ServerConfig.load(self.config_file)
+        with patch.dict(os.environ, {"ATO_SERVER_TOKEN_READER": ""}):
+            with self.assertRaises(TaskError):
+                ServerConfig.load(self.config_file)
+        self.raw_config["repositories"]["other"] = str(self.repos["demo"])
+        self.config_file.write_text(json.dumps(self.raw_config))
+        with self.assertRaises(TaskError):
+            ServerConfig.load(self.config_file)
+
 
 class JournalTests(ServerFixture, unittest.TestCase):
     def test_concurrent_intent_precedes_effect_and_duplicates_cannot_execute(self):

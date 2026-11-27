@@ -6,10 +6,12 @@ running elsewhere. `ato serve` provides REST at `/api/v1` and **MCP Streamable H
 Both call the same authorization/service/journal layer and existing executor, spec,
 product and inbox operations. They do not introduce another scheduler.
 
-Implementation status: implemented, **tests not run; awaiting user instruction**.
-Nothing in this change installs dependencies, activates a service, deploys remotely,
-connects a Grok Bot account or sends notifications/webhooks. The commands below are
-instructions for the later deployment environment, not actions already performed.
+Implementation status: **isolated validation passed on 2026-11-27**: 126 core,
+service/journal and real SDK tests, plus actual loopback HTTP/MCP and stdio checks.
+See [validation results and limits](mcp-api-validation.md). Optional dependencies
+were installed only in the validation worktree's private venv. No installed ATO
+service was changed, Grok Bot connected, webhook sent or public service deployed.
+Deployment commands below remain instructions for a later deployment environment.
 
 ## Host prerequisites and optional installation
 
@@ -22,7 +24,7 @@ Use one service process/listener and a persistent `ATO_HOME` for deployment v1.
 The core CLI remains dependency-free. Serving uses the official
 [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk), specifically
 its 2.3.x low-level Server, StreamableHTTPSessionManager, and stdio transport APIs;
-the implementation was reviewed against the locally available 2.3.0 source.
+the implementation was tested with official PyPI SDK 2.3.0.
 The extra pins that SDK minor series because its API differs from SDK 1.x.
 Starlette and uvicorn are also optional server dependencies. No faux MCP protocol
 or custom JSON-RPC handshake is implemented.
@@ -257,7 +259,9 @@ same JSON. Business errors have `isError:true` plus the structured error envelop
 SDK protocol errors retain the SDK's JSON-RPC behavior.
 
 Official SDK 2.3.x client example, including initialization (its HTTP client is
-`httpx2`, and the stream context returns two streams):
+`httpx2`, and the stream context returns two streams). Python result attributes use
+snake_case (`structured_content`, `is_error`, `server_info`); JSON wire fields
+retain their MCP camelCase names:
 
 ```python
 import asyncio
@@ -284,7 +288,7 @@ async def main():
                 result = await session.call_tool("ato_submit", {
                     **request, "request_id": "feature-20261127-1"
                 })
-                envelope = result.structuredContent
+                envelope = result.structured_content
                 if not envelope["ok"]:
                     raise RuntimeError(envelope["error"]["code"])
                 task_id = envelope["data"]["task_id"]
@@ -349,22 +353,32 @@ There is no webhook/push integration yet. Poll task status and task inbox. A mod
 saying “done”, an accepted request, and successful HTTP/MCP delivery are different
 from the engine's durable final status and its independent check/reviewer evidence.
 
-## Later validation (not executed in this implementation task)
+## Repeating isolated validation
 
 All fixtures use temporary ATO_HOME/CODEX_HOME and synthetic Git repositories;
-worker dispatch is intercepted and no external provider is contacted. Once the
-user explicitly authorizes testing:
+worker dispatch is intercepted and no external provider is contacted. In an
+authorized test checkout with Python 3.12+:
 
 ```sh
-python3.12 scripts/run_tests.py           # existing core suite plus service/journal tests
-python3.12 scripts/run_tests.py --server  # also real SDK initialize/list/call and in-process HTTP tests
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[server]'
+.venv/bin/python scripts/run_tests.py --server
+.venv/bin/python scripts/check_server_transport.py
+git diff --check
 ```
 
-Install the optional server extra in that test environment beforehand. Missing SDK
-dependencies fail the optional suite rather than silently skipping it. The SDK
-suite uses an ASGI transport in process, not a live listening server. Tests cover
+Missing SDK dependencies fail the optional suite rather than silently skipping it;
+the runner prints separate discovery counts and rejects skips or empty server
+discovery. `python3.12 scripts/run_tests.py` still runs the dependency-free suite.
+The optional unit suite uses ASGI in process. The separate transport script uses
+a real uvicorn socket bound only to `127.0.0.1` on an ephemeral port and the official
+MCP client, then the actual `ato mcp --stdio` CLI in a child process. It has a
+90-second operation deadline plus bounded cleanup, asserts child exit and listener
+closure, and returns a nonzero exit status on failure. Its synthetic dispatch
+records an event and leaves tasks queued; it never executes a provider worker.
+Tests cover
 credential failures, scope and cross-repo isolation, human separation, inline
 specs, async dispatch/origin/environment, persistent collision/restart/concurrent
-intents, HTTP routes/errors/limits and real SDK tool calls. Runtime compatibility,
-proxy behavior and the selected deployment host still need authorized testing;
-this implementation is not a production-readiness certification.
+intents, HTTP routes/errors/limits and real SDK tool calls. Only the recorded local
+dependency/platform combination is qualified. Public HTTPS/proxy behavior, Grok Bot,
+real model execution and the selected deployment host remain unqualified.

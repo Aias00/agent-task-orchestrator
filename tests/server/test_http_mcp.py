@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import json
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from ato.server.http import create_app
+from ato.server.http import Boundary, create_app
 from server_fixtures import BOT_TOKEN, HUMAN_TOKEN, READER_TOKEN, ServerFixture
 
 
@@ -45,7 +46,7 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
             async with streamable_http_client("http://testserver/mcp", http_client=client) as streams:
                 async with ClientSession(*streams, read_timeout_seconds=10) as session:
                     info = await session.initialize()
-                    self.assertEqual(info.serverInfo.name, "ato")
+                    self.assertEqual(info.server_info.name, "ato")
                     yield session
 
     async def test_health_schema_authentication_and_host_origin_policy(self):
@@ -106,12 +107,12 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
             self.assertIn("ato_submit", names)
             self.assertNotIn("ato_answer", names)
             reply = await session.call_tool("ato_submit", {**args, "request_id": "shared-key"})
-            self.assertFalse(reply.isError)
-            self.assertEqual(reply.structuredContent, result)
+            self.assertFalse(reply.is_error)
+            self.assertEqual(reply.structured_content, result)
             self.assertEqual(json.loads(reply.content[0].text), result)
             collision = await session.call_tool("ato_stop", {"task_id": task_id, "request_id": "shared-key"})
-            self.assertTrue(collision.isError)
-            self.assertEqual(collision.structuredContent["error"]["code"], "IDEMPOTENCY_CONFLICT")
+            self.assertTrue(collision.is_error)
+            self.assertEqual(collision.structured_content["error"]["code"], "IDEMPOTENCY_CONFLICT")
         self.spawn.assert_called_once()
 
     async def test_sdk_principal_isolation_and_separate_human_authority(self):
@@ -123,20 +124,20 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
             async with self.sdk(token) as session:
                 await session.list_tools()
                 result = await session.call_tool("ato_list", {})
-                self.assertEqual([t["task_id"] for t in result.structuredContent["data"]["tasks"]], [expected])
+                self.assertEqual([t["task_id"] for t in result.structured_content["data"]["tasks"]], [expected])
         await asyncio.gather(visible(BOT_TOKEN, own["id"]), visible(READER_TOKEN, other["id"]))
         async with self.sdk() as bot:
             blocked = await bot.call_tool("ato_answer", args)
-            self.assertTrue(blocked.isError)
-            self.assertEqual(blocked.structuredContent["error"]["code"], "FORBIDDEN")
+            self.assertTrue(blocked.is_error)
+            self.assertEqual(blocked.structured_content["error"]["code"], "FORBIDDEN")
             hidden = await bot.call_tool("ato_status", {"task_id": other["id"]})
-            self.assertEqual(hidden.structuredContent["error"]["code"], "NOT_FOUND")
+            self.assertEqual(hidden.structured_content["error"]["code"], "NOT_FOUND")
         async with self.sdk(HUMAN_TOKEN) as human:
             names = {t.name for t in (await human.list_tools()).tools}
             self.assertIn("ato_answer", names)
             self.assertNotIn("ato_submit", names)
             accepted = await human.call_tool("ato_answer", args)
-            self.assertFalse(accepted.isError)
+            self.assertFalse(accepted.is_error)
         response = await self.client.post(f"/api/v1/tasks/{own['id']}/questions/{question['id']}/answer",
                                           json={"answer": "yes"}, headers={"Idempotency-Key": "bot-decision"})
         self.assertEqual(response.status_code, 403)
@@ -168,6 +169,119 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
         response = await self.client.post(f"/api/v1/tasks/{task_id}/stop", json={"task_id": task_id},
                                           headers={"Idempotency-Key": "bad-path"})
         self.assertEqual(response.status_code, 400)
+
+    async def test_cross_repository_read_routes_and_tools_do_not_leak(self):
+        own, other = self.task(), self.task("other")
+        self.store.create_question(other["id"], "permission", "Private question", "Synthetic")
+        self.store.append_event(other["id"], "private_event", {"text": "Private event"})
+        for suffix in ("", "/diff", "/trace", "/inbox"):
+            response = await self.client.get(f"/api/v1/tasks/{other['id']}{suffix}")
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.json()["error"]["code"], "NOT_FOUND")
+            self.assertNotIn("Private", response.text)
+        response = await self.client.get("/api/v1/tasks")
+        self.assertEqual([t["task_id"] for t in response.json()["data"]["tasks"]], [own["id"]])
+        async with self.sdk() as session:
+            for op in ("status", "diff", "trace", "inbox"):
+                reply = await session.call_tool("ato_" + op, {"task_id": other["id"]})
+                self.assertTrue(reply.is_error)
+                self.assertEqual(reply.structured_content["error"]["code"], "NOT_FOUND")
+                self.assertNotIn("Private", reply.content[0].text)
+        self.spawn.assert_not_called()
+
+    async def test_concurrent_rest_mcp_admission_is_unresolved_then_replays(self):
+        entered, finish = threading.Event(), threading.Event()
+
+        def dispatch(*args, **kwargs):
+            entered.set()
+            self.assertTrue(finish.wait(10))
+
+        self.spawn.side_effect = dispatch
+        args = {"repo": "demo", "spec": self.spec()}
+        async with self.sdk() as session:
+            first = asyncio.create_task(self.client.post("/api/v1/tasks", json=args,
+                                        headers={"Idempotency-Key": "concurrent"}))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                # Admission is waiting on dispatch, but the event loop and another
+                # authenticated MCP request remain responsive.
+                self.assertEqual((await self.client.get("/health")).status_code, 200)
+                duplicate = await session.call_tool("ato_submit", {**args, "request_id": "concurrent"})
+                self.assertTrue(duplicate.is_error)
+                self.assertEqual(duplicate.structured_content["error"]["code"], "REQUEST_UNRESOLVED")
+                reserved = duplicate.structured_content["error"]["task_id"]
+                self.assertEqual(self.store.get_task(reserved)["status"], "queued")
+            finally:
+                finish.set()
+                response = await asyncio.wait_for(first, 10)
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json()["data"]["task_id"], reserved)
+            replay = await session.call_tool("ato_submit", {**args, "request_id": "concurrent"})
+            self.assertEqual(replay.structured_content, response.json())
+        self.spawn.assert_called_once()
+
+    async def test_mutation_failure_stays_unresolved_across_transports(self):
+        self.spawn.side_effect = RuntimeError("Synthetic failure after task creation")
+        args = {"repo": "demo", "spec": self.spec()}
+        response = await self.client.post("/api/v1/tasks", json=args, headers={"Idempotency-Key": "uncertain"})
+        self.assertEqual(response.status_code, 409)
+        result = response.json()
+        self.assertEqual(result["error"]["code"], "REQUEST_UNRESOLVED")
+        self.assertNotIn("Synthetic failure", response.text)
+        self.assertEqual(self.store.get_task(result["error"]["task_id"])["status"], "queued")
+        async with self.sdk() as session:
+            replay = await session.call_tool("ato_submit", {**args, "request_id": "uncertain"})
+            self.assertTrue(replay.is_error)
+            self.assertEqual(replay.structured_content, result)
+        self.spawn.assert_called_once()
+
+    async def test_header_and_body_rejections_precede_service_or_sdk(self):
+        for path in ("/api/v1/tasks", "/mcp"):
+            cases = (
+                ({"Content-Type": "text/plain"}, b'{}'),
+                ({"Content-Type": "application/json", "Content-Length": "3"}, b'{}'),
+                ({"Content-Type": "application/json", "Content-Length": "-1"}, b'{}'),
+                ({"Content-Type": "application/json", "Content-Length": "abc"}, b'{}'),
+                ({"Content-Type": "application/json"}, b'\xff'),
+                ({"Content-Type": "application/json"}, b'{"x":"\\ud800"}'),
+                ({"Content-Type": "application/json"}, b'{"x":1e999}'),
+            )
+            for headers, body in cases:
+                response = await self.client.post(path, content=body, headers=headers)
+                self.assertEqual(response.status_code, 400, (path, headers, body))
+            for name, value in (("Host", "testserver"), ("Origin", "https://testserver"),
+                                ("Content-Type", "application/json"), ("Idempotency-Key", "key"),
+                                ("Content-Length", "2")):
+                response = await self.client.post(path, content=b'{}', headers=[
+                    (name, value), (name, value), ("Authorization", "Bearer " + BOT_TOKEN)])
+                self.assertEqual(response.status_code, 400, name)
+        self.spawn.assert_not_called()
+
+    async def test_auth_precedes_receive_and_receive_timeout_is_canonical(self):
+        async def downstream(*args):
+            self.fail("Rejected request reached the application")
+
+        reads = []
+
+        async def stalled_receive():
+            reads.append(1)
+            # Simulate expiry of the boundary's bounded receive without sleeping.
+            raise TimeoutError
+
+        for credential, expected_status, expected_code in (
+                (b"Bearer invalid", 401, "AUTH_REQUIRED"),
+                (("Bearer " + BOT_TOKEN).encode(), 400, "USAGE")):
+            messages = []
+
+            async def send(message):
+                messages.append(message)
+
+            await Boundary(downstream, self.cfg)({
+                "type": "http", "headers": [(b"host", b"testserver"), (b"authorization", credential)]},
+                stalled_receive, send)
+            self.assertEqual(messages[0]["status"], expected_status)
+            self.assertEqual(json.loads(messages[1]["body"])["error"]["code"], expected_code)
+            self.assertEqual(len(reads), 0 if expected_status == 401 else 1)
 
 
 if __name__ == "__main__":
