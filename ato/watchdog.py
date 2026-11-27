@@ -105,6 +105,7 @@ def collect(store: Store, task_id: str, *, now: float | None = None) -> dict:
         "sampled_at": now,
         "status": status["status"],
         "reason": status["reason"],
+        "legacy_advisory_completion": status.get("legacy_advisory_completion", False),
         "execution": status["execution"],
         "stage": stage,
         "run_history": status["run_history"],
@@ -144,10 +145,12 @@ def findings(sample: dict) -> dict[str, dict]:
     remaining = stage.get("remaining_stage_ids", [])
     if sample["reason"] == "STAGES_INCOMPLETE" or (sample["status"] == "completed" and remaining):
         found["STAGES_INCOMPLETE"] = {"remaining_stage_ids": remaining[:32]}
-    if sample["status"] == "blocked" and execution["state"] != "active":
+    if (sample["status"] == "blocked" and execution["state"] != "active"
+            and not sample.get("legacy_advisory_completion")):
         failure_category = {
             "WORKER_FAILED": "execution_failure", "REPEATED_NO_PROGRESS": "repeated_no_progress",
             "REVIEW_CHANGES_REQUESTED": "review_rework", "REVIEW_BLOCKED": "review_rework",
+            "REVIEW_REQUIRED": "review_rework",
             "CHECKS_FAILED": "verification_repair", "GUARDRAIL_VIOLATION": "verification_repair",
         }.get(sample["reason"], category)
         if failure_category not in {"execution_failure", "repeated_no_progress", "review_rework", "verification_repair"}:
@@ -263,10 +266,16 @@ def sync_alert_notifications(store: Store, task_id: str) -> None:
         and not state.get("sample_error")
     )
     changed = False
+    failure_keys = {n["dedupe_key"] for n in store.list_notifications(task_id) if n["kind"] == "failure"}
     for alert in alerts:
         if alert["notification_state"] in ("baseline_only", "sent", "cancelled", "unsupported", "muted"):
             continue
         if alert["state"] != "active":
+            alert["notification_state"] = "cancelled"
+            changed = True
+            continue
+        if (alert["code"] == "UNHANDLED_FAILURE" and alert["evidence"].get("reason") in {"CHECKS_FAILED", "TIMEOUT"}
+                and f"failure:{task_id}:{alert['run_id']}" in failure_keys):
             alert["notification_state"] = "cancelled"
             changed = True
             continue

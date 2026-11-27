@@ -22,9 +22,9 @@ Use `ato --help` to inspect available commands. Use one Task ID for all operatio
    `ato resume TASK_ID --timeout-seconds SECONDS` (base-10 digits, 5–7200).
    A later plain resume returns to the spec/default timeout; Task ID, worktree,
    frozen spec digest, and acceptance criteria stay unchanged.
-4. When `ato status TASK_ID` shows `completed`, inspect `reason` and `checks[*].state`
-   before reporting success: failed independent checks appear as `reason="CHECKS_FAILED"`
-   even when `status` is `completed`. Also inspect `product.diff_summary` or run
+4. Inspect `status`, `reason`, and `checks[*].state` before reporting success.
+   Exhausted independent checks block with `reason="CHECKS_FAILED"`. Use
+   `ato status TASK_ID --check-history` to inspect earlier check rounds. Inspect `product.diff_summary` or run
    `ato project diff TASK_ID --stat` to verify `files_deleted`, `tests_deleted`, and
    `tests_modified`. Record optional approval with `ato accept TASK_ID` only if requested.
 5. Use `ato stop TASK_ID` to stop a running task, `ato project recheck TASK_ID` to re-run

@@ -6,7 +6,7 @@
 | --- | --- |
 | `ato run --repo PATH --spec FILE [--foreground]` | Submit a task into a new isolated Git worktree |
 | `ato list [--repo PATH]` | List tasks (optionally filtered by repository) |
-| `ato status TASK_ID` | Inspect task state, execution, checks, review, product, notifications, and watchdog |
+| `ato status TASK_ID [--check-history]` | Inspect task state, execution, latest checks, review, product, notifications, and watchdog. Add check history to inspect individual rounds. |
 | `ato stop TASK_ID` | Durably request STOP and verify owned execution cleanup |
 | `ato resume TASK_ID [--foreground] [--timeout-seconds SECONDS]` | Continue a `stopped`, `blocked`, or answered `waiting_input` task |
 | `ato inbox` | List open human questions across tasks |
@@ -81,6 +81,14 @@ worktree, frozen spec digest, and acceptance criteria. A later resume without
 the option returns to the spec/default timeout. The `task_resumed` event also
 records `previous_timeout_seconds` and `timeout_overridden`.
 
+`run_history` includes `error_code` and `worker_timed_out`. After two or more
+consecutive settled worker Runs time out at the same effective budget,
+`repeated_worker_timeout` reports the count, budget, sources, first and last Run,
+and a suggested manual resume command. Rechecks are ignored. A different
+worker Run outcome or budget ends the streak. Older Runs without recorded worker
+timeout evidence also end it. Command-check and reviewer timeouts have their own
+outcomes.
+
 The `pi` worker runs `pi --mode json --print` under macOS `sandbox-exec` with `pi-path-guard.mjs` (see [ato/adapters/pi.py](../ato/adapters/pi.py)).
 
 Cursor is supported only as a worker (`"agent": {"kind": "cursor"}`), with no
@@ -115,8 +123,9 @@ review rework. Only a failed worker execution increments `execution_failures`;
 exhaustion blocks with `WORKER_FAILED`. Guardrail and independent check failures
 use a separate `verification_failures` repair counter with the same cap, reset
 once both pass and execution advances to review. Normal review rework consumes
-neither failure budget. With `max_attempts=1`, advisory check failure still settles
-as `completed` with reason `CHECKS_FAILED`; guardrail violations still block.
+neither failure budget. Exhausted command checks and failed rechecks settle as
+`blocked` with reason `CHECKS_FAILED`. Status keeps the product, latest receipts,
+and a recovery command. The existing failure notification policy applies.
 
 Optional `worker_contract.max_no_progress_rounds` defaults at runtime to **2**
 (integer range **1..10**). Omission adds no field to the normalized contract,
@@ -128,7 +137,8 @@ blockers are matched by file, category, and case/whitespace-normalized title.
 Resolving a previous blocker resets the review streak. At streak 1, worker
 feedback warns about the repeated issue. At the configured limit the run pauses
 with `status=blocked`, `reason=REPEATED_NO_PROGRESS`, an actionable next step, a
-trace event, and a failure notice. Inspect the issue before resuming.
+trace event, and a failure notice. If command checks reach their repair cap on
+the same turn, they settle with `CHECKS_FAILED`. Inspect the issue before resuming.
 
 `stage` exposes the category (`implement`, `execution_failure`, `review_rework`,
 `verification_repair`, or `repeated_no_progress`), monotonic `turn`/`attempts`,
@@ -142,3 +152,40 @@ the failure category. Watchdog does not itself stop or resume execution.
 Once a terminal task has a matching successful sample and no active or pending
 alerts, Watchdog reports `state="settled"`. Cached settled samples stay settled
 even after the 180-second freshness window; changed tasks require a new sample.
+
+## Check receipts and recovery
+
+`ato status TASK_ID` shows the latest recorded verification round in `checks`.
+`ato status TASK_ID --check-history` adds `check_history` with criterion states
+and receipt IDs grouped by Run and worker attempt. Recheck starts a new Run with
+attempt 1. Failed checks also show the command index, process code, and return
+code. For older receipts, the attempt and diagnostic can be `null`. The bounded
+`ato project trace TASK_ID` timeline identifies each new `checks_finished` event
+by Run, attempt, pass marker, and `failed_criteria`.
+
+After correcting a check failure, run `ato project recheck TASK_ID`. A passing
+recheck clears `CHECKS_FAILED` when required review also passes.
+`--checks-only` can reuse a recorded approval from a completed Run for the same
+product fingerprint and effective reviewer configuration. When required approval
+is missing or cannot be linked to this product and reviewer, run a full recheck.
+An applicable rejection remains a review block. Manual acceptance stays a
+separate optional receipt recorded with `ato accept` after completion.
+
+Historical advisory completions appear as `blocked` with
+`legacy_advisory_completion: true` while retaining their recorded Run outcomes
+and delivery history. Any previously recorded manual receipt is visible under
+`legacy_acceptance`. With the worktree present, recheck or resume to recover.
+`ato system status` still exposes the legacy `advisory_checks` setting for
+compatibility. New check failures block regardless of this setting.
+
+## Querying an AGY-origin task
+
+Submit with `ATO_SUBMISSION_KIND=agy ato run --repo PATH --spec FILE` and keep
+the returned `data.task_id`. In the AGY-origin session, run
+`ato status TASK_ID` and read `data.status`, `data.reason`, `data.checks`,
+`data.product`, and `data.next_step`. For a lost Task ID, use
+`ato list --repo PATH`. For synchronous use, add `--foreground` to submission.
+The CLI exit code and JSON `ok` describe the command itself. The Task result
+appears in `data.status`. AGY-origin tasks report
+`completion_notification.state: unsupported`. See the
+[delivery architecture](architecture.md#origin-session-delivery).

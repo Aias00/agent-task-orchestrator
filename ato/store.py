@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS runs (
   error_code TEXT,
   timeout_seconds INTEGER,
   timeout_source TEXT,
+  worker_timed_out INTEGER,
   created_at REAL NOT NULL,
   settled_at REAL
 );
@@ -69,6 +70,8 @@ CREATE TABLE IF NOT EXISTS checks (
   state TEXT NOT NULL,
   receipt_id TEXT NOT NULL,
   output_excerpt TEXT NOT NULL DEFAULT '',
+  attempt INTEGER,
+  diagnostic_json TEXT,
   created_at REAL NOT NULL
 );
 
@@ -80,6 +83,8 @@ CREATE TABLE IF NOT EXISTS reviews (
   reviewer_kind TEXT NOT NULL,
   verdict TEXT NOT NULL,
   verdict_json TEXT NOT NULL,
+  product_id TEXT,
+  reviewer_sha256 TEXT,
   session_id TEXT,
   created_at REAL NOT NULL
 );
@@ -230,12 +235,17 @@ class Store:
                 for table, additions in (
                     ("tasks", (("spec_timeout_source", "TEXT"),)),
                     ("runs", (("timeout_seconds", "INTEGER"), ("timeout_source", "TEXT"),
-                              ("child_pid", "INTEGER"), ("child_pid_identity", "TEXT"))),
+                              ("child_pid", "INTEGER"), ("child_pid_identity", "TEXT"),
+                              ("worker_timed_out", "INTEGER"))),
+                    ("checks", (("attempt", "INTEGER"), ("diagnostic_json", "TEXT"))),
+                    ("reviews", (("product_id", "TEXT"), ("reviewer_sha256", "TEXT"))),
                 ):
                     columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
                     for name, sql_type in additions:
                         if name not in columns:
                             con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_checks_attempt
+                               ON checks(task_id, run_id, attempt, criterion_id) WHERE attempt IS NOT NULL""")
                 con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 con.execute("COMMIT")
                 try:
@@ -306,6 +316,7 @@ class Store:
         d["stage"] = json.loads(d["stage_json"]) if d["stage_json"] else None
         d["reviewer"] = json.loads(d["reviewer_json"]) if d["reviewer_json"] else None
         d["stop_requested"] = bool(d["stop_requested"])
+        d["legacy_advisory_completion"] = d["status"] == "completed" and d["reason"] == "CHECKS_FAILED"
         return d
 
     def list_tasks(self, repo_key: str | None = None) -> list[dict]:
@@ -370,7 +381,7 @@ class Store:
                 if kind == "resume":
                     state = "stop_requested = 0, status = 'queued', reason = NULL,"
                 elif kind == "recheck" and owner:
-                    state = "stop_requested = 0, status = 'running', reason = NULL,"
+                    state = "stop_requested = 0, status = 'running', reason = NULL, next_step = NULL, stage_json = NULL,"
                 con.execute(f"UPDATE tasks SET {state} active_run_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                             (run_id, now, task_id))
         with self._worktree_lease(task_id) if expected_revision is not None else nullcontext():
@@ -515,6 +526,47 @@ class Store:
                 return dict(row)
         return _retry(op)
 
+    def settle_owned_run(self, task_id: str, run_id: str, *, reason: str | None,
+                         product: dict | None, next_step: str | None, stage: dict | None = None,
+                         worker_timeout: dict | None = None, expected_revision: int | None = None,
+                         acpx: bool = False, notice: dict | None = None) -> bool:
+        """Settle a result without overwriting STOP or another controller's Run."""
+        now = time.time()
+
+        def op():
+            with self.tx() as con:
+                row = con.execute(
+                    """SELECT t.revision FROM tasks t JOIN runs r ON r.id = t.active_run_id AND r.task_id = t.id
+                       WHERE t.id = ? AND r.id = ? AND r.phase = 'running'
+                         AND t.stop_requested = 0 AND t.worktree_state = 'present'""",
+                    (task_id, run_id),
+                ).fetchone()
+                if row is None:
+                    return False
+                require(expected_revision is None or row["revision"] == expected_revision, "BUSY", task_id)
+                if acpx:
+                    if not self._acpx_owner(con, task_id, run_id):
+                        return False
+                    require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                        (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+                status = "blocked" if reason else "completed"
+                con.execute("""UPDATE tasks SET status = ?, reason = ?, product_json = ?,
+                               next_step = ?, stage_json = ?, revision = revision + 1, updated_at = ?
+                               WHERE id = ?""",
+                            (status, reason, json.dumps(product) if product is not None else None, next_step,
+                             json.dumps(stage) if stage is not None else None, now, task_id))
+                con.execute("UPDATE runs SET phase = 'settled', outcome = ?, error_code = ?, settled_at = ? WHERE id = ?",
+                            (status, reason, now, run_id))
+                if worker_timeout is not None:
+                    con.execute("""UPDATE runs SET worker_timed_out = 1, timeout_seconds = ?, timeout_source = ?
+                                   WHERE id = ?""",
+                                (worker_timeout["timeout_seconds"], worker_timeout["timeout_source"], run_id))
+                if notice is not None:
+                    self._insert_notification(con, **notice)
+                return True
+
+        return _retry(op)
+
     def _transition_running(self, task_id: str, run_id: str, pid: int,
                             pid_identity: str | None, *, launching_only: bool,
                             match_owner: bool = False) -> bool:
@@ -567,52 +619,94 @@ class Store:
     def list_runs(self, task_id: str) -> list[dict]:
         def op():
             with self.tx(write=False) as con:
-                rows = con.execute("SELECT * FROM runs WHERE task_id = ? ORDER BY created_at ASC", (task_id,)).fetchall()
+                rows = con.execute("SELECT * FROM runs WHERE task_id = ? ORDER BY rowid", (task_id,)).fetchall()
                 return [dict(r) for r in rows]
         return _retry(op)
 
-    def save_checks(self, task_id: str, run_id: str, rows: list[dict]) -> None:
+    def save_checks(self, task_id: str, run_id: str, rows: list[dict], *, attempt: int, passed: bool) -> None:
         now = time.time()
+        detail = {"attempt": attempt, "passed": passed,
+                  "failed_criteria": sorted(r["criterion_id"] for r in rows if r["state"] != "passed")}
+        receipts = [(r["criterion_id"], r["state"], r["receipt_id"], json.dumps(r.get("diagnostic"), sort_keys=True))
+                    for r in rows]
+
         def op():
             with self.tx(write=True) as con:
-                con.execute("DELETE FROM checks WHERE task_id = ? AND run_id = ?", (task_id, run_id))
-                for r in rows:
-                    con.execute(
-                        """INSERT INTO checks(task_id, run_id, criterion_id, state, receipt_id, output_excerpt, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (task_id, run_id, r["criterion_id"], r["state"], r["receipt_id"],
-                         r.get("output_excerpt", "")[:4096], now),
+                existing = con.execute(
+                    """SELECT detail_json FROM events WHERE task_id = ? AND run_id = ? AND kind = 'checks_finished'
+                       AND json_extract(detail_json, '$.attempt') = ?
+                       AND json_type(detail_json, '$.failed_criteria') = 'array'""",
+                    (task_id, run_id, attempt),
+                ).fetchone()
+                if existing:
+                    saved = con.execute(
+                        """SELECT criterion_id, state, receipt_id, diagnostic_json FROM checks
+                           WHERE task_id = ? AND run_id = ? AND attempt = ? ORDER BY id""",
+                        (task_id, run_id, attempt),
                     )
+                    require(json.loads(existing["detail_json"]) == detail
+                            and [tuple(row) for row in saved] == receipts, "STATE_CORRUPT", task_id)
+                    return
+                con.executemany(
+                    """INSERT INTO checks(task_id, run_id, attempt, criterion_id, state, receipt_id,
+                                          diagnostic_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(task_id, run_id, attempt, *receipt, now) for receipt in receipts],
+                )
+                con.execute(
+                    "INSERT INTO events(task_id, run_id, kind, detail_json, created_at) VALUES (?, ?, 'checks_finished', ?, ?)",
+                    (task_id, run_id, json.dumps(detail), now),
+                )
         _retry(op)
 
     def latest_checks(self, task_id: str, run_id: str | None = None) -> list[dict]:
         def op():
             with self.tx(write=False) as con:
-                target_run = run_id
-                if target_run is None:
-                    row = con.execute(
-                        "SELECT run_id FROM checks WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
-                    ).fetchone()
-                    if row is None:
-                        return []
-                    target_run = row["run_id"]
                 rows = con.execute(
-                    "SELECT criterion_id, state, receipt_id, output_excerpt FROM checks WHERE task_id = ? AND run_id = ? ORDER BY id ASC",
-                    (task_id, target_run),
-                ).fetchall()
-                return [dict(r) for r in rows]
+                    """WITH latest AS (
+                           SELECT c.run_id, c.attempt FROM checks c
+                           LEFT JOIN runs r ON r.id = c.run_id AND r.task_id = c.task_id
+                           WHERE c.task_id = ? AND (? IS NULL OR c.run_id = ?)
+                           ORDER BY r.rowid DESC, c.attempt DESC, c.id DESC LIMIT 1
+                       )
+                       SELECT c.criterion_id, c.state, c.receipt_id FROM checks c JOIN latest l
+                         ON c.run_id = l.run_id AND c.attempt IS l.attempt
+                       WHERE c.task_id = ? ORDER BY c.id""", (task_id, run_id, run_id, task_id),
+                )
+                return [dict(row) for row in rows]
+        return _retry(op)
+
+    def check_history(self, task_id: str) -> list[dict]:
+        def op():
+            with self.tx(write=False) as con:
+                rows = con.execute(
+                    """SELECT c.run_id, c.attempt, c.criterion_id, c.state, c.receipt_id, c.diagnostic_json
+                       FROM checks c LEFT JOIN runs r ON r.id = c.run_id AND r.task_id = c.task_id
+                       WHERE c.task_id = ? ORDER BY r.rowid, c.attempt, c.id""", (task_id,),
+                )
+                rounds: dict[tuple[str, int | None], list[dict]] = {}
+                for row in rows:
+                    check = dict(row)
+                    identity = (check.pop("run_id"), check.pop("attempt"))
+                    diagnostic = check.pop("diagnostic_json")
+                    check["diagnostic"] = json.loads(diagnostic) if diagnostic else None
+                    rounds.setdefault(identity, []).append(check)
+                return [{"run_id": run_id, "attempt": attempt, "checks": checks}
+                        for (run_id, attempt), checks in rounds.items()]
         return _retry(op)
 
     def add_review(self, task_id: str, run_id: str, round_num: int, reviewer_kind: str,
-                   verdict: dict, session_id: str | None = None) -> None:
+                   verdict: dict, session_id: str | None = None, *, product_id: str,
+                   reviewer_sha256: str) -> None:
         now = time.time()
         def op():
             with self.tx(write=True) as con:
                 con.execute(
-                    """INSERT INTO reviews(task_id, run_id, round, reviewer_kind, verdict, verdict_json, session_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO reviews(task_id, run_id, round, reviewer_kind, verdict, verdict_json,
+                                            session_id, product_id, reviewer_sha256, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (task_id, run_id, round_num, reviewer_kind, verdict["verdict"],
-                     json.dumps(verdict, ensure_ascii=False), session_id, now),
+                     json.dumps(verdict, ensure_ascii=False), session_id, product_id, reviewer_sha256, now),
                 )
         _retry(op)
 
@@ -684,18 +778,23 @@ class Store:
         _retry(op)
         return self.get_question(request_id)
 
+    @staticmethod
+    def _insert_notification(con, *, dedupe_key: str, task_id: str, kind: str,
+                             target_session: str | None, body: str, initial_state: str = "pending") -> None:
+        now = time.time()
+        con.execute(
+            """INSERT OR IGNORE INTO notifications
+               (id, dedupe_key, task_id, kind, target_session, body, state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (new_id("notice"), dedupe_key, task_id, kind, target_session, body, initial_state, now, now),
+        )
+
     def enqueue_notification(self, *, dedupe_key: str, task_id: str, kind: str,
                              target_session: str | None, body: str, initial_state: str = "pending") -> dict:
-        nid = new_id("notice")
-        now = time.time()
         def op():
             with self.tx(write=True) as con:
-                con.execute(
-                    """INSERT OR IGNORE INTO notifications
-                       (id, dedupe_key, task_id, kind, target_session, body, state, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (nid, dedupe_key, task_id, kind, target_session, body, initial_state, now, now),
-                )
+                self._insert_notification(con, dedupe_key=dedupe_key, task_id=task_id, kind=kind,
+                                          target_session=target_session, body=body, initial_state=initial_state)
                 row = con.execute("SELECT * FROM notifications WHERE dedupe_key = ?", (dedupe_key,)).fetchone()
                 return dict(row)
         return _retry(op)

@@ -67,7 +67,8 @@ def record_answer(store: Store, request_id: str, answer: str) -> dict:
 def record_acceptance(store: Store, task_id: str, *, note_bytes: bytes | None = None) -> dict:
     """Record optional user approval receipt separately from automated checks and review."""
     task = store.get_task(task_id)
-    require(task["status"] == "completed" and task["product"] is not None, "CHECKS_REQUIRED")
+    require(task["status"] == "completed" and task["product"] is not None
+            and not task["legacy_advisory_completion"], "CHECKS_REQUIRED")
     attachment_sha = sha256_bytes(note_bytes) if note_bytes is not None else None
     existing = task["acceptance"]
     if existing is not None:

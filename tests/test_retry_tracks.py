@@ -184,9 +184,9 @@ class RetryTracksTests(unittest.TestCase):
         self.assertEqual(self.stages[-1]["execution_failures"], 3)
         self.assertIn("WARNING: Repeated issue", self.prompts[-1])
 
-    def test_identical_checks_pause_with_product_even_when_advisory(self):
-        self.configure(contract={"acceptance": [{"id": "bad", "kind": "command", "description": "fails",
-                                                 "checks": [["false"]]}]})
+    def test_identical_checks_pause_with_product_before_repair_cap(self):
+        self.configure(contract={"max_attempts": 4, "acceptance": [
+            {"id": "bad", "kind": "command", "description": "fails", "checks": [["false"]]}]})
         result = self.run_task()
         self.assertEqual(result["reason"], "REPEATED_NO_PROGRESS")
         self.assertEqual(result["status"], "blocked")

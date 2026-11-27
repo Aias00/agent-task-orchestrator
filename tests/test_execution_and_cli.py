@@ -1,4 +1,4 @@
-"""End-to-end CLI tests covering full task lifecycle, repair, advisory checks, stop/resume, and cleanup."""
+"""End-to-end CLI tests covering task lifecycle, verification, stop/resume, and cleanup."""
 from __future__ import annotations
 
 from contextlib import redirect_stdout
@@ -227,7 +227,7 @@ class ExecutionAndCLITests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertEqual(cleaned["data"]["worktree_state"], "removed")
 
-    def test_advisory_checks_failed_and_repair_loop(self):
+    def test_checks_failed_and_repair_loop(self):
         with TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
             with patch.dict(os.environ, {"ATO_HOME": str(base / "ato")}):
@@ -260,7 +260,7 @@ class ExecutionAndCLITests(unittest.TestCase):
                 self.assertEqual(res["data"]["status"], "completed")
                 self.assertIsNone(res["data"]["reason"])
 
-                # Advisory failure settles completed with reason=CHECKS_FAILED (skipping reviewer)
+                # Exhausted checks block and skip review.
                 sp2 = make_spec(
                     repo, base / "spec2.json",
                     worker_contract={
@@ -286,7 +286,7 @@ class ExecutionAndCLITests(unittest.TestCase):
                 )
                 self.assertEqual(code, 0)
                 self.assertFalse(reviewer_called["called"])
-                self.assertEqual(res2["data"]["status"], "completed")
+                self.assertEqual(res2["data"]["status"], "blocked")
                 self.assertEqual(res2["data"]["reason"], "CHECKS_FAILED")
                 self.assertEqual(res2["data"]["checks"][0]["state"], "failed")
 

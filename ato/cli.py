@@ -67,7 +67,7 @@ def build_parser() -> _Parser:
     _opt(run, "foreground", flag=True)
 
     _opt(cmd(daily, "list", "List tasks."), "repo")
-    cmd(daily, "status", "Read task and execution status.", "task_id")
+    _opt(cmd(daily, "status", "Read task and execution status.", "task_id"), "check-history", flag=True)
     cmd(daily, "stop", "Request durable STOP.", "task_id")
 
     res = cmd(daily, "resume", "Resume an eligible task.", "task_id")
@@ -126,13 +126,15 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
         tasks = st.list_tasks(repo_key=repo_key)
         return {
             "tasks": [
-                {"task_id": t["id"], "repo": t["repo_root"], "status": t["status"],
-                 "reason": t["reason"], "updated_at": t["updated_at"]}
+                {"task_id": t["id"], "repo": t["repo_root"],
+                 "status": "blocked" if t["legacy_advisory_completion"] else t["status"],
+                 "reason": t["reason"], "updated_at": t["updated_at"],
+                 **({"legacy_advisory_completion": True} if t["legacy_advisory_completion"] else {})}
                 for t in tasks
             ]
         }
     if op == "status":
-        return executor.task_status_view(st, args.task_id)
+        return executor.task_status_view(st, args.task_id, include_check_history=getattr(args, "check_history", False))
     if op == "stop":
         return executor.request_stop(st, args.task_id)
     if op == "resume":
@@ -158,7 +160,7 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
             diff = product.collect_diff(task, include_patch=not getattr(args, "stat", False))
             return {
                 "task_id": task["id"],
-                "status": task["status"],
+                "status": "blocked" if task["legacy_advisory_completion"] else task["status"],
                 "base": task["base_commit"],
                 "branch": task["branch"],
                 "worktree_state": task["worktree_state"],

@@ -271,6 +271,7 @@ def run_checks(task: dict, spec: dict, *, timeout_per_cmd: int = 300,
         passed = True
         excerpts: list[str] = []
         invocations: list[dict] = []
+        diagnostic = None
         for argv in criterion["checks"]:
             if stop_check is not None and stop_check():
                 raise TaskError("STOPPED", task["id"])
@@ -291,6 +292,7 @@ def run_checks(task: dict, spec: dict, *, timeout_per_cmd: int = 300,
             excerpts.append(text)
             if not cmd_ok:
                 passed = False
+                diagnostic = {"command_index": len(invocations), "code": code, "returncode": rc}
                 break
         state = "passed" if passed else "failed"
         if not passed:
@@ -302,6 +304,7 @@ def run_checks(task: dict, spec: dict, *, timeout_per_cmd: int = 300,
             "criterion_id": cid,
             "state": state,
             "receipt_id": receipt_id,
+            "diagnostic": diagnostic,
             "output_excerpt": "\n".join(excerpts)[-MAX_CHECK_LOG:],
         })
     return results, all_passed
