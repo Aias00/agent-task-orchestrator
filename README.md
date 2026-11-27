@@ -19,11 +19,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ato --help
 ```
 
-To include optional Pi / ACP support (`agent.kind = "pi"` or `"acp_pi"` and `PiCoordinator`), add `--with-pi` (requires Node.js 24+ and npm):
-
-```sh
-sh ./install.sh --editable --with-pi
-```
+The Pi worker (`agent.kind = "pi"`) uses the lightweight `pi` CLI under macOS `sandbox-exec` with no extra Python or Node packages beyond optional `pi` itself.
 
 ## Quick start
 
@@ -57,5 +53,5 @@ ato system status
 ## Documentation
 
 - [Architecture](docs/architecture.md) — 4-layer single-package architecture, SQLite schema, and safety invariants
-- [CLI & Spec Reference](docs/cli-and-spec.md) — commands, task specification format, guardrails, reviewers, and Pi/ACP
+- [CLI & Spec Reference](docs/cli-and-spec.md) — commands, task specification format, guardrails, reviewers, and Pi worker
 - [Agent Skill](skills/ato/SKILL.md) — concise instructions for Codex/AGY agents driving `ato`

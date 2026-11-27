@@ -56,11 +56,11 @@ MODEL_RE = re.compile(
     r"(?:\[[A-Za-z][A-Za-z0-9_-]*=[A-Za-z0-9_.:/-]+"
     r"(?:,[A-Za-z][A-Za-z0-9_-]*=[A-Za-z0-9_.:/-]+)*\])?"
 )
-WORKER_KINDS = ("codex", "claude", "cursor", "pi", "acp_pi")
+WORKER_KINDS = ("codex", "claude", "cursor", "pi")
 REVIEWER_KINDS = ("codex", "claude", "agy")
 SESSION_MODES = ("fresh_only", "resume_if_supported", "require_resume")
 EFFORTS = (None, "minimal", "low", "medium", "high", "xhigh", "max")
-SHARED_ENV_LINKS = frozenset((".venv", "venv", "node_modules", "integrations/pi-acp/node_modules"))
+SHARED_ENV_LINKS = frozenset((".venv", "venv", "node_modules"))
 SEVERITIES = ("blocker", "major", "minor", "nit")
 CATEGORIES = ("security", "correctness", "architecture", "tests", "scope", "docs")
 MAX_SPEC_BYTES = 1024 * 1024

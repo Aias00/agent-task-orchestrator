@@ -184,8 +184,8 @@ def get_worker_runner(kind: str):
     if kind == "cursor":
         from ato.adapters.cursor import run_worker
         return run_worker
-    if kind in ("pi", "acp_pi"):
-        from ato.adapters.pi_acp import run_worker
+    if kind == "pi":
+        from ato.adapters.pi import run_worker
         return run_worker
     raise TaskError("UNSUPPORTED_CAPABILITY", detail=f"Unknown worker kind: {kind}")
 
@@ -204,7 +204,7 @@ def get_reviewer_runner(kind: str):
 
 
 def doctor_all(*, probe_versions: bool = False) -> dict:
-    """Inspect local availability for codex, claude, cursor, agy, pi, and acp_pi."""
+    """Inspect local availability for codex, claude, cursor, agy, and pi."""
     def _probe(kind: str) -> dict:
         exe = config.resolve_executable(kind)
         info: dict = {"kind": kind, "available": bool(exe), "executable": exe, "version": None}
@@ -217,18 +217,12 @@ def doctor_all(*, probe_versions: bool = False) -> dict:
                 pass
         return info
 
-    import importlib.util
-    acp_sdk = importlib.util.find_spec("acp") is not None
-    node_bin = config.resolve_executable("node")
-    pi_bin = config.resolve_executable("pi")
     return {
         "worker": {
             "codex": _probe("codex"),
             "claude": _probe("claude"),
             "cursor": _probe("cursor"),
             "pi": _probe("pi"),
-            "acp_pi": {"kind": "acp_pi", "available": bool(acp_sdk and node_bin and pi_bin),
-                       "acp_sdk": acp_sdk, "node": node_bin, "pi": pi_bin},
         },
         "reviewer_kinds": ["codex", "claude", "agy"],
         "reviewers": {k: _probe(k) for k in ("codex", "claude", "agy")},

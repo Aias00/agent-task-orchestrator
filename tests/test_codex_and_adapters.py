@@ -101,7 +101,8 @@ class CodexAndAdaptersTests(unittest.TestCase):
 
             doc = base.doctor_all(probe_versions=False)
             self.assertEqual(set(doc["reviewer_kinds"]), {"codex", "claude", "agy"})
-            self.assertIn("acp_pi", doc["worker"])
+            self.assertIn("pi", doc["worker"])
+            self.assertNotIn("acp_pi", doc["worker"])
 
     def test_run_bounded_subprocess_handles_large_stdout_stderr_without_pipe_deadlock(self):
         import sys

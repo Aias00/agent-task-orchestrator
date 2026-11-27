@@ -44,7 +44,7 @@ flowchart TD
     EXEC["ato/executor.py\n(worktree / checks / guardrails / STOP)"] --> BASE["ato/adapters/base.py\n(WorkerRequest / WorkerResult)"]
     BASE --> CODEX["codex.py"]
     BASE --> CLAUDE["claude.py"]
-    BASE --> PI["pi_acp.py"]
+    BASE --> PI["pi.py"]
     BASE --> CURSOR["cursor.py (新增)"]
     CURSOR --> CLI["cursor-agent -p --output-format stream-json\n(受控沙箱 + 独立进程组)"]
 ```

@@ -1,9 +1,0 @@
-{
-  "name": "ctask-optional-pi-acp",
-  "private": true,
-  "version": "0.0.0",
-  "description": "Pinned offline test and optional Pi ACP adapter dependency; no agent or provider started by installation",
-  "dependencies": {
-    "pi-acp": "0.0.34"
-  }
-}
