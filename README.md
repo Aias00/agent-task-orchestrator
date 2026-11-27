@@ -9,28 +9,66 @@ records independent checks separately; failed checks are surfaced as
 
 Specs can optionally protect paths or forbid deletions with `guardrails`.
 
-## Quick start
+## Installation
 
-On macOS with Git and Python 3.12 or later, install `ato` for your account.
-Core installation needs no Node.js, npm, or dependency cache.
+For a fresh installation on macOS, you need Git and Python 3.12 or later.
+The core installer works without Node.js, npm, or a dependency cache.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/main/install.sh | sh
+curl -fsSL https://app.aias.eu.org/ato | sh
 export PATH="$HOME/.local/bin:$PATH"
 ato --help
 ```
 
-From a Git checkout, run `sh ./install.sh` to install the checked-out commit.
-If you already have a sealed snapshot, run its [scripts/install.py](scripts/install.py)
-with the snapshot's interpreter.
-For a piped install, set `ATO_INSTALL_REF` on the `sh` side to select a fixed
-Git revision, and pass options after `sh -s --`.
+The short URL redirects to the GitHub installer and fetches the current
+commit on `main`. You can also download the installer from GitHub directly.
 
-The installer keeps snapshots under `~/.local/share/ato-releases` and accepts
-`--bin-dir`, `--releases-dir`, and an optional `--skills-dir` such as
-`$HOME/.codex/skills`. Use [journaled cutover](docs/runtime-upgrade.md) for an
-existing installation. To include Pi/ACP, add `--with-pi` and provide
-`--wheelhouse PATH` and `--npm-cache PATH` with Node.js/npm available.
+```sh
+curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/main/install.sh | sh
+```
+
+### Install a specific version
+
+Choose a tag from the release list. This example installs `v1.0.1`.
+[GitHub Releases](https://github.com/Aias00/agent-task-orchestrator/releases)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/v1.0.1/install.sh |
+  ATO_INSTALL_REF=refs/tags/v1.0.1 sh
+```
+
+From a Git checkout, run `sh ./install.sh` to install the checked-out commit.
+The default launcher is `~/.local/bin/ato` and snapshots are stored under
+`~/.local/share/ato-releases`. To change these locations, use `--bin-dir`
+and `--releases-dir`. Use `--skills-dir "$HOME/.codex/skills"` to install the
+Codex skill. With a piped installer, pass options after `sh -s --`.
+
+### Add Pi/ACP support
+
+Pi/ACP is optional. For a fresh install with Pi/ACP, use Node.js 24 or later,
+npm, and the dependency caches for the commit you are installing. From that
+Git checkout, prepare the caches and install with the same Python interpreter.
+
+```sh
+WHEELHOUSE="$HOME/.cache/ato/wheels"
+NPM_CACHE="$HOME/.cache/ato/npm"
+mkdir -p "$WHEELHOUSE" "$NPM_CACHE"
+python3.12 -m pip download --only-binary=:all: -r requirements-acp.lock -d "$WHEELHOUSE"
+npm ci --ignore-scripts --no-audit --no-fund --prefix integrations/pi-acp --cache "$NPM_CACHE"
+ATO_INSTALL_PYTHON=python3.12 sh ./install.sh --with-pi --wheelhouse "$WHEELHOUSE" --npm-cache "$NPM_CACHE"
+```
+
+Pi CLI versions and adapter pins are listed in the
+[compatibility registry](integrations/pi-acp/compatibility.json).
+
+### Upgrade an existing installation
+
+Use the [journaled cutover and rollback procedure](docs/runtime-upgrade.md)
+to switch an existing launcher and Observer to a new snapshot. If you already
+have a sealed snapshot for a fresh installation, run its
+[scripts/install.py](scripts/install.py) with the snapshot's interpreter.
+
+## Quick start
 
 For local tasks, install and sign in to the native Codex CLI. ATO looks for
 `codex` on `PATH` or uses `CTASK_CODEX_BIN` when set. Configure a profile to
