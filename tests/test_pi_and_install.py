@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from ato import __version__
 from ato.adapters import base, pi
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -199,7 +200,7 @@ console.log('GUARDS_OK');
             self.assertTrue((skills_dir / "ato/SKILL.md").is_file())
             ver = subprocess.run([str(bin_dir / "ato"), "--version"], capture_output=True, text=True)
             self.assertEqual(ver.returncode, 0, ver.stderr)
-            self.assertIn("ato 2.0.0", ver.stdout)
+            self.assertIn(f"ato {__version__}", ver.stdout)
 
         with TemporaryDirectory() as tmp:
             base_dir = Path(tmp).resolve()
@@ -217,7 +218,7 @@ console.log('GUARDS_OK');
             self.assertFalse((venv_dir / "share/ato/integrations").exists())
             ver = subprocess.run([str(bin_dir / "ato"), "--version"], capture_output=True, text=True)
             self.assertEqual(ver.returncode, 0, ver.stderr)
-            self.assertIn("ato 2.0.0", ver.stdout)
+            self.assertIn(f"ato {__version__}", ver.stdout)
 
     def test_v2_package_has_no_circular_top_level_imports(self):
         graph: dict[str, set[str]] = {}
