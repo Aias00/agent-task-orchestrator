@@ -18,6 +18,9 @@ ato = "ato.cli:main"
 [tool.setuptools]
 packages = ["ato", "ato.adapters"]
 
+[tool.setuptools.package-data]
+"ato.adapters" = ["acpx_bridge.mjs"]
+
 [tool.setuptools.data-files]
 "share/agent-task-orchestrator" = ["pi-path-guard.mjs"]
 "share/agent-task-orchestrator/skills/ato" = ["skills/ato/SKILL.md"]

@@ -41,6 +41,7 @@ ERRORS: dict[int, dict[str, str]] = {
         "CHECKS_REQUIRED": "Current independent checks are required.",
         "LAUNCH_FAILED": "The run failed to start.",
         "CLEANUP_BLOCKED": "Execution cleanup could not be verified.",
+        "ACPX_DELIVERY_UNKNOWN": "An ACP review prompt may have been sent. Its outcome is unresolved.",
     },
     5: {
         "STATE_CORRUPT": "A trusted record could not be verified.",
@@ -57,7 +58,7 @@ MODEL_RE = re.compile(
     r"(?:,[A-Za-z][A-Za-z0-9_-]*=[A-Za-z0-9_.:/-]+)*\])?"
 )
 WORKER_KINDS = ("codex", "claude", "cursor", "pi")
-REVIEWER_KINDS = ("codex", "claude", "agy")
+REVIEWER_KINDS = ("codex", "claude", "agy", "codex_acpx")
 SESSION_MODES = ("fresh_only", "resume_if_supported", "require_resume")
 EFFORTS = (None, "minimal", "low", "medium", "high", "xhigh", "max")
 SHARED_ENV_LINKS = frozenset((".venv", "venv", "node_modules"))
@@ -398,6 +399,9 @@ def _normalize_reviewer(raw: object, repo: Path, base: str) -> dict | None:
             and len(allowed) == len(set(allowed)) and agent["kind"] in allowed, "INVALID_SPEC")
     session_mode = raw.get("session_mode", "fresh_only")
     require(session_mode in SESSION_MODES, "INVALID_SPEC")
+    if agent["kind"] == "codex_acpx":
+        require(session_mode == "fresh_only" and set(norm_agent) == {"kind"}, "INVALID_SPEC",
+                detail="codex_acpx requires fresh_only with the host launcher defaults.")
     rounds = raw.get("max_review_rounds", 1)
     require(type(rounds) is int and 1 <= rounds <= 20, "INVALID_SPEC")
     timeout = raw.get("timeout_seconds", DEFAULT_REVIEWER_TIMEOUT_SECONDS)

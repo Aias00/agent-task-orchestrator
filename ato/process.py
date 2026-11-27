@@ -34,15 +34,24 @@ if _libproc is not None:
     _libproc.proc_listpids.argtypes = (ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int)
 
 
+def _darwin_info(pid: int) -> _BSDInfo:
+    row = _BSDInfo()
+    size = _libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(row), ctypes.sizeof(row))
+    if size != ctypes.sizeof(row) or row.pid != pid or not row.start_sec:
+        raise OSError(ctypes.get_errno() or errno.EACCES, "process birth unavailable")
+    return row
+
+
+def _linux_stat(pid: int) -> list[bytes]:
+    return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+
+
 def observe(pid: int) -> tuple[int, bool, str]:
     if sys.platform == "darwin":
-        row = _BSDInfo()
-        size = _libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(row), ctypes.sizeof(row))
-        if size != ctypes.sizeof(row) or row.pid != pid or not row.start_sec:
-            raise OSError(ctypes.get_errno() or errno.EACCES, "process birth unavailable")
+        row = _darwin_info(pid)
         return row.pgid, row.status == 5, f"{row.start_sec}:{row.start_usec}"
     if sys.platform == "linux":
-        fields = Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+        fields = _linux_stat(pid)
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         return int(fields[2]), fields[0] in (b"Z", b"X"), f"{boot}:{fields[19].decode('ascii')}"
     raise OSError("process birth unavailable")
@@ -155,6 +164,67 @@ def group_members(group: int) -> dict[int, str] | None:
         return rows
     except (OSError, ValueError, IndexError):
         return {} if _absent_group(group) else None
+
+
+def group_birth(pid: int) -> str | None:
+    """Identify a detached root, including a matching root awaiting reap."""
+    try:
+        group, _, stamp = observe(pid)
+        if group == pid and os.getsid(pid) == pid:
+            return _birth(pid, stamp)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def parent_pid(pid: int) -> int | None:
+    try:
+        if sys.platform == "darwin":
+            return _darwin_info(pid).ppid
+        if sys.platform == "linux":
+            return int(_linux_stat(pid)[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def owned_group_exited(pid: int, birth: str) -> bool:
+    return disposition(pid, birth) in ("absent", "reused") and group_members(pid) == {}
+
+
+def stop_owned_group(pid: int, birth: str, *, witnesses: dict[int, str] | None = None,
+                     grace_seconds: float = 0.6) -> bool:
+    """Sweep a detached group only while a birth-verified original member anchors it."""
+    if owned_group_exited(pid, birth):
+        return True
+    witnesses = dict(witnesses or {})
+    if group_birth(pid) == birth:
+        members = group_members(pid) or {}
+        if group_birth(pid) == birth:
+            witnesses.update(members)
+
+    def anchored() -> bool:
+        if group_birth(pid) == birth:
+            return True
+        if not witnesses:
+            return False
+        current = group_members(pid)
+        return bool(current and any(current.get(member) == stamp for member, stamp in witnesses.items()))
+
+    if not anchored():
+        return owned_group_exited(pid, birth)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if anchored():
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            if owned_group_exited(pid, birth):
+                return True
+            time.sleep(0.03)
+    return owned_group_exited(pid, birth)
 
 
 def stop_pid_group(pid: int, birth: str, *, grace_seconds: float = 2.0) -> bool:

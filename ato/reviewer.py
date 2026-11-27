@@ -7,12 +7,14 @@ from pathlib import Path
 from ato import config
 from ato.adapters.base import ReviewRequest, ReviewResult, get_reviewer_runner
 from ato.product import collect_diff
+from ato.spec import REVIEW_VERDICT_SCHEMA
+from ato.store import Store
 from ato.worktree import shared_links_for, tree_fingerprint
 
 
 def build_review_prompt(task: dict, spec: dict, *, round_num: int, previous_findings: list[dict] | None = None) -> str:
     contract = spec["worker_contract"]
-    reviewer = spec["reviewer"]
+    reviewer = task.get("reviewer") or spec["reviewer"]
     diff = collect_diff(task, include_patch=False)
     lines = [
         "You are an independent read-only technical reviewer. Do NOT modify any file.",
@@ -28,13 +30,16 @@ def build_review_prompt(task: dict, spec: dict, *, round_num: int, previous_find
     if previous_findings:
         lines.append("Previous round blocker findings to re-verify:\n" + json.dumps(previous_findings, ensure_ascii=False))
     lines.append("Return ONLY a strict JSON object matching REVIEW_VERDICT_SCHEMA.")
+    if reviewer["agent"]["kind"] == "codex_acpx":
+        lines.append("Summarize your evidence and omit credentials and raw tool output.")
+        lines.append(json.dumps(REVIEW_VERDICT_SCHEMA, ensure_ascii=False))
     return "\n\n".join(lines)
 
 
 def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
                     resume_session_id: str | None = None,
                     previous_findings: list[dict] | None = None,
-                    stop_check=None, runner_override=None) -> ReviewResult:
+                    stop_check=None, runner_override=None, store: Store | None = None) -> ReviewResult:
     """Execute one read-only review turn and fail closed if the worktree mutates."""
     reviewer_cfg = task.get("reviewer") or spec.get("reviewer")
     if not reviewer_cfg:
@@ -59,9 +64,17 @@ def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
         resume_session_id=resume_session_id,
         timeout_seconds=reviewer_cfg.get("timeout_seconds", 300),
         stop_check=stop_check,
+        store=store,
+        run_id=run_id,
+        round_num=round_num,
     )
     runner = runner_override or get_reviewer_runner(agent["kind"])
-    result = runner(req)
+    try:
+        result = runner(req)
+    except Exception:
+        if agent["kind"] != "codex_acpx":
+            raise
+        result = ReviewResult(ok=False, code="ACPX_BRIDGE_FAILED")
 
     after_fp = tree_fingerprint(wt, ignored=ignored)
     if after_fp != before_fp:
