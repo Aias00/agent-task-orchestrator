@@ -103,6 +103,19 @@ class CodexAndAdaptersTests(unittest.TestCase):
             self.assertEqual(set(doc["reviewer_kinds"]), {"codex", "claude", "agy"})
             self.assertIn("acp_pi", doc["worker"])
 
+    def test_run_bounded_subprocess_handles_large_stdout_stderr_without_pipe_deadlock(self):
+        import sys
+        with TemporaryDirectory() as tmp:
+            rc, out, err, code = base.run_bounded_subprocess(
+                [sys.executable, "-c",
+                 "import sys; sys.stdout.write('A' * 262144); sys.stderr.write('B' * 262144)"],
+                cwd=Path(tmp), env=dict(os.environ), timeout=10,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(code, "OK")
+            self.assertEqual(len(out), 262144)
+            self.assertEqual(len(err), 262144)
+
 
 if __name__ == "__main__":
     unittest.main()

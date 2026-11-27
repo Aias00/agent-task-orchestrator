@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 
 from ato import config
@@ -136,33 +137,39 @@ def readonly_sandbox_profile(runtime: Path, workspace: Path, *, writable_native:
 def run_bounded_subprocess(argv: list[str], *, cwd: Path, env: dict[str, str],
                            prompt: str | None = None, timeout: int = 300,
                            stop_check=None) -> tuple[int, bytes, bytes, str]:
-    """Run an isolated process-group child with bounded timeout and cooperative STOP polling."""
-    proc = subprocess.Popen(
-        argv, cwd=cwd, env=env,
-        stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    assert proc.stdout is not None and proc.stderr is not None
-    if prompt is not None and proc.stdin is not None:
-        try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
-    deadline = time.monotonic() + timeout
-    while proc.poll() is None:
-        if stop_check is not None and stop_check():
-            terminate_popen(proc)
-            return -1, b"", b"", "STOPPED"
-        if time.monotonic() >= deadline:
-            terminate_popen(proc)
-            return -1, b"", b"", "TIMEOUT"
-        time.sleep(0.05)
-    stdout = proc.stdout.read(MAX_OUTPUT_BYTES)
-    stderr = proc.stderr.read(MAX_OUTPUT_BYTES)
-    code = "OK" if proc.returncode == 0 else "PROCESS_ERROR"
-    return proc.returncode, stdout, stderr, code
+    """Run an isolated process-group child with temp-file output (zero pipe deadlock) and STOP polling."""
+    with tempfile.TemporaryFile() as out_fh, tempfile.TemporaryFile() as err_fh:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env,
+            stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
+            stdout=out_fh, stderr=err_fh,
+            start_new_session=True,
+        )
+        if prompt is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(prompt.encode("utf-8"))
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        deadline = time.monotonic() + timeout
+        last_stop_poll = 0.0
+        while proc.poll() is None:
+            now = time.monotonic()
+            if stop_check is not None and now - last_stop_poll >= 0.5:
+                last_stop_poll = now
+                if stop_check():
+                    terminate_popen(proc)
+                    return -1, b"", b"", "STOPPED"
+            if now >= deadline:
+                terminate_popen(proc)
+                return -1, b"", b"", "TIMEOUT"
+            time.sleep(0.05)
+        out_fh.seek(0)
+        err_fh.seek(0)
+        stdout = out_fh.read(MAX_OUTPUT_BYTES)
+        stderr = err_fh.read(MAX_OUTPUT_BYTES)
+        code = "OK" if proc.returncode == 0 else "PROCESS_ERROR"
+        return proc.returncode, stdout, stderr, code
 
 
 def get_worker_runner(kind: str):
