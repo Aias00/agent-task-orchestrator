@@ -21,6 +21,28 @@ ato --help
 
 The Pi worker (`agent.kind = "pi"`) uses the lightweight `pi` CLI under macOS `sandbox-exec` with no extra Python or Node packages beyond optional `pi` itself.
 
+## Remote coordinator entrypoints
+
+Optional HTTP REST (`/api/v1`) and official MCP Streamable HTTP (`/mcp`) share one
+listener and the existing ATO engine. On the later deployment host:
+
+```sh
+sh ./install.sh --server
+# Configure repository aliases, scopes and token environment variables first:
+ato serve --config /path/to/server.json
+# Local MCP clients may instead use an explicit configured stdio principal:
+ato mcp --stdio --config /path/to/server.json
+```
+
+The listener defaults to `127.0.0.1:8765`. Both HTTP entrypoints require bearer
+authentication; human answers use a separate token from bot control. Submission
+is for trusted controllers because task specs authorize executable work/checks.
+See [MCP/API deployment and usage](docs/mcp-api.md) and the
+[safe host configuration example](docs/server-config.example.json) for optional
+dependency installation, TLS proxy policy, REST/SDK examples and crash-safe
+idempotency limitations. Poll task status/inbox; webhook/push integration is not
+included. Implementation is complete; tests have not run and await user instruction.
+
 ## Quick start
 
 ```sh
@@ -54,4 +76,5 @@ ato system status
 
 - [Architecture](docs/architecture.md) — 4-layer single-package architecture, SQLite schema, and safety invariants
 - [CLI & Spec Reference](docs/cli-and-spec.md) — commands, task specification format, guardrails, reviewers, and Pi worker
+- [MCP & HTTP API](docs/mcp-api.md) — authenticated transports, scopes, deployment, idempotency and polling
 - [Agent Skill](skills/ato/SKILL.md) — concise instructions for Codex/AGY agents driving `ato`

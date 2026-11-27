@@ -15,7 +15,7 @@ from ato.adapters.base import WorkerRequest, get_worker_runner, safe_review_deta
 from ato.spec import (
     DEFAULT_WORKER_TIMEOUT_SECONDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
     DEFAULT_MAX_REVIEW_ROUNDS, DEFAULT_MAX_NO_PROGRESS_ROUNDS,
-    TaskError, blocker_fingerprint, canonical_json, new_id, normalize_spec, require, sha256_bytes,
+    NormalizedSpec, TaskError, blocker_fingerprint, canonical_json, new_id, normalize_spec, require, sha256_bytes,
 )
 from ato.store import Store
 
@@ -151,8 +151,16 @@ def _reviewer_digest(cfg: dict) -> str:
 def submit(store: Store, repo: str | Path, spec_file: str | Path, *,
            foreground: bool = False, worker_runner=None, reviewer_runner=None) -> dict:
     norm = normalize_spec(repo, spec_file)
-    task_id = new_id("task")
-    origin_kind, origin_session = config.detect_submission_origin()
+    return submit_normalized(store, norm, foreground=foreground,
+                             worker_runner=worker_runner, reviewer_runner=reviewer_runner)
+
+
+def submit_normalized(store: Store, norm: NormalizedSpec, *, foreground: bool = False,
+                      worker_runner=None, reviewer_runner=None,
+                      origin: tuple[str, str | None] | None = None,
+                      task_id: str | None = None, child_env: dict[str, str] | None = None) -> dict:
+    task_id = task_id or new_id("task")
+    origin_kind, origin_session = origin if origin is not None else config.detect_submission_origin()
     if origin_kind == "codex" and origin_session:
         try:
             codex_notify.session_path(config.codex_home(), origin_session)
@@ -186,13 +194,16 @@ def submit(store: Store, repo: str | Path, spec_file: str | Path, *,
         execute_run(store, task_id, run["id"], worker_runner=worker_runner, reviewer_runner=reviewer_runner)
         return task_status_view(store, task_id)
 
-    _spawn_background_run(store, task_id, run["id"])
+    if child_env is None:
+        _spawn_background_run(store, task_id, run["id"])
+    else:
+        _spawn_background_run(store, task_id, run["id"], child_env=child_env)
     return task_status_view(store, task_id)
 
 
-def _spawn_background_run(store: Store, task_id: str, run_id: str) -> None:
+def _spawn_background_run(store: Store, task_id: str, run_id: str, *, child_env: dict[str, str] | None = None) -> None:
     env = {
-        k: v for k, v in os.environ.items()
+        k: v for k, v in (os.environ if child_env is None else child_env).items()
         if k not in ("CODEX_THREAD_ID", "ATO_SUBMISSION_KIND", "ANTIGRAVITY_CONVERSATION_ID", "ATO_ACTOR_FILE")
     }
     env["ATO_HOME"] = str(config.ato_home())
@@ -613,7 +624,8 @@ def _stop_acpx_review(store: Store, task_id: str, run: dict, row: dict) -> dict:
 
 
 def resume(store: Store, task_id: str, *, foreground: bool = False,
-           worker_runner=None, reviewer_runner=None, timeout_seconds: int | None = None) -> dict:
+           worker_runner=None, reviewer_runner=None, timeout_seconds: int | None = None,
+           child_env: dict[str, str] | None = None) -> dict:
     if timeout_seconds is not None:
         require(type(timeout_seconds) is int
                 and MIN_WORKER_TIMEOUT_SECONDS <= timeout_seconds <= MAX_WORKER_TIMEOUT_SECONDS,
@@ -639,7 +651,10 @@ def resume(store: Store, task_id: str, *, foreground: bool = False,
     if foreground:
         execute_run(store, task_id, run["id"], worker_runner=worker_runner, reviewer_runner=reviewer_runner)
         return task_status_view(store, task_id)
-    _spawn_background_run(store, task_id, run["id"])
+    if child_env is None:
+        _spawn_background_run(store, task_id, run["id"])
+    else:
+        _spawn_background_run(store, task_id, run["id"], child_env=child_env)
     return task_status_view(store, task_id)
 
 

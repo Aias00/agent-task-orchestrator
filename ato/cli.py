@@ -62,6 +62,14 @@ def build_parser() -> _Parser:
         _opt(sub, "repo", required=True)
         _opt(sub, "spec", required=True)
 
+    serve = cmd(daily, "serve", "Serve authenticated REST and MCP Streamable HTTP (requires server extra).")
+    _opt(serve, "config", required=True)
+    _opt(serve, "host")
+    _opt(serve, "port")
+    mcp = cmd(daily, "mcp", "Serve MCP over local stdio with an explicitly configured principal.")
+    _opt(mcp, "config", required=True)
+    _opt(mcp, "stdio", required=True, flag=True)
+
     run = cmd(daily, "run", "Submit a task specification.")
     spec_opts(run)
     _opt(run, "foreground", flag=True)
@@ -112,6 +120,9 @@ def build_parser() -> _Parser:
 
 
 def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_runner=None):
+    if args.operation in {"serve", "mcp"}:
+        from ato.server.entrypoints import run
+        return run(args)
     st = store if store is not None else Store()
     op = args.operation
     sub = getattr(args, "subcommand", None)
@@ -246,6 +257,8 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
 
 def main(argv: list[str] | None = None, *, store: Store | None = None,
          worker_runner=None, reviewer_runner=None) -> int:
+    command_args = sys.argv[1:] if argv is None else argv
+    mcp_command = bool(command_args) and command_args[0] == "mcp"
     try:
         args = build_parser().parse_args(argv)
         if hasattr(args, "task_id"):
@@ -253,6 +266,8 @@ def main(argv: list[str] | None = None, *, store: Store | None = None,
         if hasattr(args, "request_id"):
             require_id(args.request_id, "request")
         data = dispatch(args, store=store, worker_runner=worker_runner, reviewer_runner=reviewer_runner)
+        if args.operation in {"serve", "mcp"}:
+            return 0
         output = json.dumps(result_envelope(data=data), ensure_ascii=False, allow_nan=False)
         code = 0
     except TaskError as exc:
@@ -264,7 +279,8 @@ def main(argv: list[str] | None = None, *, store: Store | None = None,
     except Exception:
         err = TaskError("INTERNAL_ERROR")
         output, code = json.dumps(result_envelope(error=err)), err.exit_code
-    print(output)
+    # Never contaminate an MCP stdout protocol stream with CLI diagnostics.
+    print(output, file=sys.stderr if mcp_command else sys.stdout)
     return code
 
 

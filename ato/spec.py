@@ -24,10 +24,14 @@ ERRORS: dict[int, dict[str, str]] = {
         "INVALID_SPEC": "Invalid task specification.",
         "INVALID_EVIDENCE": "Invalid evidence.",
         "UNSUPPORTED_CAPABILITY": "The requested capability is unavailable.",
+        "INVALID_SERVER_CONFIG": "Invalid server configuration or missing token environment variable.",
+        "BODY_TOO_LARGE": "The request body exceeds the configured limit.",
+        "METHOD_NOT_ALLOWED": "The HTTP method is not allowed.",
     },
     3: {
         "NOT_FOUND": "The requested record is unavailable.",
         "FORBIDDEN": "The operation is not permitted.",
+        "AUTH_REQUIRED": "A valid bearer credential is required.",
     },
     4: {
         "BUSY": "The record is busy or its state changed concurrently.",
@@ -42,6 +46,8 @@ ERRORS: dict[int, dict[str, str]] = {
         "LAUNCH_FAILED": "The run failed to start.",
         "CLEANUP_BLOCKED": "Execution cleanup could not be verified.",
         "ACPX_DELIVERY_UNKNOWN": "An ACP review prompt may have been sent. Its outcome is unresolved.",
+        "IDEMPOTENCY_CONFLICT": "The request key was already used with different arguments.",
+        "REQUEST_UNRESOLVED": "The operation is in flight or its outcome is uncertain. Inspect task state; do not blindly replay with a new key.",
     },
     5: {
         "STATE_CORRUPT": "A trusted record could not be verified.",
@@ -510,13 +516,27 @@ def read_regular_file(path_str: str | Path, *, code: str = "INVALID_SPEC", limit
 def normalize_spec(repo: str | Path, spec_file: str | Path) -> NormalizedSpec:
     path, data = read_regular_file(spec_file, code="INVALID_SPEC")
     raw = strict_json(data, "INVALID_JSON")
+    return normalize_spec_document(repo, raw, spec_directory=path.parent)
+
+
+def normalize_inline_spec(repo: str | Path, alias: str, raw: dict) -> NormalizedSpec:
+    """Inline specs name an alias, never a client-selected filesystem path."""
+    require(isinstance(raw, dict) and raw.get("repo") == alias, "INVALID_REPO")
+    require(len(canonical_json(raw)) <= MAX_SPEC_BYTES, "INVALID_SPEC")
+    contract = raw.get("worker_contract")
+    if isinstance(contract, dict) and isinstance(contract.get("permissions"), dict):
+        require(not contract["permissions"].get("writable_roots"), "FORBIDDEN")
+    return normalize_spec_document(repo, {**raw, "repo": str(repo)}, spec_directory=Path(repo))
+
+
+def normalize_spec_document(repo: str | Path, raw: dict, *, spec_directory: Path) -> NormalizedSpec:
     require("schema_version" in raw and type(raw["schema_version"]) is int, "INVALID_SPEC")
     require(raw["schema_version"] == 1, "UNSUPPORTED_VERSION")
     _fields(raw, ("schema_version", "repo", "base_ref", "worker_contract"),
             ("reviewer", "worktree", "guardrails"), code="INVALID_SPEC")
     repository = normalize_repository(repo)
     spec_repo_raw = _text(raw["repo"], 4096)
-    spec_repo = normalize_repository(path.parent / spec_repo_raw)
+    spec_repo = normalize_repository(spec_directory / spec_repo_raw)
     require(spec_repo == repository, "INVALID_REPO")
     root = Path(repository.root)
     selector = _text(raw["base_ref"], 255)

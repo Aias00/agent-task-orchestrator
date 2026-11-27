@@ -36,6 +36,7 @@ Options:
   --venv-dir PATH      Virtualenv directory (default: ~/.local/share/ato/venv)
   --skills-dir PATH    Optional Codex skills directory (e.g. ~/.codex/skills)
   --editable           Install local checkout in editable mode (changes take effect immediately)
+  --server             Opt in to pip installation of HTTP/MCP server dependencies
 
 Environment:
   ATO_INSTALL_PYTHON   Select Python 3.12+ binary
@@ -48,6 +49,7 @@ main() {
     VENV_DIR="$HOME/.local/share/ato/venv"
     SKILLS_DIR=""
     EDITABLE=0
+    SERVER=0
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -56,6 +58,7 @@ main() {
             --venv-dir) [ "$#" -ge 2 ] && [ -n "$2" ] || fail '--venv-dir requires a non-empty path'; VENV_DIR="$2"; shift 2 ;;
             --skills-dir) [ "$#" -ge 2 ] && [ -n "$2" ] || fail '--skills-dir requires a non-empty path'; SKILLS_DIR="$2"; shift 2 ;;
             --editable) EDITABLE=1; shift ;;
+            --server) SERVER=1; shift ;;
             *) fail "Unknown option: $1" ;;
         esac
     done
@@ -105,6 +108,14 @@ main() {
         ASSETS_ROOT="$VENV_DIR/share/ato"
         mkdir -p "$ASSETS_ROOT"
         cp "$SRC/pi-path-guard.mjs" "$ASSETS_ROOT/"
+    fi
+
+    if [ "$SERVER" -eq 1 ]; then
+        if [ "$EDITABLE" -eq 1 ]; then
+            "$VENV_DIR/bin/python" -m pip install -e "$SRC[server]"
+        else
+            "$VENV_DIR/bin/python" -m pip install "$SRC[server]"
+        fi
     fi
 
     cat > "$BIN_DIR/ato.tmp" <<EOF

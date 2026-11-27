@@ -4,6 +4,8 @@
 
 | Command | Description |
 | --- | --- |
+| `ato serve --config FILE [--host ADDRESS] [--port PORT]` | Optional authenticated REST and MCP Streamable HTTP listener, default `127.0.0.1:8765`; requires server extra |
+| `ato mcp --stdio --config FILE` | Official SDK MCP over local stdio using the host-configured principal |
 | `ato run --repo PATH --spec FILE [--foreground]` | Submit a task into a new isolated Git worktree |
 | `ato list [--repo PATH]` | List tasks (optionally filtered by repository) |
 | `ato status TASK_ID [--check-history]` | Inspect task state, execution, latest checks, review, product, notifications, and watchdog. Add check history to inspect individual rounds. |
@@ -26,6 +28,15 @@
 | `ato system observer-start` / `observer-stop` | Start or stop the background Observer/Watchdog daemon |
 
 ## Task Specification (`schema_version: 1`)
+
+The CLI reads a spec file with a repository path as shown below. The optional
+[MCP/API entrypoints](mcp-api.md) instead take inline JSON with `spec.repo` equal
+to an explicitly allowed repository **alias**, and reject extra writable roots.
+REST mutations require `Idempotency-Key`; MCP mutations require `request_id`.
+They reuse the same validation, executor and durable state. They do not expose
+arbitrary file reads, shell dispatch, accept, cleanup, merge, deploy or recheck.
+Recheck runs checks and remains outside API v1. Bot control and human question
+answer authority use separate credentials; all task access is repository-scoped.
 
 ```json
 {
