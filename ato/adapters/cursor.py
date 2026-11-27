@@ -128,7 +128,7 @@ def run_worker(req: WorkerRequest) -> WorkerResult:
     try:
         rc, stdout, stderr, code = run_bounded_subprocess(
             argv, cwd=req.worktree, env=env, prompt=prompt,
-            timeout=req.timeout_seconds, stop_check=req.stop_check,
+            timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
         )
     except OSError:
         return WorkerResult(status="blocked", summary="Cursor worker executable could not be launched",

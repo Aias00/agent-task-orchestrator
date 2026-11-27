@@ -5,12 +5,10 @@ import difflib
 import os
 from pathlib import Path, PurePosixPath
 import re
-import signal
 import stat
 import subprocess
-import time
 
-from ato.process import terminate_popen
+from ato.adapters.base import run_bounded_subprocess
 from ato.spec import TaskError, canonical_json, require, sha256_bytes
 from ato.worktree import checkout_env, git_argv, git_run, shared_links_for, tree_fingerprint
 
@@ -162,7 +160,7 @@ def _summary(base: str, files: list[dict]) -> dict:
     return out
 
 
-def collect_diff(task: dict, *, include_patch: bool = False) -> dict:
+def _collect_diff_data(task: dict, *, include_patch: bool = False) -> dict:
     base = task["base_commit"]
     removed = task["worktree_state"] == "removed"
     root = Path(task["repo_root"] if removed else task["worktree_path"]).resolve()
@@ -201,10 +199,21 @@ def collect_diff(task: dict, *, include_patch: bool = False) -> dict:
     rendered = patch[:MAX_PATCH_BYTES].decode("utf-8", "replace").encode("utf-8") if include_patch and patch is not None else b""
     return {
         "summary": _summary(base, files),
-        "files": files[:MAX_DIFF_LIST],
+        "files": files,
         "patch": rendered[:MAX_PATCH_BYTES].decode("utf-8", "ignore") if include_patch else None,
         "patch_truncated": truncated or len(rendered) > MAX_PATCH_BYTES,
     }
+
+
+def _collect_diff_rows(task: dict, *, include_patch: bool = False) -> list[dict]:
+    """Full changed-file set, independent of public display limits."""
+    return _collect_diff_data(task, include_patch=include_patch)["files"]
+
+
+def collect_diff(task: dict, *, include_patch: bool = False) -> dict:
+    data = _collect_diff_data(task, include_patch=include_patch)
+    data["files"] = data["files"][:MAX_DIFF_LIST]
+    return data
 
 
 def _matching_rules(path: str, rules: dict[str, list[str]]) -> list[str]:
@@ -216,9 +225,10 @@ def check_guardrails(task: dict, spec: dict, *, diff: dict | None = None) -> lis
     rules = spec.get("guardrails")
     if not rules or not any(rules.values()):
         return []
-    diff_data = collect_diff(task) if diff is None else diff
+    rows = (_collect_diff_rows(task) if diff is None or diff.get("summary", {}).get("truncated")
+            else diff["files"])
     violations: list[dict] = []
-    for row in diff_data["files"]:
+    for row in rows:
         path, change = row["path"], row["status"]
         for rule in sorted(_matching_rules(path, rules)):
             if rule == "protected_paths" or change == "D":
@@ -247,7 +257,7 @@ def build_product(task: dict, checks: list[dict], *, diff_data: dict | None = No
 
 
 def run_checks(task: dict, spec: dict, *, timeout_per_cmd: int = 300,
-               stop_check=None) -> tuple[list[dict], bool]:
+               stop_check=None, on_child: object = None) -> tuple[list[dict], bool]:
     """Run all frozen host command acceptance checks independently of the worker."""
     wt = Path(task["worktree_path"]).resolve()
     env = {k: v for k, v in os.environ.items()
@@ -264,23 +274,19 @@ def run_checks(task: dict, spec: dict, *, timeout_per_cmd: int = 300,
         for argv in criterion["checks"]:
             if stop_check is not None and stop_check():
                 raise TaskError("STOPPED", task["id"])
-            proc = subprocess.Popen(
-                argv, cwd=wt, env=env, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
-            )
-            deadline = time.monotonic() + timeout_per_cmd
-            timed_out = False
             try:
-                assert proc.stdout is not None
-                out_bytes, _ = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
-                rc = proc.returncode
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                terminate_popen(proc)
-                out_bytes = b"[check timed out]\n"
-                rc = -1
-            text = out_bytes.decode("utf-8", "replace")[-MAX_CHECK_LOG:]
-            cmd_ok = (rc == 0) and not timed_out
+                rc, stdout, stderr, code = run_bounded_subprocess(
+                    argv, cwd=wt, env=env, timeout=timeout_per_cmd,
+                    stop_check=stop_check, on_child=on_child,
+                )
+            except OSError:
+                rc, stdout, stderr, code = -1, b"[check invocation failed]", b"", "PROCESS_ERROR"
+            if code == "STOPPED":
+                raise TaskError("STOPPED", task["id"])
+            text = (stdout + stderr).decode("utf-8", "replace")[-MAX_CHECK_LOG:]
+            if code == "TIMEOUT":
+                text += "\n[check timed out]"
+            cmd_ok = rc == 0 and code == "OK"
             invocations.append({"argv": argv, "returncode": rc, "passed": cmd_ok})
             excerpts.append(text)
             if not cmd_ok:

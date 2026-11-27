@@ -8,7 +8,7 @@ from pathlib import Path
 from ato import config
 from ato.adapters.base import (
     SANDBOX_EXEC, ReviewRequest, ReviewResult,
-    has_secret, readonly_sandbox_profile, run_bounded_subprocess, secret_values,
+    has_secret, readonly_sandbox_profile, run_bounded_subprocess, safe_review_detail, secret_values,
 )
 from ato.spec import REVIEW_VERDICT_SCHEMA, strict_json, validate_review_verdict
 
@@ -49,7 +49,7 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     secrets = secret_values()
     try:
         rc, stdout, stderr, code = run_bounded_subprocess(
-            argv, cwd=req.worktree, env=env, timeout=req.timeout_seconds, stop_check=req.stop_check,
+            argv, cwd=req.worktree, env=env, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
         )
     except OSError as exc:
         if getattr(exc, "errno", None) == 7:  # E2BIG
@@ -60,10 +60,11 @@ def run_review(req: ReviewRequest) -> ReviewResult:
         if b"not logged in" in stderr.lower():
             return ReviewResult(ok=False, code="AUTH_BLOCKED")
         return ReviewResult(ok=False, code=code)
+    sid = None
     try:
         envelope = strict_json(stdout)
         if envelope.get("status") != "SUCCESS":
-            return ReviewResult(ok=False, code="INVALID_PROTOCOL")
+            return ReviewResult(ok=False, code="INVALID_PROTOCOL", detail="envelope.status must be SUCCESS.")
         sid = envelope.get("conversation_id")
         if persistent and req.resume_session_id and sid != req.resume_session_id:
             return ReviewResult(ok=False, code="SESSION_MISMATCH")
@@ -71,5 +72,6 @@ def run_review(req: ReviewRequest) -> ReviewResult:
         if has_secret(verdict, secrets):
             return ReviewResult(ok=False, code="SECRET_IN_REVIEW")
         return ReviewResult(ok=True, code="OK", verdict=verdict, session_id=sid)
-    except Exception:
-        return ReviewResult(ok=False, code="INVALID_PROTOCOL")
+    except Exception as exc:
+        return ReviewResult(ok=False, code="INVALID_PROTOCOL", session_id=sid,
+                            detail=safe_review_detail(exc, secrets))

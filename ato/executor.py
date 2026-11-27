@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
+import threading
 import subprocess
 import sys
 import time
 
 from ato import codex_notify, config, inbox, process, product, reviewer, worktree
-from ato.adapters.base import WorkerRequest, get_worker_runner
+from ato.adapters.base import WorkerRequest, get_worker_runner, safe_review_detail, secret_values
 from ato.spec import (
     DEFAULT_WORKER_TIMEOUT_SECONDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
     TaskError, new_id, normalize_spec, require,
@@ -150,8 +152,8 @@ def _spawn_background_run(store: Store, task_id: str, run_id: str) -> None:
             env=env, start_new_session=True, close_fds=True,
         )
         birth = process.identity(proc.pid)
-        store.update_run(run_id, phase="running", pid=proc.pid, pid_identity=birth)
-        store.update_task(task_id, status="running", reason=None)
+        if birth is not None:
+            store.mark_run_running(task_id, run_id, proc.pid, birth)
     except OSError:
         store.update_run(run_id, phase="settled", outcome="failed", error_code="LAUNCH_FAILED", settled_at=time.time())
         store.update_task(task_id, status="blocked", reason="LAUNCH_FAILED")
@@ -163,15 +165,35 @@ def _spawn_background_run(store: Store, task_id: str, run_id: str) -> None:
 def execute_run(store: Store, task_id: str, run_id: str, *,
                 worker_runner=None, reviewer_runner=None) -> dict:
     """Drive one Run synchronously: worker -> checks -> guardrails -> reviewer -> settle."""
-    pid = os.getpid()
-    birth = process.identity(pid)
-    store.update_run(run_id, phase="running", pid=pid, pid_identity=birth)
-    store.update_task(task_id, status="running", reason=None)
-    started = time.monotonic()
+    stopped = False
+
+    def handle_term(signum, frame):
+        nonlocal stopped
+        stopped = True
 
     def stop_requested() -> bool:
-        return store.get_task(task_id)["stop_requested"]
+        return stopped or store.get_task(task_id)["stop_requested"]
 
+    def on_child(pid, birth):
+        store.update_run(run_id, child_pid=pid, child_pid_identity=birth)
+
+    old_handler = None
+    if threading.current_thread() is threading.main_thread():
+        old_handler = signal.signal(signal.SIGTERM, handle_term)
+    try:
+        if not store.claim_run_execution(task_id, run_id, os.getpid(), process.identity(os.getpid())):
+            return store.get_task(task_id)
+        return _execute_claimed_run(store, task_id, run_id, stop_requested=stop_requested,
+                                    on_child=on_child, worker_runner=worker_runner,
+                                    reviewer_runner=reviewer_runner)
+    finally:
+        if old_handler is not None:
+            signal.signal(signal.SIGTERM, old_handler)
+
+
+def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_requested,
+                         on_child, worker_runner=None, reviewer_runner=None) -> dict:
+    started = time.monotonic()
     settings = config.load_settings()
     advisory_checks = bool(settings.get("advisory_checks", True))
     task = store.get_task(task_id)
@@ -216,7 +238,7 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
                 permissions=contract.get("permissions"),
                 controller_args=controller_args,
                 timeout_seconds=timeout["timeout_seconds"],
-                stop_check=stop_requested,
+                stop_check=stop_requested, on_child=on_child,
             )
             store.append_event(task_id, "worker_started", {"attempt": attempt, "kind": worker_kind}, run_id=run_id)
             wres = runner(req)
@@ -277,7 +299,9 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
                                          body=f"ATO 任务 {task_id} 触发 guardrail 保护规则。请用 ato status {task_id} 查看。")
                 return store.get_task(task_id)
 
-            check_rows, checks_passed = product.run_checks(task, spec, stop_check=stop_requested)
+            check_rows, checks_passed = product.run_checks(task, spec, stop_check=stop_requested, on_child=on_child)
+            if stop_requested():
+                raise TaskError("STOPPED", task_id)
             store.save_checks(task_id, run_id, check_rows)
             prod = product.build_product(task, check_rows, diff_data=diff_data)
             store.append_event(task_id, "checks_finished", {"attempt": attempt, "passed": checks_passed}, run_id=run_id)
@@ -312,12 +336,17 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
                 review_round += 1
                 rev = reviewer.run_review_turn(
                     task, spec, run_id, round_num=review_round,
-                    resume_session_id=review_session, stop_check=stop_requested,
+                    resume_session_id=review_session, stop_check=stop_requested, on_child=on_child,
                     runner_override=reviewer_runner,
                 )
+                if stop_requested() or rev.code == "STOPPED":
+                    raise TaskError("STOPPED", task_id)
                 if not rev.ok or rev.verdict is None:
+                    detail = safe_review_detail(ValueError(rev.detail), secret_values())
+                    store.append_event(task_id, "review_failed", {"code": rev.code, "detail": detail}, run_id=run_id)
                     store.update_run(run_id, phase="settled", outcome="blocked", error_code=rev.code, settled_at=time.time())
-                    store.update_task(task_id, status="blocked", reason=rev.code, product=prod)
+                    store.update_task(task_id, status="blocked", reason=rev.code, product=prod,
+                                      next_step=detail)
                     return store.get_task(task_id)
                 review_session = rev.session_id or review_session
                 store.add_review(task_id, run_id, review_round, active_reviewer["agent"]["kind"], rev.verdict, session_id=review_session)
@@ -334,6 +363,8 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
                     store.update_task(task_id, status="blocked", reason="REVIEW_BLOCKED", product=prod)
                     return store.get_task(task_id)
 
+            if stop_requested():
+                raise TaskError("STOPPED", task_id)
             # All checks (and optional review) passed -> settle completed!
             store.update_run(run_id, phase="settled", outcome="completed", settled_at=time.time())
             store.update_task(
@@ -369,13 +400,38 @@ def request_stop(store: Store, task_id: str) -> dict:
     store.update_task(task_id, stop_requested=True)
     if task["active_run_id"]:
         run = store.get_run(task["active_run_id"])
+
+        def stop_recorded(row, prefix):
+            pid, birth = row.get(prefix + "pid"), row.get(prefix + "pid_identity")
+            if not pid:
+                return True
+            if not birth:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+                except OSError:
+                    pass
+                return False
+            return process.stop_pid_group(pid, birth)
+
+        child_cleaned = stop_recorded(run, "child_")
+        executor_cleaned = True
         if run["phase"] != "settled":
-            if run["pid"] and run["pid_identity"]:
-                cleaned = process.stop_pid_group(run["pid"], run["pid_identity"])
-                if not cleaned:
-                    store.update_task(task_id, status="blocked", reason="CLEANUP_BLOCKED")
-                    raise TaskError("CLEANUP_BLOCKED", task_id)
-            store.update_run(run["id"], phase="settled", outcome="stopped", error_code="STOPPED", settled_at=time.time())
+            executor_cleaned = stop_recorded(run, "")
+        # A child may have spawned between the first read and executor shutdown.
+        latest = store.get_run(run["id"])
+        latest_child_cleaned = stop_recorded(latest, "child_")
+        if not child_cleaned:
+            child_cleaned = stop_recorded(run, "child_")
+        if not (executor_cleaned and child_cleaned and latest_child_cleaned):
+            store.update_task(task_id, status="blocked", reason="CLEANUP_BLOCKED")
+            raise TaskError("CLEANUP_BLOCKED", task_id)
+        if run["phase"] != "settled":
+            store.update_run(run["id"], phase="settled", outcome="stopped", error_code="STOPPED",
+                             settled_at=time.time(), child_pid=None, child_pid_identity=None)
+        else:
+            store.update_run(run["id"], child_pid=None, child_pid_identity=None)
     if task["status"] != "completed":
         store.update_task(task_id, status="stopped", reason="STOPPED")
     store.append_event(task_id, "stop_requested", {})
@@ -432,8 +488,11 @@ def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_r
     if passed and not checks_only and (task.get("reviewer") or spec.get("reviewer")):
         rev = reviewer.run_review_turn(task, spec, run["id"], round_num=1, runner_override=reviewer_runner)
         if not rev.ok or rev.verdict is None:
+            detail = safe_review_detail(ValueError(rev.detail), secret_values())
+            store.append_event(task_id, "review_failed", {"code": rev.code, "detail": detail}, run_id=run["id"])
             store.update_run(run["id"], phase="settled", outcome="blocked", error_code=rev.code, settled_at=time.time())
-            store.update_task(task_id, status="blocked", reason=rev.code, product=prod)
+            store.update_task(task_id, status="blocked", reason=rev.code, product=prod,
+                              next_step=detail)
             return task_status_view(store, task_id)
         active_rev = task.get("reviewer") or spec["reviewer"]
         store.add_review(task_id, run["id"], 1, active_rev["agent"]["kind"], rev.verdict, session_id=rev.session_id)

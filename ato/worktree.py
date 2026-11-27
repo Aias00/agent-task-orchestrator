@@ -177,8 +177,18 @@ def commit_worktree_product(task: dict) -> str:
     wt = verify_worktree(task)
     env = dict(checkout_env(wt), **RETENTION_IDENTITY)
     head = git_text(wt, "rev-parse", "--verify", "HEAD", env=env)
+    branch_ref = f"refs/heads/{task['branch']}"
+    branch_oid = git_text(wt, "rev-parse", "--verify", branch_ref, env=env)
     ignored = shared_links_for(task)
-    tracked = [p for p in git_run(wt, "ls-files", "-z", env=env)[0].decode("utf-8").split("\x00") if p]
+    entries = {}
+    for row in git_run(wt, "ls-files", "--stage", "-z", env=env)[0].split(b"\0"):
+        if not row:
+            continue
+        meta, name = row.split(b"\t", 1)
+        mode, oid, stage = meta.decode("ascii").split()
+        require(stage == "0", "CLEANUP_BLOCKED", detail="Resolve index conflicts before retaining product.")
+        entries[os.fsdecode(name)] = (mode, oid)
+    tracked = list(entries)
     untracked = [
         p for p in git_run(wt, "ls-files", "--others", "--exclude-standard", "-z", env=env)[0].decode("utf-8").split("\x00")
         if p
@@ -194,12 +204,16 @@ def commit_worktree_product(task: dict) -> str:
         lines = bytearray()
         for name in names:
             p = wt / name
+            if entries.get(name, (None,))[0] == "160000":
+                mode, oid = entries[name]
+                lines.extend(f"{mode} {oid}\t".encode("ascii") + os.fsencode(name) + b"\0")
+                continue
             if not os.path.lexists(p):
                 continue
             st = p.lstat()
             if stat.S_ISLNK(st.st_mode):
                 mode = "120000"
-                content = os.readlink(p).encode("utf-8")
+                content = os.fsencode(os.readlink(p))
             elif stat.S_ISREG(st.st_mode):
                 mode = "100755" if st.st_mode & stat.S_IXUSR else "100644"
                 content = p.read_bytes()
@@ -212,12 +226,14 @@ def commit_worktree_product(task: dict) -> str:
         tree = git_run(wt, "write-tree", env=env)[0].decode("ascii").strip()
         head_tree = git_text(wt, "rev-parse", "--verify", head + "^{tree}", env=env)
         if tree == head_tree:
+            if head != branch_oid:
+                git_run(wt, "update-ref", branch_ref, head, branch_oid, env=env)
             return head
         commit = git_run(
             wt, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", head,
             "-m", f"Retain ATO product ({task['id']})", env=env,
         )[0].decode("ascii").strip()
-        git_run(wt, "update-ref", f"refs/heads/{task['branch']}", commit, head, env=env)
+        git_run(wt, "update-ref", branch_ref, commit, branch_oid, env=env)
         return commit
 
 

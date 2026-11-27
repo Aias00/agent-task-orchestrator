@@ -9,7 +9,7 @@ import uuid
 from ato import config
 from ato.adapters.base import (
     SANDBOX_EXEC, ReviewRequest, ReviewResult, WorkerRequest, WorkerResult,
-    has_secret, readonly_sandbox_profile, run_bounded_subprocess, secret_values,
+    has_secret, readonly_sandbox_profile, run_bounded_subprocess, safe_review_detail, secret_values,
     validate_worker_result, worker_sandbox_profile,
 )
 from ato.spec import REVIEW_VERDICT_SCHEMA, WORKER_RESULT_SCHEMA, strict_json, validate_review_verdict
@@ -67,7 +67,7 @@ def run_worker(req: WorkerRequest) -> WorkerResult:
                CLAUDE_CODE_TMPDIR=str(req.runtime_dir / "tmp"), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
     prompt = req.prompt + "\nFinal response must match this JSON schema:\n" + json.dumps(WORKER_RESULT_SCHEMA)
     rc, stdout, stderr, code = run_bounded_subprocess(
-        argv, cwd=req.worktree, env=env, prompt=prompt, timeout=req.timeout_seconds, stop_check=req.stop_check,
+        argv, cwd=req.worktree, env=env, prompt=prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
     )
     (req.runtime_dir / "stdout.jsonl").write_bytes(stdout)
     (req.runtime_dir / "stderr.log").write_bytes(stderr)
@@ -124,7 +124,7 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     env = dict(os.environ, TMPDIR=str(req.runtime_dir / "tmp"), CLAUDE_CODE_TMPDIR=str(req.runtime_dir / "tmp"))
     secrets = secret_values()
     rc, stdout, stderr, code = run_bounded_subprocess(
-        argv, cwd=req.worktree, env=env, prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check,
+        argv, cwd=req.worktree, env=env, prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
     )
     if code not in ("OK", "PROCESS_ERROR"):
         return ReviewResult(ok=False, code=code)
@@ -132,12 +132,16 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     diag = stderr.lower() + (json.dumps(terminal).lower().encode() if terminal else b"")
     if any(m in diag for m in (b"not logged in", b"not authenticated", b"login required")):
         return ReviewResult(ok=False, code="AUTH_BLOCKED")
-    if rc != 0 or terminal is None or terminal.get("is_error") or output is None:
+    if rc != 0 or (terminal is not None and terminal.get("is_error")):
         return ReviewResult(ok=False, code="PROCESS_ERROR")
+    if terminal is None or output is None:
+        return ReviewResult(ok=False, code="INVALID_PROTOCOL", session_id=sid,
+                            detail="receipt: expected a JSON result envelope with structured_output as an object.")
     try:
         verdict = validate_review_verdict(strict_json(json.dumps(output)))
         if has_secret(verdict, secrets):
             return ReviewResult(ok=False, code="SECRET_IN_REVIEW")
         return ReviewResult(ok=True, code="OK", verdict=verdict, session_id=sid)
-    except Exception:
-        return ReviewResult(ok=False, code="INVALID_PROTOCOL")
+    except Exception as exc:
+        return ReviewResult(ok=False, code="INVALID_PROTOCOL", session_id=sid,
+                            detail=safe_review_detail(exc, secrets))

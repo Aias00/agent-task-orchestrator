@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 
-from ato import config
+from ato import config, process
 from ato.process import terminate_popen
 from ato.spec import TaskError, WORKER_RESULT_SCHEMA, require
 
@@ -32,6 +32,7 @@ class WorkerRequest:
     controller_args: tuple[str, ...] = ()
     timeout_seconds: int = 600
     stop_check: object = None
+    on_child: object = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class ReviewRequest:
     resume_session_id: str | None = None
     timeout_seconds: int = 300
     stop_check: object = None
+    on_child: object = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,17 @@ class ReviewResult:
     verdict: dict | None = None
     session_id: str | None = None
     metadata: dict = field(default_factory=dict)
+    detail: str = ""
+
+
+def safe_review_detail(exc: Exception, secrets: tuple[str, ...]) -> str:
+    if isinstance(exc, TaskError) and exc.code != "INVALID_EVIDENCE":
+        return "receipt: must be valid UTF-8 JSON with one object, no duplicate keys or nonfinite numbers."
+    detail = str(exc) or "Receipt must be a strict JSON object matching REVIEW_VERDICT_SCHEMA."
+    for secret in sorted(secrets, key=len, reverse=True):
+        for form in (secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1]):
+            detail = detail.replace(form, "[redacted]")
+    return detail[:8192]
 
 
 def validate_worker_result(value: object) -> dict:
@@ -138,40 +151,47 @@ def readonly_sandbox_profile(runtime: Path, workspace: Path, *, writable_native:
 
 def run_bounded_subprocess(argv: list[str], *, cwd: Path, env: dict[str, str],
                            prompt: str | None = None, timeout: int = 300,
-                           stop_check=None) -> tuple[int, bytes, bytes, str]:
-    """Run an isolated process-group child with temp-file output (zero pipe deadlock) and STOP polling."""
-    with tempfile.TemporaryFile() as out_fh, tempfile.TemporaryFile() as err_fh:
+                           stop_check=None, on_child: object = None) -> tuple[int, bytes, bytes, str]:
+    """Poll an isolated child; sweep its group before reaping on every exit path."""
+    with tempfile.TemporaryFile() as in_fh, tempfile.TemporaryFile() as out_fh, tempfile.TemporaryFile() as err_fh:
+        if prompt is not None:
+            in_fh.write(prompt.encode("utf-8"))
+            in_fh.flush()
+            in_fh.seek(0)
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env,
-            stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
-            stdout=out_fh, stderr=err_fh,
-            start_new_session=True,
+            stdin=in_fh if prompt is not None else subprocess.DEVNULL,
+            stdout=out_fh, stderr=err_fh, start_new_session=True,
         )
-        if prompt is not None and proc.stdin is not None:
+        code = "OK"
+        try:
+            if on_child is not None:
+                on_child(proc.pid, process.identity(proc.pid))
+            deadline = time.monotonic() + timeout
+            while True:
+                if stop_check is not None and stop_check():
+                    code = "STOPPED"
+                    break
+                if process.probe_exited(proc):
+                    break
+                if time.monotonic() >= deadline:
+                    code = "TIMEOUT"
+                    break
+                time.sleep(0.05)
+        finally:
             try:
-                proc.stdin.write(prompt.encode("utf-8"))
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
-        deadline = time.monotonic() + timeout
-        last_stop_poll = 0.0
-        while proc.poll() is None:
-            now = time.monotonic()
-            if stop_check is not None and now - last_stop_poll >= 0.5:
-                last_stop_poll = now
-                if stop_check():
-                    terminate_popen(proc)
-                    return -1, b"", b"", "STOPPED"
-            if now >= deadline:
                 terminate_popen(proc)
-                return -1, b"", b"", "TIMEOUT"
-            time.sleep(0.05)
+            except (OSError, subprocess.SubprocessError):
+                raise TaskError("CLEANUP_BLOCKED") from None
+            if on_child is not None:
+                on_child(None, None)
         out_fh.seek(0)
         err_fh.seek(0)
         stdout = out_fh.read(MAX_OUTPUT_BYTES)
         stderr = err_fh.read(MAX_OUTPUT_BYTES)
-        code = "OK" if proc.returncode == 0 else "PROCESS_ERROR"
-        return proc.returncode, stdout, stderr, code
+        if code != "OK":
+            return -1, stdout, stderr, code
+        return proc.returncode, stdout, stderr, "OK" if proc.returncode == 0 else "PROCESS_ERROR"
 
 
 def get_worker_runner(kind: str):

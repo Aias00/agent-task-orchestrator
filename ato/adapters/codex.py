@@ -8,7 +8,7 @@ from pathlib import Path
 from ato import config
 from ato.adapters.base import (
     ReviewRequest, ReviewResult, WorkerRequest, WorkerResult,
-    has_secret, run_bounded_subprocess, secret_values, validate_worker_result,
+    has_secret, run_bounded_subprocess, safe_review_detail, secret_values, validate_worker_result,
 )
 from ato.spec import REVIEW_VERDICT_SCHEMA, WORKER_RESULT_SCHEMA, strict_json, validate_review_verdict
 
@@ -78,7 +78,7 @@ def run_worker(req: WorkerRequest) -> WorkerResult:
     argv = build_worker_argv(exe, req, schema_path, output_path)
     rc, stdout, stderr, code = run_bounded_subprocess(
         argv, cwd=req.worktree, env=_clean_env(req.runtime_dir),
-        prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check,
+        prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
     )
     (req.runtime_dir / "stdout.jsonl").write_bytes(stdout)
     (req.runtime_dir / "stderr.log").write_bytes(stderr)
@@ -128,12 +128,13 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     secrets = secret_values()
     rc, stdout, stderr, code = run_bounded_subprocess(
         argv, cwd=req.worktree, env=_clean_env(req.runtime_dir),
-        prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check,
+        prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
     )
     if code != "OK":
         if b"not logged in" in stderr.lower():
             return ReviewResult(ok=False, code="AUTH_BLOCKED")
         return ReviewResult(ok=False, code=code)
+    sid = None
     try:
         events = [strict_json(line) for line in stdout.splitlines() if line.strip()]
         started = [e.get("thread_id") for e in events if e.get("type") == "thread.started"]
@@ -144,5 +145,6 @@ def run_review(req: ReviewRequest) -> ReviewResult:
         if has_secret(verdict, secrets):
             return ReviewResult(ok=False, code="SECRET_IN_REVIEW")
         return ReviewResult(ok=True, code="OK", verdict=verdict, session_id=sid)
-    except Exception:
-        return ReviewResult(ok=False, code="INVALID_PROTOCOL")
+    except Exception as exc:
+        return ReviewResult(ok=False, code="INVALID_PROTOCOL", session_id=sid,
+                            detail=safe_review_detail(exc, secrets))

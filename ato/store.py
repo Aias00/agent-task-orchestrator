@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS runs (
   phase TEXT NOT NULL,
   pid INTEGER,
   pid_identity TEXT,
+  child_pid INTEGER,
+  child_pid_identity TEXT,
   outcome TEXT,
   error_code TEXT,
   timeout_seconds INTEGER,
@@ -207,7 +209,8 @@ class Store:
                 con.execute("BEGIN IMMEDIATE")
                 for table, additions in (
                     ("tasks", (("spec_timeout_source", "TEXT"),)),
-                    ("runs", (("timeout_seconds", "INTEGER"), ("timeout_source", "TEXT"))),
+                    ("runs", (("timeout_seconds", "INTEGER"), ("timeout_source", "TEXT"),
+                              ("child_pid", "INTEGER"), ("child_pid_identity", "TEXT"))),
                 ):
                     columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
                     for name, sql_type in additions:
@@ -347,8 +350,37 @@ class Store:
                 return dict(row)
         return _retry(op)
 
+    def _transition_running(self, task_id: str, run_id: str, pid: int,
+                            pid_identity: str | None, *, launching_only: bool) -> bool:
+        def op():
+            with self.tx(write=True) as con:
+                phase = "phase = 'launching'" if launching_only else "phase != 'settled'"
+                status = "AND status = 'queued'" if launching_only else ""
+                cur = con.execute(
+                    f"""UPDATE runs SET phase = 'running', pid = ?, pid_identity = ?
+                        WHERE id = ? AND task_id = ? AND {phase}
+                        AND EXISTS (SELECT 1 FROM tasks WHERE id = ? AND stop_requested = 0
+                                    AND active_run_id = ? {status})""",
+                    (pid, pid_identity, run_id, task_id, task_id, run_id),
+                )
+                if cur.rowcount != 1:
+                    return False
+                con.execute(
+                    """UPDATE tasks SET status = 'running', reason = NULL,
+                       revision = revision + 1, updated_at = ? WHERE id = ?""",
+                    (time.time(), task_id),
+                )
+                return True
+        return _retry(op)
+
+    def mark_run_running(self, task_id: str, run_id: str, pid: int, pid_identity: str | None) -> bool:
+        return self._transition_running(task_id, run_id, pid, pid_identity, launching_only=True)
+
+    def claim_run_execution(self, task_id: str, run_id: str, pid: int, pid_identity: str | None) -> bool:
+        return self._transition_running(task_id, run_id, pid, pid_identity, launching_only=False)
+
     def update_run(self, run_id: str, **fields) -> dict:
-        allowed = {"phase", "pid", "pid_identity", "outcome", "error_code", "settled_at"}
+        allowed = {"phase", "pid", "pid_identity", "child_pid", "child_pid_identity", "outcome", "error_code", "settled_at"}
         require(set(fields) <= allowed, "INTERNAL_ERROR")
         cols = [f"{k} = ?" for k in fields]
         vals = list(fields.values()) + [run_id]

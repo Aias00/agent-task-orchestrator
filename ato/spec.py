@@ -96,11 +96,18 @@ REVIEW_VERDICT_SCHEMA = {
                 "type": "object",
                 "additionalProperties": False,
                 "required": list(FINDING_FIELDS),
-                "properties": {name: {"type": "string", "minLength": 1, "maxLength": 8192} for name in FINDING_FIELDS},
+                "properties": {
+                    **{name: {"type": "string", "minLength": 1, "maxLength": 8192} for name in FINDING_FIELDS},
+                    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+                    "severity": {"type": "string", "enum": list(SEVERITIES)},
+                    "category": {"type": "string", "enum": list(CATEGORIES)},
+                    "lines": {"type": "string", "maxLength": 8192, "pattern": "^L[1-9][0-9]*(-L[1-9][0-9]*)?$"},
+                    "file": {"type": "string", "minLength": 1, "maxLength": 1024},
+                },
             },
         },
-        "checked_items": {"type": "array", "maxItems": 128, "items": {"type": "string"}},
-        "residual_risks": {"type": "array", "maxItems": 128, "items": {"type": "string"}},
+        "checked_items": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 8192}},
+        "residual_risks": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 8192}},
     },
 }
 
@@ -202,29 +209,59 @@ def _fields(obj: object, required: tuple[str, ...], optional: tuple[str, ...] = 
 
 
 def validate_review_verdict(value: object) -> dict:
-    _fields(value, tuple(REVIEW_VERDICT_SCHEMA["required"]), code="INVALID_EVIDENCE")
-    assert isinstance(value, dict)
-    require(value["verdict"] in ("approve", "request_changes", "blocked"), "INVALID_EVIDENCE")
-    _text(value["summary"], code="INVALID_EVIDENCE")
-    require(isinstance(value["findings"], list) and len(value["findings"]) <= 128, "INVALID_EVIDENCE")
+    def check(condition: bool, field: str, rule: str) -> None:
+        require(condition, "INVALID_EVIDENCE", detail=f"{field}: {rule}")
+
+    def fields(obj, expected, field):
+        check(isinstance(obj, dict), field, "must be a JSON object")
+        missing = [name for name in expected if name not in obj]
+        extra = [str(name) for name in obj if name not in expected]
+        check(not missing and not extra, field,
+              "must contain exactly these fields: " + ", ".join(expected)
+              + "; missing: " + (", ".join(missing) or "none")
+              + "; unexpected: " + (", ".join(extra) or "none"))
+
+    def text(item, field, maximum=8192):
+        check(isinstance(item, str), field, "must be a string")
+        check(1 <= len(item) <= maximum, field, f"length must be 1..{maximum} characters")
+        check(bool(item.strip()), field, "must not be blank")
+        check("\x00" not in item, field, "must not contain NUL bytes")
+
+    def items(item, field):
+        check(isinstance(item, list), field, "must be an array")
+        check(len(item) <= 128, field, "must contain at most 128 items")
+
+    fields(value, REVIEW_VERDICT_SCHEMA["required"], "receipt")
+    check(value["verdict"] in ("approve", "request_changes", "blocked"), "verdict",
+          "must be approve, request_changes, or blocked")
+    text(value["summary"], "summary")
+    items(value["findings"], "findings")
     seen: set[str] = set()
-    for finding in value["findings"]:
-        _fields(finding, FINDING_FIELDS, code="INVALID_EVIDENCE")
+    for idx, finding in enumerate(value["findings"]):
+        prefix = f"findings[{idx}]"
+        fields(finding, FINDING_FIELDS, prefix)
         for field in FINDING_FIELDS:
-            _text(finding[field], code="INVALID_EVIDENCE")
-        require(ID_TOKEN.fullmatch(finding["id"]) is not None and finding["id"] not in seen, "INVALID_EVIDENCE")
+            text(finding[field], f"{prefix}.{field}", 1024 if field == "file" else 8192)
+        check(ID_TOKEN.fullmatch(finding["id"]) is not None, prefix + ".id",
+              "must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+        check(finding["id"] not in seen, prefix + ".id", "duplicate id; each finding id must be unique")
         seen.add(finding["id"])
-        require(finding["severity"] in SEVERITIES and finding["category"] in CATEGORIES, "INVALID_EVIDENCE")
-        _relative_path(finding["file"], code="INVALID_EVIDENCE")
-        require(re.fullmatch(r"L[1-9][0-9]*(?:-L[1-9][0-9]*)?", finding["lines"]) is not None, "INVALID_EVIDENCE")
-    for list_key in ("checked_items", "residual_risks"):
-        items = value[list_key]
-        require(isinstance(items, list) and len(items) <= 128, "INVALID_EVIDENCE")
-        for item in items:
-            _text(item, code="INVALID_EVIDENCE")
+        check(finding["severity"] in SEVERITIES, prefix + ".severity", "must be one of: " + ", ".join(SEVERITIES))
+        check(finding["category"] in CATEGORIES, prefix + ".category", "must be one of: " + ", ".join(CATEGORIES))
+        file = finding["file"]
+        check(not file.startswith(("/", "\\", "-")) and "\\" not in file
+              and all(part not in ("", ".", "..") for part in file.split("/")), prefix + ".file",
+              "must be a relative repository path; no leading slash, backslash, dash, empty, . or .. segments")
+        check(re.fullmatch(r"L[1-9][0-9]*(?:-L[1-9][0-9]*)?", finding["lines"]) is not None,
+              prefix + ".lines", "must use L1 or L1-L2 format with positive line numbers")
+    for key in ("checked_items", "residual_risks"):
+        items(value[key], key)
+        for idx, item in enumerate(value[key]):
+            text(item, f"{key}[{idx}]")
     has_blocker = any(f["severity"] == "blocker" for f in value["findings"])
-    require(not (value["verdict"] == "approve" and has_blocker), "INVALID_EVIDENCE")
-    require(not (value["verdict"] == "request_changes" and not has_blocker), "INVALID_EVIDENCE")
+    check(not (value["verdict"] == "approve" and has_blocker), "verdict", "approve must not contain blocker findings")
+    check(not (value["verdict"] == "request_changes" and not has_blocker), "verdict",
+          "request_changes requires at least one blocker finding")
     return value
 
 

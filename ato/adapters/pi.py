@@ -133,7 +133,7 @@ def run_worker(req: WorkerRequest) -> WorkerResult:
         env=env,
         prompt=prompt,
         timeout=req.timeout_seconds,
-        stop_check=req.stop_check,
+        stop_check=req.stop_check, on_child=req.on_child,
     )
     (req.runtime_dir / "stdout.jsonl").write_bytes(stdout)
     (req.runtime_dir / "stderr.log").write_bytes(stderr)
