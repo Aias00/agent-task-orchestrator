@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "repo": ".",
+  "base_ref": "HEAD",
+  "worker_contract": {
+    "objective": "Implement sum_numbers(values) in task_math.py handling positive, negative, and empty lists.",
+    "scope": "Only task_math.py; no external dependencies or remote operations.",
+    "authorization": "Local edits and test execution only; do not commit or push.",
+    "agent": {
+      "kind": "codex"
+    },
+    "acceptance": [
+      {
+        "id": "sum-check",
+        "kind": "command",
+        "description": "sum_numbers passes assertions",
+        "checks": [
+          [
+            "python3",
+            "-c",
+            "from task_math import sum_numbers; assert sum_numbers([1,-2,4]) == 3; assert sum_numbers([]) == 0"
+          ]
+        ]
+      }
+    ]
+  }
+}

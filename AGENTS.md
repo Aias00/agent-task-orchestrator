@@ -1,7 +1,7 @@
-# ATO source maintenance
+# ATO v2 maintenance guidelines
 
-Keep runtime source, reusable tests and documentation in this repository. Never commit task states, native conversation history, credentials, queue databases or operator-evidence. Preserve workflow authority, STOP, accumulated attempts, independent acceptance and unknown-delivery/no-replay behavior.
+Keep runtime source inside `ato/`, concise docs in `docs/`, and fast isolated tests in `tests/`.
+Never commit task state, native conversation history, credentials, or operator evidence.
+Preserve isolated Git worktrees, independent host checks, opt-in guardrails, read-only reviewer mutation tripwires, PID-reuse-safe process-group cleanup, and AGY/CLI default `workspace-write` Codex execution.
 
-Run `python3.12 scripts/run_tests.py` with the pinned optional Python/npm dependencies available. Tests must use temporary ATO/native homes and local synthetic agents, never the operator's live hub or provider. Do not silently skip failures or claim fixture tests establish real-agent/cloud qualification.
-
-Source publication does not activate a runtime or migrate live tasks. Scope and permission changes require the actual user's instruction. Keep active local candidate checkouts intact; development snapshot status is recorded in docs/development-status.md.
+Run `python3.12 scripts/run_tests.py` after changes. All tests must use temporary `ATO_HOME` / `CODEX_HOME` and synthetic local fixtures, never the live user state or external providers.

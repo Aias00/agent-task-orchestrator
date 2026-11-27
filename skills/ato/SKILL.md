@@ -1,66 +1,28 @@
 ---
 name: ato
-description: Submit, observe, stop and resume durable agent tasks. Route human decisions and report verified task completion.
+description: Submit, observe, stop and resume durable agent tasks in isolated Git worktrees. Route human questions and report verified task completion.
 ---
 
 # ATO
 
-Use `ato --help` to find the available commands. Use one Task ID for all task
-operations.
+Use `ato --help` to inspect available commands. Use one Task ID for all operations.
 
-1. Generate the task spec from the user's instructions and preview it using
-   `ato project validate --repo PATH --spec FILE`. Include the task's command
-   checks. Manual criteria are optional. Use the installed `ato` as the
-   account that owns the private ATO state for local tasks. Submit using
-   `ato run --repo PATH --spec FILE` and retain the Task ID. When submitting from AGY, prefix that command
-   with `ATO_SUBMISSION_KIND=agy` so the worker uses its default Codex
-   configuration even when AGY inherited a Codex thread ID. Use the Task ID
-   for status updates in AGY.
-2. Read `ato status TASK_ID` to check execution, independent checks, pending
-   decisions and the next action. Its `completion_notification` shows the
-   submission source, whether its session was verified at submission (null
-   when no origin was recorded), and the visible delivery state. AGY reports
-   `unsupported`; an unverified Codex origin reports `unbound`.
-   `no_delivery_record` means no task completion notice is visible yet.
-   `delivery_unknown` means delivery could not be confirmed. Use `ato list --repo PATH` for the project.
-   Read `watchdog` for sampled execution alerts, recovery evidence and timing.
-   Check `sampled_at` and `state` before treating a monitoring result as current.
-   A stale sample or `not_observed` supplies no current health conclusion.
-   Alerts are advisory. Compare them with the task spec and diff before acting.
-   Timing and retries alone cannot establish efficiency gains.
-3. Use `ato inbox` from the verified interaction endpoint. Relay the actual
-   request to the user. The enrolled user records their decision using
-   `ato answer REQUEST_ID --answer TEXT`.
-4. When `ato status TASK_ID` shows `completed`, inspect `reason` and
-   `checks[*].state` before reporting success: independent host checks run
-   separately and a failed check appears as `reason="CHECKS_FAILED"` even on a
-   `completed` status. Report completion, check results and the product
-   location accurately. The Observer can notify the verified submitting Codex
-   session on the first successful completion. Record optional approval only
-   when the user explicitly wants a receipt. Use `ato accept TASK_ID` for a
-   local task or `ato accept TASK_ID --evidence FILE` for a scoped task.
-5. Use `ato stop TASK_ID` for an authorized STOP. Verify cleanup in status.
-   Use `ato resume TASK_ID` only for an explicit authorized continuation.
-   An unresolved delivery or execution result requires reconciliation before
-   another attempt.
-6. Use `ato project cleanup TASK_ID --confirm` for authorized removal of a
-   verified idle worktree. Completed Tasks retain their verified product on
-   the task branch. Stopped Tasks require clean worktrees.
-
-A technical review, message delivery, or handoff does not record user approval.
-For scoped operations, select the enrolled actor's proof via `ATO_ACTOR_FILE`.
-Keep the file outside the specification, worktree and conversation.
-Use `ato agent binding TASK_ID`
-to check the current controller, interaction endpoint, reviewer and Run owner.
-
-## Deletion, refactoring and merge review
-
-Specify both deletion targets and retained boundaries. Encode required behavior in
-frozen acceptance checks. For explicit path protection, use optional spec
-`guardrails.protected_paths` or `guardrails.forbid_delete_paths`.
-
-Before reporting completion or merging, inspect `product.diff_summary` or run
-`ato project diff TASK_ID --stat`. Check `files_deleted`, `tests_deleted` and
-`tests_modified` against the requested scope. Inspect the full diff where needed.
-Disclose any merge decision that changes the verified product, including files
-restored or dropped, and rerun the frozen checks on the merged result.
+1. Write a task spec and validate it with `ato project validate --repo PATH --spec FILE`.
+   Include command checks in `worker_contract.acceptance`; manual criteria and `guardrails`
+   (`protected_paths`, `forbid_delete_paths`) are optional.
+   Submit using `ato run --repo PATH --spec FILE` (add `--foreground` to block until settled).
+   When submitting from AGY, prefix with `ATO_SUBMISSION_KIND=agy` so Codex workers keep
+   their default `workspace-write` sandbox without inheriting ambient `CODEX_THREAD_ID`.
+2. Check progress with `ato status TASK_ID` and `ato list --repo PATH`.
+   Read `completion_notification` (AGY reports `unsupported`; unverified Codex reports `unbound`)
+   and `watchdog` (`state`, `sampled_at`, `alerts` — alerts are advisory).
+3. If the task pauses for user input, run `ato inbox`, relay the question to the user,
+   record their reply via `ato answer REQUEST_ID --answer TEXT`, then run `ato resume TASK_ID`.
+4. When `ato status TASK_ID` shows `completed`, inspect `reason` and `checks[*].state`
+   before reporting success: failed independent checks appear as `reason="CHECKS_FAILED"`
+   even when `status` is `completed`. Also inspect `product.diff_summary` or run
+   `ato project diff TASK_ID --stat` to verify `files_deleted`, `tests_deleted`, and
+   `tests_modified`. Record optional approval with `ato accept TASK_ID` only if requested.
+5. Use `ato stop TASK_ID` to stop a running task, `ato project recheck TASK_ID` to re-run
+   frozen checks/review, and `ato project cleanup TASK_ID --confirm` to commit verified
+   changes to the task branch and remove the worktree.

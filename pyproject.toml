@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-task-orchestrator"
-version = "1.0.1"
-description = "ATO unified task orchestration source with independent host checks"
+version = "2.0.0"
+description = "Lightweight durable agent task orchestrator in isolated Git worktrees"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -19,35 +19,20 @@ acp = [
   "pydantic==2.14.3",
   "pydantic_core==2.50.4",
   "typing-inspection==0.4.5",
-  "typing_extensions==4.16.0"
+  "typing_extensions==4.16.0",
 ]
 
-# The sealed source installer publishes the single ato launcher.
-# Python package metadata does not activate a runtime.
+[project.scripts]
+ato = "ato.cli:main"
+
 [tool.setuptools]
-packages = ["ato_adapters", "ato_cli", "ato_common", "ato_pi", "ato_release", "ato_review", "ato_task", "ato_workflow"]
-py-modules = [
-  "agent_registry",
-  "ato",
-  "ato_runtime",
-  "codex_legacy",
-  "coordination",
-  "hub_queue_gate",
-  "recovery",
-  "runner"
-]
+packages = ["ato", "ato.adapters"]
 
 [tool.setuptools.data-files]
-"share/agent-task-orchestrator" = ["pi-path-guard.mjs", "pi-coordinator-guard.mjs", "pi_production_transport.mjs"]
-
-"share/agent-task-orchestrator/bin" = ["bin/ato"]
-
+"share/agent-task-orchestrator" = ["pi-path-guard.mjs", "pi-coordinator-guard.mjs"]
 "share/agent-task-orchestrator/integrations/pi-acp" = [
   "integrations/pi-acp/compatibility.json",
   "integrations/pi-acp/package.json",
-  "integrations/pi-acp/package-lock.json"
+  "integrations/pi-acp/package-lock.json",
 ]
-
-"share/agent-task-orchestrator/scripts" = ["scripts/install.py", "scripts/release_snapshot.py", "scripts/ato_host_setup.py", "scripts/derive_pi_acp.py"]
-
 "share/agent-task-orchestrator/skills/ato" = ["skills/ato/SKILL.md"]

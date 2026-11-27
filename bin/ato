@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-root=$(CDPATH= cd -- "${0%/*}/.." && pwd -P)
-exec "$root/.venv/bin/python" -IB "$root/ato.py" "$@"
