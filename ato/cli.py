@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from ato import __version__, config, executor, inbox, observer, product
 from ato.adapters.base import doctor_all
 from ato.spec import (
-    EFFORTS, REVIEWER_KINDS, TaskError, normalize_repository, normalize_spec,
+    EFFORTS, REVIEWER_KINDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
+    TaskError, normalize_repository, normalize_spec,
     read_regular_file, require, require_id, result_envelope,
 )
 from ato.store import Store
@@ -32,6 +34,17 @@ class _Once(argparse.Action):
 def _opt(parser, name: str, *, required: bool = False, flag: bool = False) -> None:
     parser.add_argument("--" + name, action=_Once, default=argparse.SUPPRESS,
                         required=required, **({"nargs": 0} if flag else {}))
+
+
+def _parse_timeout_seconds(value: str) -> int:
+    detail = "--timeout-seconds must contain only base-10 digits and be in [5, 7200]."
+    require(re.fullmatch(r"[0-9]+", value) is not None, "USAGE", detail=detail)
+    # Bound conversion even for inputs exceeding Python's integer digit limit.
+    digits = value.lstrip("0") or "0"
+    require(len(digits) <= len(str(MAX_WORKER_TIMEOUT_SECONDS)), "USAGE", detail=detail)
+    seconds = int(digits, 10)
+    require(MIN_WORKER_TIMEOUT_SECONDS <= seconds <= MAX_WORKER_TIMEOUT_SECONDS, "USAGE", detail=detail)
+    return seconds
 
 
 def build_parser() -> _Parser:
@@ -59,6 +72,7 @@ def build_parser() -> _Parser:
 
     res = cmd(daily, "resume", "Resume an eligible task.", "task_id")
     _opt(res, "foreground", flag=True)
+    _opt(res, "timeout-seconds")
 
     cmd(daily, "inbox", "Read pending human questions.")
     _opt(cmd(daily, "answer", "Record an answer to a pending question.", "request_id"), "answer", required=True)
@@ -124,6 +138,7 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
     if op == "resume":
         return executor.resume(
             st, args.task_id, foreground=getattr(args, "foreground", False),
+            timeout_seconds=_parse_timeout_seconds(args.timeout_seconds) if hasattr(args, "timeout_seconds") else None,
             worker_runner=worker_runner, reviewer_runner=reviewer_runner,
         )
     if op == "inbox":

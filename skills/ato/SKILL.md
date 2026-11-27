@@ -18,6 +18,10 @@ Use `ato --help` to inspect available commands. Use one Task ID for all operatio
    and `watchdog` (`state`, `sampled_at`, `alerts` — alerts are advisory).
 3. If the task pauses for user input, run `ato inbox`, relay the question to the user,
    record their reply via `ato answer REQUEST_ID --answer TEXT`, then run `ato resume TASK_ID`.
+   To change the worker timeout for only that new run, use
+   `ato resume TASK_ID --timeout-seconds SECONDS` (base-10 digits, 5–7200).
+   A later plain resume returns to the spec/default timeout; Task ID, worktree,
+   frozen spec digest, and acceptance criteria stay unchanged.
 4. When `ato status TASK_ID` shows `completed`, inspect `reason` and `checks[*].state`
    before reporting success: failed independent checks appear as `reason="CHECKS_FAILED"`
    even when `status` is `completed`. Also inspect `product.diff_summary` or run
@@ -26,3 +30,9 @@ Use `ato --help` to inspect available commands. Use one Task ID for all operatio
 5. Use `ato stop TASK_ID` to stop a running task, `ato project recheck TASK_ID` to re-run
    frozen checks/review, and `ato project cleanup TASK_ID --confirm` to commit verified
    changes to the task branch and remove the worktree.
+
+Validate previews show `timeout_seconds` and `timeout_source` (`default` or `spec`),
+plus reviewer timeout/source when configured. Worker/reviewer defaults are 600/300
+seconds. Run, resume, and status receipts show worker timeout/source in `execution`
+and `run_history`; `project trace` submission/resume events record them too.
+Single-run overrides report `resume_override`; old unknown sources report `legacy`.

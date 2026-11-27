@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   worktree_state TEXT NOT NULL DEFAULT 'present',
   spec_json TEXT NOT NULL,
   spec_sha256 TEXT NOT NULL,
+  spec_timeout_source TEXT,
   origin_kind TEXT NOT NULL DEFAULT 'cli',
   origin_session_id TEXT,
   status TEXT NOT NULL,
@@ -51,6 +52,8 @@ CREATE TABLE IF NOT EXISTS runs (
   pid_identity TEXT,
   outcome TEXT,
   error_code TEXT,
+  timeout_seconds INTEGER,
+  timeout_source TEXT,
   created_at REAL NOT NULL,
   settled_at REAL
 );
@@ -200,7 +203,18 @@ class Store:
                 con.execute("PRAGMA journal_mode = WAL")
                 con.execute("PRAGMA synchronous = NORMAL")
                 con.executescript(_DDL)
+                # Serialize inspection and alteration so concurrent openers are safe.
+                con.execute("BEGIN IMMEDIATE")
+                for table, additions in (
+                    ("tasks", (("spec_timeout_source", "TEXT"),)),
+                    ("runs", (("timeout_seconds", "INTEGER"), ("timeout_source", "TEXT"))),
+                ):
+                    columns = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
+                    for name, sql_type in additions:
+                        if name not in columns:
+                            con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
                 con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                con.execute("COMMIT")
                 try:
                     os.chmod(self.db_file, 0o600)
                 except OSError:
@@ -230,18 +244,21 @@ class Store:
 
     def create_task(self, *, task_id: str, repo_root: str, repo_key: str, base_commit: str,
                     branch: str, worktree_path: str, spec_doc: dict, spec_sha256: str,
-                    origin_kind: str, origin_session_id: str | None) -> dict:
+                    origin_kind: str, origin_session_id: str | None,
+                    spec_timeout_source: str | None = None) -> dict:
         now = time.time()
         def op():
             with self.tx(write=True) as con:
                 con.execute(
                     """INSERT INTO tasks(id, repo_root, repo_key, base_commit, branch, worktree_path,
                        worktree_state, spec_json, spec_sha256, origin_kind, origin_session_id,
-                       status, reason, stop_requested, revision, reviewer_json, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'present', ?, ?, ?, ?, 'queued', NULL, 0, 1, ?, ?, ?)""",
+                       status, reason, stop_requested, revision, reviewer_json, created_at, updated_at,
+                       spec_timeout_source)
+                       VALUES (?, ?, ?, ?, ?, ?, 'present', ?, ?, ?, ?, 'queued', NULL, 0, 1, ?, ?, ?, ?)""",
                     (task_id, repo_root, repo_key, base_commit, branch, worktree_path,
                      json.dumps(spec_doc, ensure_ascii=False), spec_sha256, origin_kind, origin_session_id,
-                     json.dumps(spec_doc["reviewer"]) if spec_doc.get("reviewer") else None, now, now),
+                     json.dumps(spec_doc["reviewer"]) if spec_doc.get("reviewer") else None, now, now,
+                     spec_timeout_source),
                 )
         _retry(op)
         return self.get_task(task_id)
@@ -304,15 +321,16 @@ class Store:
         _retry(op)
         return self.get_task(task_id)
 
-    def create_run(self, task_id: str, kind: str) -> dict:
+    def create_run(self, task_id: str, kind: str, *, timeout_seconds: int | None = None,
+                   timeout_source: str | None = None) -> dict:
         run_id = new_id("run")
         now = time.time()
         def op():
             with self.tx(write=True) as con:
                 con.execute(
-                    """INSERT INTO runs(id, task_id, kind, phase, created_at)
-                       VALUES (?, ?, ?, 'launching', ?)""",
-                    (run_id, task_id, kind, now),
+                    """INSERT INTO runs(id, task_id, kind, phase, created_at, timeout_seconds, timeout_source)
+                       VALUES (?, ?, ?, 'launching', ?, ?, ?)""",
+                    (run_id, task_id, kind, now, timeout_seconds, timeout_source),
                 )
                 con.execute(
                     "UPDATE tasks SET active_run_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?",

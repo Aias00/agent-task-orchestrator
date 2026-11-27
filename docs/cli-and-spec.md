@@ -8,7 +8,7 @@
 | `ato list [--repo PATH]` | List tasks (optionally filtered by repository) |
 | `ato status TASK_ID` | Inspect task state, execution, checks, review, product, notifications, and watchdog |
 | `ato stop TASK_ID` | Durably request STOP and terminate live worker process group |
-| `ato resume TASK_ID [--foreground]` | Continue a `stopped`, `blocked`, or answered `waiting_input` task |
+| `ato resume TASK_ID [--foreground] [--timeout-seconds SECONDS]` | Continue a `stopped`, `blocked`, or answered `waiting_input` task |
 | `ato inbox` | List open human questions across tasks |
 | `ato answer REQUEST_ID --answer TEXT` | Record a user reply to an open question |
 | `ato accept TASK_ID [--evidence FILE]` | Record optional manual user approval receipt |
@@ -64,6 +64,22 @@
 
 Supported worker kinds: `codex`, `claude`, `cursor`, `pi`.
 Supported reviewer kinds: `codex`, `claude`, `agy`.
+
+Worker `timeout_seconds` defaults to 600 (range 5–7200); reviewer timeout defaults
+to 300 (range 5–3600). `ato project validate` shows `timeout_seconds` and
+`timeout_source` (`default` or `spec`), plus `reviewer_timeout_seconds` and
+`reviewer_timeout_source` when configured. `ato run`, `ato resume`, and `ato status`
+receipts expose the effective worker timeout and source in `execution` and each
+`run_history` entry. Submission/resume events in `ato project trace` record them too;
+old records with unknown provenance report `legacy`.
+
+Use `ato resume TASK_ID --timeout-seconds 3600` to override only the new run
+(`timeout_source: resume_override`), in foreground or background. The value must
+contain only base-10 digits in 5–7200. This preserves the Task ID, isolated
+worktree, frozen spec digest, and acceptance criteria. A later resume without
+the option returns to the spec/default timeout. The `task_resumed` event also
+records `previous_timeout_seconds` and `timeout_overridden`.
+
 The `pi` worker runs `pi --mode json --print` under macOS `sandbox-exec` with `pi-path-guard.mjs` (see [ato/adapters/pi.py](../ato/adapters/pi.py)).
 
 Cursor is supported only as a worker (`"agent": {"kind": "cursor"}`), with no

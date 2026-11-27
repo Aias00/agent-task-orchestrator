@@ -10,7 +10,10 @@ import time
 
 from ato import codex_notify, config, inbox, process, product, reviewer, worktree
 from ato.adapters.base import WorkerRequest, get_worker_runner
-from ato.spec import TaskError, new_id, normalize_spec, require
+from ato.spec import (
+    DEFAULT_WORKER_TIMEOUT_SECONDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
+    TaskError, new_id, normalize_spec, require,
+)
 from ato.store import Store
 
 
@@ -77,6 +80,18 @@ def _ensure_idle(store: Store, task: dict) -> None:
         require(not _is_run_live(run), "BUSY", task["id"])
 
 
+def _run_timeout(task: dict, run: dict | None = None) -> dict:
+    """Resolve old nullable rows without guessing the source of a frozen default."""
+    run = run or {}
+    seconds = run.get("timeout_seconds")
+    if seconds is None:
+        seconds = task["spec"]["worker_contract"].get("timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
+    return {
+        "timeout_seconds": seconds,
+        "timeout_source": run.get("timeout_source") or task.get("spec_timeout_source") or "legacy",
+    }
+
+
 def submit(store: Store, repo: str | Path, spec_file: str | Path, *,
            foreground: bool = False, worker_runner=None, reviewer_runner=None) -> dict:
     norm = normalize_spec(repo, spec_file)
@@ -101,11 +116,15 @@ def submit(store: Store, repo: str | Path, spec_file: str | Path, *,
         worktree_path=wt_path,
         spec_doc=norm.document,
         spec_sha256=norm.spec_sha256,
+        spec_timeout_source=norm.timeout_source,
         origin_kind=origin_kind,
         origin_session_id=origin_session,
     )
-    run = store.create_run(task_id, "initial")
-    store.append_event(task_id, "task_submitted", {"origin": origin_kind, "run_id": run["id"]}, run_id=run["id"])
+    timeout = {"timeout_seconds": norm.document["worker_contract"]["timeout_seconds"],
+               "timeout_source": norm.timeout_source}
+    run = store.create_run(task_id, "initial", **timeout)
+    store.append_event(task_id, "task_submitted", {"origin": origin_kind, "run_id": run["id"], **timeout},
+                       run_id=run["id"])
 
     if foreground:
         execute_run(store, task_id, run["id"], worker_runner=worker_runner, reviewer_runner=reviewer_runner)
@@ -156,6 +175,8 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
     settings = config.load_settings()
     advisory_checks = bool(settings.get("advisory_checks", True))
     task = store.get_task(task_id)
+    run = store.get_run(run_id)
+    timeout = _run_timeout(task, run)
     spec = task["spec"]
     contract = spec["worker_contract"]
     worker_cfg = contract.get("agent") or {"kind": "codex"}
@@ -194,7 +215,7 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
                 model=model,
                 permissions=contract.get("permissions"),
                 controller_args=controller_args,
-                timeout_seconds=contract.get("timeout_seconds", 600),
+                timeout_seconds=timeout["timeout_seconds"],
                 stop_check=stop_requested,
             )
             store.append_event(task_id, "worker_started", {"attempt": attempt, "kind": worker_kind}, run_id=run_id)
@@ -362,7 +383,11 @@ def request_stop(store: Store, task_id: str) -> dict:
 
 
 def resume(store: Store, task_id: str, *, foreground: bool = False,
-           worker_runner=None, reviewer_runner=None) -> dict:
+           worker_runner=None, reviewer_runner=None, timeout_seconds: int | None = None) -> dict:
+    if timeout_seconds is not None:
+        require(type(timeout_seconds) is int
+                and MIN_WORKER_TIMEOUT_SECONDS <= timeout_seconds <= MAX_WORKER_TIMEOUT_SECONDS,
+                "USAGE", detail="timeout_seconds must be an integer in [5, 7200].")
     task = store.get_task(task_id)
     require(task["worktree_state"] == "present", "NOT_RESUMABLE", task_id)
     require(task["status"] in ("stopped", "blocked", "waiting_input"), "NOT_RESUMABLE", task_id)
@@ -370,9 +395,17 @@ def resume(store: Store, task_id: str, *, foreground: bool = False,
     if task["status"] == "waiting_input":
         require(not store.list_questions(task_id, state="open"), "NOT_RESUMABLE", task_id)
     worktree.verify_worktree(task)
+    previous_run = store.get_run(task["active_run_id"]) if task["active_run_id"] else None
+    previous_timeout = _run_timeout(task, previous_run)["timeout_seconds"]
+    timeout = _run_timeout(task)
+    if timeout_seconds is not None:
+        timeout = {"timeout_seconds": timeout_seconds, "timeout_source": "resume_override"}
     store.update_task(task_id, stop_requested=False, status="queued", reason=None)
-    run = store.create_run(task_id, "resume")
-    store.append_event(task_id, "task_resumed", {"run_id": run["id"]}, run_id=run["id"])
+    run = store.create_run(task_id, "resume", **timeout)
+    store.append_event(task_id, "task_resumed", {
+        "run_id": run["id"], **timeout, "previous_timeout_seconds": previous_timeout,
+        "timeout_overridden": timeout_seconds is not None,
+    }, run_id=run["id"])
     if foreground:
         execute_run(store, task_id, run["id"], worker_runner=worker_runner, reviewer_runner=reviewer_runner)
         return task_status_view(store, task_id)
@@ -472,6 +505,7 @@ def task_status_view(store: Store, task_id: str) -> dict:
         "updated_at": task["updated_at"],
         "spec_sha256": task["spec_sha256"],
         "execution": {
+            **_run_timeout(task, active),
             "state": exec_state,
             "run_id": active["id"] if active else None,
             "pid": active["pid"] if active and exec_state == "active" else None,
@@ -480,6 +514,7 @@ def task_status_view(store: Store, task_id: str) -> dict:
         },
         "run_history": [
             {"run_id": r["id"], "kind": r["kind"], "phase": r["phase"], "outcome": r["outcome"],
+             **_run_timeout(task, r),
              "created_at": r["created_at"], "settled_at": r["settled_at"]}
             for r in runs
         ],

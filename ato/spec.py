@@ -64,6 +64,10 @@ SHARED_ENV_LINKS = frozenset((".venv", "venv", "node_modules"))
 SEVERITIES = ("blocker", "major", "minor", "nit")
 CATEGORIES = ("security", "correctness", "architecture", "tests", "scope", "docs")
 MAX_SPEC_BYTES = 1024 * 1024
+DEFAULT_WORKER_TIMEOUT_SECONDS = 600
+MIN_WORKER_TIMEOUT_SECONDS = 5
+MAX_WORKER_TIMEOUT_SECONDS = 7200
+DEFAULT_REVIEWER_TIMEOUT_SECONDS = 300
 
 WORKER_RESULT_SCHEMA = {
     "type": "object",
@@ -245,13 +249,23 @@ class NormalizedSpec:
     document: dict
     canonical: bytes
     spec_sha256: str
+    timeout_source: str = "default"
+    reviewer_timeout_source: str | None = None
 
     def preview(self) -> dict:
-        return {
+        preview = {
             "repo": self.repository.root,
             "base_commit": self.document["base_ref"],
             "spec_sha256": self.spec_sha256,
+            "timeout_seconds": self.document["worker_contract"]["timeout_seconds"],
+            "timeout_source": self.timeout_source,
         }
+        if self.document.get("reviewer"):
+            preview.update(
+                reviewer_timeout_seconds=self.document["reviewer"]["timeout_seconds"],
+                reviewer_timeout_source=self.reviewer_timeout_source,
+            )
+        return preview
 
 
 def _git_quick(repo: Path, *args: str) -> str:
@@ -330,8 +344,8 @@ def _normalize_worker_contract(raw: object) -> dict:
     max_attempts = raw.get("max_attempts", 3)
     require(type(max_attempts) is int and 1 <= max_attempts <= 10, "INVALID_SPEC")
     contract["max_attempts"] = max_attempts
-    timeout = raw.get("timeout_seconds", 600)
-    require(type(timeout) is int and 5 <= timeout <= 7200, "INVALID_SPEC")
+    timeout = raw.get("timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
+    require(type(timeout) is int and MIN_WORKER_TIMEOUT_SECONDS <= timeout <= MAX_WORKER_TIMEOUT_SECONDS, "INVALID_SPEC")
     contract["timeout_seconds"] = timeout
 
     acc = raw["acceptance"]
@@ -386,7 +400,7 @@ def _normalize_reviewer(raw: object, repo: Path, base: str) -> dict | None:
     require(session_mode in SESSION_MODES, "INVALID_SPEC")
     rounds = raw.get("max_review_rounds", 1)
     require(type(rounds) is int and 1 <= rounds <= 20, "INVALID_SPEC")
-    timeout = raw.get("timeout_seconds", 300)
+    timeout = raw.get("timeout_seconds", DEFAULT_REVIEWER_TIMEOUT_SECONDS)
     require(type(timeout) is int and 5 <= timeout <= 3600, "INVALID_SPEC")
     checklist = raw.get("checklist", [])
     require(isinstance(checklist, list) and len(checklist) <= 128, "INVALID_SPEC")
@@ -484,4 +498,10 @@ def normalize_spec(repo: str | Path, spec_file: str | Path) -> NormalizedSpec:
         doc["guardrails"] = _normalize_guardrails(raw["guardrails"])
     canonical = canonical_json(doc)
     require(len(canonical) <= MAX_SPEC_BYTES, "INVALID_SPEC")
-    return NormalizedSpec(repository=repository, document=doc, canonical=canonical, spec_sha256=sha256_bytes(canonical))
+    return NormalizedSpec(
+        repository=repository, document=doc, canonical=canonical, spec_sha256=sha256_bytes(canonical),
+        timeout_source="spec" if "timeout_seconds" in raw["worker_contract"] else "default",
+        reviewer_timeout_source=(
+            "spec" if "timeout_seconds" in raw["reviewer"] else "default"
+        ) if doc["reviewer"] is not None else None,
+    )
