@@ -24,9 +24,12 @@ class ControllerBundleTests(ServerFixture, unittest.TestCase):
             with self.subTest(operation=operation):
                 validate_arguments(operation, arguments)
         self.assertEqual(examples["validate"], {k: v for k, v in examples["submit"].items() if k != "request_id"})
-        result = self.call("validate", examples["validate"])
+        result = self.call("validate", examples["validate"], origin="mcp")
         self.assertTrue(result["ok"], result)
-        self.assertEqual(set(result["data"]), {"repo", "valid", "spec_sha256", "base_commit"})
+        self.assertEqual(set(result["data"]), {"repo", "valid", "spec_sha256", "base_commit",
+                                              "worker_kind", "sandbox", "timeout_seconds", "timeout_source"})
+        self.assertEqual(result["data"]["timeout_seconds"], examples["validate"]["spec"]["worker_contract"]["timeout_seconds"])
+        self.assertEqual(result["data"]["timeout_source"], "spec")
         self.assertTrue(result["data"]["valid"])
         self.spawn.assert_not_called()
 

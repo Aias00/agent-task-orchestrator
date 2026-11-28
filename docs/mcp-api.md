@@ -200,6 +200,7 @@ Create `request.json` (your actual objective and acceptance replace these exampl
       "objective": "Implement the agreed feature",
       "scope": "Only the agreed repository files",
       "authorization": "Worktree changes and the specified check are authorized",
+      "timeout_seconds": 1800,
       "acceptance": [{
         "id": "whitespace", "kind": "command",
         "description": "No whitespace errors",
@@ -258,11 +259,52 @@ A JSON-RPC message ID is **not** an operation idempotency key.
 The tools are `ato_repositories`, `ato_validate`, `ato_submit`, `ato_list`,
 `ato_status`, `ato_diff`, `ato_trace`, `ato_stop`, `ato_resume`, `ato_inbox`,
 `ato_answer`. `tools/list` shows only tools permitted by the principal's scopes;
-direct calls are independently authorized. Inputs match REST fields, but task and
-question IDs are tool arguments and mutations require a `request_id` argument.
+direct calls are independently authorized. Task and question IDs are tool
+arguments and mutations require a `request_id` argument. New MCP validate/submit
+calls require explicit nested execution timeouts; REST retains its defaults.
 Structured results contain the canonical envelope; the text block contains the
 same JSON. Business errors have `isError:true` plus the structured error envelope.
 SDK protocol errors retain the SDK's JSON-RPC behavior.
+
+`ato_validate` and `ato_submit` publish the full nested inline spec: version 1,
+alias `repo`, `base_ref`, worker objective/scope/authorization/acceptance, optional
+agent/model/sandbox/permissions/retry settings, reviewer, worktree and guardrails.
+Their schema requires `spec.worker_contract.timeout_seconds` (integer 5..7200)
+and `spec.reviewer.timeout_seconds` (integer 5..3600) when reviewer is enabled.
+Omit reviewer or set it to null to disable it. Worker kind defaults to `codex`,
+sandbox to `workspace-write`; the other documented optional choices remain
+optional. Client-chosen writable roots remain forbidden (only an empty list is
+accepted); repository aliases and tracked design-doc paths cannot select arbitrary
+host files. The legacy `memory` field is accepted but ignored by normalization.
+JSON Schema string lengths describe character ceilings; the server also enforces
+UTF-8 byte limits, nonblank text, total spec size, unique acceptance IDs,
+reviewer membership, normalized paths and Git bindings.
+
+Both HTTP-MCP and stdio enforce explicit timeouts in the service even when a
+client skips schema validation. Missing, null, boolean, string, float or
+out-of-range timeout values fail with a static `MCP_WORKER_TIMEOUT_REQUIRED` or
+`MCP_REVIEWER_TIMEOUT_REQUIRED` error identifying the field path. New invalid
+requests do not persist an intent, consume the key, admit a task or spawn a worker.
+This policy does not change CLI/REST normalization (worker 600, reviewer 300),
+legacy execution, retries, STOP or hard timeout enforcement.
+
+Validation returns `repo` (alias), `valid`, `base_commit`, `spec_sha256`,
+`worker_kind`, `sandbox`, `timeout_seconds`, `timeout_source`, and configured
+`reviewer_timeout_seconds` / `reviewer_timeout_source`. Sources are `spec` for
+explicit values and `default` for omitted REST values. Validation starts no worker
+and creates no task. Inspect these effective settings before submission and
+`execution.timeout_seconds` / `timeout_source` in submit/resume/fresh status.
+Resume's timeout override remains optional and affects only that run; absent an
+override, the engine uses the frozen spec timeout (including a legacy default),
+not a previous run override, without changing the spec or its digest.
+
+The example's 1800 seconds is a workload choice, not a new default. For an enabled
+reviewer, add e.g. `"reviewer":{"agent":{"kind":"codex"},"timeout_seconds":300}`.
+Loading a file inside a worker cannot alter its outer execution deadline. Native
+MCP client/network request timeouts are separate from worker execution timeouts.
+After upgrading this schema, reconnect/refresh tool discovery in clients that
+cache `tools/list`. See the historical retry caveat below before modifying any
+already-sent intent.
 
 Official SDK 2.3.x client example, including initialization (its HTTP client is
 `httpx2`, and the stream context returns two streams). Python result attributes use
@@ -299,6 +341,7 @@ async def main():
                 validation = await session.call_tool("ato_validate", request)
                 if validation.is_error or not validation.structured_content["ok"]:
                     raise RuntimeError("Validation failed; inspect the error envelope")
+                print(validation.structured_content["data"])  # Inspect effective timeouts/sources before submit.
                 result = await session.call_tool("ato_submit", intent)
                 envelope = result.structured_content
                 if not envelope["ok"]:
@@ -342,6 +385,23 @@ Authorization is checked again before serving any cached task result. Inline
 validation of a new request occurs before intent persistence; a cached submit does
 not re-resolve a moving HEAD. The same key submitted via REST and MCP deduplicates.
 
+Timeout strictness applies inside the journal's prepare step **only for new MCP
+submit intents**. Successful or unresolved historical submissions with omitted
+timeouts still return their original result or `REQUEST_UNRESOLVED` for exact
+principal/key/arguments retries. Reauthorization, binding checks and collisions
+run first. No stored arguments, digests or frozen specs are rewritten. Adding
+a timeout to an old same-key retry causes `IDEMPOTENCY_CONFLICT`.
+
+A refreshed client may reject a legacy payload locally against the new schema.
+Do not add fields, invent a key or require a successful `ato_validate` before
+reconciling an already-sent intent: validation has no journal identity and now
+rejects omissions. Preserve the original intent and known task ID for authorized
+host reconciliation. Raw MCP calls reaching the service retain the exact replay
+path; an already-authorized operator can also use REST with the same principal,
+key and arguments against the same journal. This does not authorize changing
+identity, bypassing client approvals or resubmitting via CLI. Follow unresolved
+intent recovery below even when a reserved task ID returns 404.
+
 A duplicate while the first call is running, a process crash after recording
 intent, or an exception after mutation starts returns `REQUEST_UNRESOLVED` (409),
 with the reserved/known task ID when available. It is intentionally conservative:
@@ -366,6 +426,11 @@ saying “done”, an accepted request, and successful HTTP/MCP delivery are dif
 from the engine's durable final status and its independent check/reviewer evidence.
 
 ## Repeating isolated validation
+
+The explicit nested schema/timeout patch is implementation-only and has **not**
+been tested. Prior qualification reports remain historical evidence for their
+recorded revisions, not this change. See [the pending regression plan](mcp-explicit-timeouts.md).
+Run the commands below only after explicit testing authorization.
 
 All fixtures use temporary ATO_HOME/CODEX_HOME and synthetic Git repositories;
 worker dispatch is intercepted and no external provider is contacted. In an

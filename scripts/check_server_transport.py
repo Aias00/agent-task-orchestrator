@@ -86,6 +86,7 @@ async def check_http(url, store, dispatches):
         "schema_version": 1, "repo": "demo", "base_ref": "HEAD",
         "worker_contract": {"objective": "Synthetic transport qualification", "scope": "README.md",
             "authorization": "Temporary fixture only; no provider invocation",
+            "timeout_seconds": 120,
             "acceptance": [{"id": "whitespace", "kind": "command", "description": "Synthetic check",
                             "checks": [["git", "diff", "--check"]]}]}}}
     async with httpx2.AsyncClient(base_url=url, trust_env=False, timeout=10) as http:

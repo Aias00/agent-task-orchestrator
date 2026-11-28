@@ -77,8 +77,11 @@ Supported worker kinds: `codex`, `claude`, `cursor`, `pi`.
 Supported reviewer kinds are `codex`, `claude`, `agy`, and the opt-in
 [Codex ACP Reviewer](acpx-reviewer.md) (`codex_acpx`).
 
-Worker `timeout_seconds` defaults to 600 (range 5–7200); reviewer timeout defaults
-to 300 (range 5–3600). `ato project validate` shows `timeout_seconds` and
+For local CLI and REST, worker `timeout_seconds` defaults to 600 (range 5–7200);
+reviewer timeout defaults to 300 (range 5–3600). New MCP validate/submit requests
+require explicit worker timeout and explicit reviewer timeout when configured;
+see [MCP compatibility and recovery](mcp-api.md#idempotency-and-recovery).
+`ato project validate` shows `timeout_seconds` and
 `timeout_source` (`default` or `spec`), plus `reviewer_timeout_seconds` and
 `reviewer_timeout_source` when configured. `ato run`, `ato resume`, and `ato status`
 receipts expose the effective worker timeout and source in `execution` and each
@@ -89,7 +92,10 @@ Use `ato resume TASK_ID --timeout-seconds 3600` to override only the new run
 (`timeout_source: resume_override`), in foreground or background. The value must
 contain only base-10 digits in 5–7200. This preserves the Task ID, isolated
 worktree, frozen spec digest, and acceptance criteria. A later resume without
-the option returns to the spec/default timeout. The `task_resumed` event also
+the option returns to the frozen spec timeout, including its original default,
+not the previous run's override. Reading a file inside a worker cannot change
+this outer deadline; an MCP request timeout is a separate transport setting.
+The `task_resumed` event also
 records `previous_timeout_seconds` and `timeout_overridden`.
 
 `run_history` includes `error_code` and `worker_timed_out`. After two or more

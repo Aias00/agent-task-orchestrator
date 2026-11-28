@@ -6,20 +6,17 @@ import re
 
 from ato import executor, inbox, product
 from ato.spec import (TaskError, canonical_json, new_id, normalize_inline_spec, normalize_repository,
-                      require, require_id, result_envelope)
+                      require, require_id, result_envelope, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS)
 from ato.store import Store
 from ato.server.config import Principal, ServerConfig
 from ato.server.idempotency import Journal
-
-
-def schema(properties=None, required=()):
-    return {"type": "object", "properties": properties or {}, "required": list(required), "additionalProperties": False}
+from ato.server.spec_schema import ALIAS, integer, require_mcp_timeouts, schema, task_spec_schema
 
 
 TEXT = {"type": "string", "minLength": 1}
 TASK = {"type": "string", "pattern": "^task-[0-9a-f]{32}$"}
 KEY = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"}
-SPEC = schema({"repo": TEXT, "spec": {"type": "object"}}, ("repo", "spec"))
+SPEC = schema({"repo": TEXT, "spec": task_spec_schema(mcp=False)}, ("repo", "spec"))
 OPERATIONS = {
     "repositories": ("read", schema(), "List repository aliases available to this principal."),
     "validate": ("control", SPEC, "Validate an inline spec naming an allowed repository alias."),
@@ -32,7 +29,7 @@ OPERATIONS = {
     "trace": ("read", schema({"task_id": TASK}, ("task_id",)), "Read the bounded task event timeline."),
     "stop": ("control", schema({"task_id": TASK, "request_id": KEY}, ("task_id", "request_id")), "Request durable STOP."),
     "resume": ("control", schema({"task_id": TASK, "request_id": KEY,
-                                 "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 7200}},
+                                 "timeout_seconds": integer(MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS)},
                                 ("task_id", "request_id")), "Resume an eligible task asynchronously."),
     "inbox": ("read", schema({"task_id": TASK}, ("task_id",)), "Read open human questions for one allowed task."),
     "answer": ("human", schema({"task_id": TASK, "question_id": {"type": "string", "pattern": "^request-[0-9a-f]{32}$"},
@@ -41,6 +38,15 @@ OPERATIONS = {
                "Record an explicit human answer. Requires separate human authority; does not resume or accept."),
 }
 MUTATIONS = frozenset({"submit", "resume", "stop", "answer"})
+# Discovery differs only for new MCP task inputs. Top-level argument validation
+# stays shared and nonrecursive so historical journal replay remains reachable.
+MCP_OPERATIONS = dict(OPERATIONS)
+for _operation in ("validate", "submit"):
+    _scope, _shape, _description = OPERATIONS[_operation]
+    MCP_OPERATIONS[_operation] = (_scope, schema(
+        {**_shape["properties"], "repo": ALIAS, "spec": task_spec_schema(mcp=True)}, _shape["required"]),
+        _description + " Explicit worker timeout_seconds is required, and reviewer timeout_seconds when configured. "
+        "Validate previews effective settings without starting a worker; inspect timeout/source in receipts.")
 
 
 def validate_arguments(operation: str, arguments: dict) -> dict:
@@ -106,6 +112,8 @@ class Service:
                 require(question["task_id"] == task["id"], "NOT_FOUND")
                 require(bool(args["answer"].strip()) and len(args["answer"].encode()) <= 8192, "USAGE")
             if operation not in MUTATIONS:
+                if origin == "mcp" and operation == "validate":
+                    require_mcp_timeouts(args["spec"])
                 return result_envelope(data=self._read(store, principal, operation, args, task, repo))
             task_id = task["id"] if task else new_id("task")
             # Digest caller arguments, not resolved HEAD or origin, so cross-transport retries match.
@@ -118,6 +126,10 @@ class Service:
             def prepare():
                 nonlocal norm
                 if operation == "submit":
+                    # Journal checks replay/collision first, then validates new
+                    # input before persisting intent or admitting any task.
+                    if origin == "mcp":
+                        require_mcp_timeouts(args["spec"])
                     norm = normalize_inline_spec(repo.root, args["repo"], args["spec"])
 
             def effect():
@@ -149,10 +161,12 @@ class Service:
         if operation == "repositories":
             return {"repositories": [{"alias": alias} for alias in sorted(principal.repositories)]}
         if operation == "validate":
-            preview = normalize_inline_spec(repo.root, args["repo"], args["spec"]).preview()
+            norm = normalize_inline_spec(repo.root, args["repo"], args["spec"])
+            preview = norm.preview()
+            contract = norm.document["worker_contract"]
             # Replace the canonical filesystem root with the public alias.
-            return {"repo": args["repo"], "valid": True, "spec_sha256": preview["spec_sha256"],
-                    "base_commit": preview["base_commit"]}
+            return {**preview, "repo": args["repo"], "valid": True,
+                    "worker_kind": contract["agent"]["kind"], "sandbox": contract["sandbox"]}
         if operation == "list":
             rows = []
             for item in store.list_tasks(repo_key=repo.key if repo else None):

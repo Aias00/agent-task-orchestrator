@@ -52,6 +52,7 @@ class ServerFixture:
     def spec(self, alias="demo"):
         return {"schema_version": 1, "repo": alias, "base_ref": "HEAD", "worker_contract": {
             "objective": "Synthetic fixture", "scope": "app.py", "authorization": "Temporary local fixture only",
+            "timeout_seconds": 120,
             "acceptance": [{"id": "whitespace", "kind": "command", "description": "Synthetic check",
                             "checks": [["git", "diff", "--check"]]}]}}
 

@@ -134,8 +134,13 @@ authorized operator workflow; do not invent a Bot config or silently use an API.
    turn AGY or Grok Bot into a new worker or replace ACP/native execution.
 3. Select one connection, provision read/control only, import controller
    instructions, initialize and inspect actual tools/schemas and repositories.
+   Reconnect/rediscover after schema upgrades so nested timeout requirements are
+   visible. Historical retries may need the reconciliation path in
+   [the controller contract](controller.md#durable-intent-and-recovery).
    Test a read principal separately; missing control tools should stay missing.
-4. In a separately authorized synthetic repository, validate and submit with a
+4. In a separately authorized synthetic repository, explicitly choose worker
+   timeout (5..7200) and configured reviewer timeout (5..3600); inspect effective
+   values/sources in validate (which starts no worker). Validate and submit with a
    durable key, reconnect/replay the SAME key, then poll status/diff/trace/inbox.
    Verify one task/admission, independent checks and final pending/review facts.
    Exercise STOP cleanup and eligible resume, preserving Task ID. Route a question

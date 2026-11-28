@@ -5,6 +5,12 @@ operations. It uses the existing API/MCP engine from baseline `9ab0bd5`; Worker 
 Reviewer execution remains native. No new provider, scheduler, poller or webhook
 was added. CLI and HTTP remain supported for operations and scripts.
 
+The subsequent [explicit-timeout schema patch](mcp-explicit-timeouts.md) requires
+worker and configured reviewer timeouts for new MCP submissions and expands
+validation previews. Reconnect/rediscover tools after upgrading, inspect effective
+settings before submitting, and preserve exact historical retry arguments.
+This patch is not yet tested; qualification below describes prior revisions only.
+
 Use the portable [setup/migration guide](../skills/ato/references/setup.md) for
 host prerequisites, local stdio and remote Streamable HTTP, per-client official
 sources (checked 2026-11-27), and future acceptance. The
@@ -18,7 +24,7 @@ arguments, envelopes, durable mutation recovery and authorized CLI mapping.
 | `SKILL.md` | Discover capability/aliases, submit once, inspect independent evidence, STOP/resume and route human input |
 | `references/controller.md` | Tool/response contract, private durable intents, ambiguity and CLI fallback |
 | `references/setup.md` | Client migration, official sources and future acceptance checklist |
-| `templates/controller-calls.example.json` | Contract examples tested through the real service/SDK; replace sample IDs, keys and spec before use |
+| `templates/controller-calls.example.json` | Contract examples with explicit timeout values; updated regression code pending execution; replace sample IDs, keys and spec before use |
 | `templates/server-stdio.example.json` | Local bot-only principal, avoiding human credentials in the controller process |
 | `templates/server-http.example.json` | Host-only config with separate coordinator/human principals; never pass human token to clients |
 | `templates/codex-stdio.toml`, `templates/codex-http.toml` | Official-field Codex configuration examples |

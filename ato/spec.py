@@ -22,6 +22,8 @@ ERRORS: dict[int, dict[str, str]] = {
         "INVALID_JSON": "Invalid JSON document.",
         "UNSUPPORTED_VERSION": "Unsupported schema version.",
         "INVALID_SPEC": "Invalid task specification.",
+        "MCP_WORKER_TIMEOUT_REQUIRED": "spec.worker_contract.timeout_seconds must be explicitly set to an integer in [5, 7200].",
+        "MCP_REVIEWER_TIMEOUT_REQUIRED": "spec.reviewer.timeout_seconds must be explicitly set to an integer in [5, 3600] when reviewer is configured.",
         "INVALID_EVIDENCE": "Invalid evidence.",
         "UNSUPPORTED_CAPABILITY": "The requested capability is unavailable.",
         "INVALID_SERVER_CONFIG": "Invalid server configuration or missing token environment variable.",
@@ -64,6 +66,7 @@ MODEL_RE = re.compile(
     r"(?:,[A-Za-z][A-Za-z0-9_-]*=[A-Za-z0-9_.:/-]+)*\])?"
 )
 WORKER_KINDS = ("codex", "claude", "cursor", "pi")
+WORKER_SANDBOXES = ("workspace-write", "read-only")
 REVIEWER_KINDS = ("codex", "claude", "agy", "codex_acpx")
 DEFAULT_MAX_REVIEW_ROUNDS = 10
 MAX_REVIEW_ROUNDS = 50
@@ -79,6 +82,8 @@ DEFAULT_WORKER_TIMEOUT_SECONDS = 600
 MIN_WORKER_TIMEOUT_SECONDS = 5
 MAX_WORKER_TIMEOUT_SECONDS = 7200
 DEFAULT_REVIEWER_TIMEOUT_SECONDS = 300
+MIN_REVIEWER_TIMEOUT_SECONDS = 5
+MAX_REVIEWER_TIMEOUT_SECONDS = 3600
 
 WORKER_RESULT_SCHEMA = {
     "type": "object",
@@ -374,7 +379,7 @@ def _normalize_worker_contract(raw: object) -> dict:
         require(isinstance(raw["model"], str) and MODEL_RE.fullmatch(raw["model"]) is not None, "INVALID_SPEC")
         contract["model"] = raw["model"]
     sandbox = raw.get("sandbox", "workspace-write")
-    require(sandbox in ("workspace-write", "read-only"), "INVALID_SPEC")
+    require(sandbox in WORKER_SANDBOXES, "INVALID_SPEC")
     contract["sandbox"] = sandbox
     if "permissions" in raw and raw["permissions"] is not None:
         perms = raw["permissions"]
@@ -456,7 +461,7 @@ def _normalize_reviewer(raw: object, repo: Path, base: str) -> dict | None:
     rounds = raw.get("max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS)
     require(type(rounds) is int and 1 <= rounds <= MAX_REVIEW_ROUNDS, "INVALID_SPEC")
     timeout = raw.get("timeout_seconds", DEFAULT_REVIEWER_TIMEOUT_SECONDS)
-    require(type(timeout) is int and 5 <= timeout <= 3600, "INVALID_SPEC")
+    require(type(timeout) is int and MIN_REVIEWER_TIMEOUT_SECONDS <= timeout <= MAX_REVIEWER_TIMEOUT_SECONDS, "INVALID_SPEC")
     checklist = raw.get("checklist", [])
     require(isinstance(checklist, list) and len(checklist) <= 128, "INVALID_SPEC")
     checklist = [_text(c, 4096) for c in checklist]

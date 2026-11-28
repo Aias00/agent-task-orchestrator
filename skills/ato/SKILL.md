@@ -15,15 +15,25 @@ An already dispatched worker executes its task; it must not dispatch nested ATO 
    pages if supplied); inspect their input schemas. Clients may prefix tool names.
    Match the `ato_*` names below to the actual connection. Do not guess a tool,
    server identity, permission or repository from a filesystem path.
+   Reconnect or refresh tool discovery after a server schema upgrade; cached
+   schemas may still hide required nested execution fields.
 2. Call `ato_repositories({})` and select an authorized `data.repositories[].alias`.
    Use that alias as both `repo` and inline `spec.repo`. Specs are objects, not file
    paths or JSON strings. Read [the exact contract](references/controller.md) and
    [example calls](templates/controller-calls.example.json). Include the complete
-   objective, scope, authorization and independent command acceptance criteria;
-   optional guardrails are `protected_paths` and `forbid_delete_paths`.
+   objective, scope, authorization and acceptance criteria (command checks when
+   authorized, manual criteria when human acceptance is required). Explicitly set
+   `worker_contract.timeout_seconds` to an integer 5..7200 based on the task.
+   If a reviewer is configured, explicitly set `reviewer.timeout_seconds` to an
+   integer 5..3600. New MCP requests have no implicit execution timeout defaults.
+   Optional guardrails are `protected_paths` and `forbid_delete_paths`.
 3. Call `ato_validate({"repo": ALIAS, "spec": SPEC})`. Require `ok:true` and
    `data.valid:true`. The transport preview returns `repo`, `valid`, `spec_sha256`,
-   `base_commit`; it does not return the CLI's timeout preview. Do not invent fields.
+   `base_commit`, `worker_kind`, `sandbox`, `timeout_seconds`, `timeout_source`, and
+   `reviewer_timeout_seconds` / `reviewer_timeout_source` when configured. Inspect
+   these effective values before submission; MCP explicit timeouts have source
+   `spec`. Validation starts no worker. A file read inside the worker cannot change
+   its outer execution deadline. MCP network/request timeouts are separate.
 4. Before `ato_submit`, generate a unique operation key, e.g. `submit-` plus a UUID4
    (`python3 -c 'import uuid; print("submit-" + uuid.uuid4().hex)'` where available).
    Durably save it with the server identity, principal name (no token), operation,
@@ -32,6 +42,8 @@ An already dispatched worker executes its task; it must not dispatch nested ATO 
    state is unavailable, stop before a write and explain the missing capability.
 5. Call `ato_submit({"repo": ALIAS, "spec": SPEC, "request_id": KEY})` once.
    Save `data.task_id` immediately. An accepted/queued reply is not completion.
+   Inspect `data.execution.timeout_seconds` / `timeout_source`; use fresh status
+   for effective run settings after a replay or resume.
    All later operations follow that Task ID; do not create a replacement task to
    continue the same objective. New stop/resume actions each get their own key.
 
@@ -83,7 +95,8 @@ Resume only when authorized, pending human input is resolved and the task is
 eligible (`stopped`, `blocked`, `waiting_input`; legacy completion needs inspection).
 Call `ato_resume({"task_id": ID, "request_id": NEW_KEY})`; optional
 `timeout_seconds` is an integer 5..7200 for this run only. Omit it to use the
-frozen spec/default. Task ID, worktree, spec digest and acceptance stay unchanged.
+frozen spec timeout (including the original default in legacy/local/API specs),
+not a previous run override. Task ID, worktree, spec digest and acceptance stay unchanged.
 Read execution/run_history/trace for the actual new run, not a cached receipt.
 
 For disconnects, timeouts, protocol errors or missing replies after any write,
@@ -95,6 +108,10 @@ If still unresolved, retain the key and escalate for host reconciliation; do not
 change keys, switch to CLI submission, erase journal rows or infer rollback.
 `IDEMPOTENCY_CONFLICT` means the key was used for other arguments/operation; inspect
 the saved intent instead of guessing. See [recovery details](references/controller.md).
+Historical submissions may lack explicit timeouts. Do not add fields to a retry:
+the server looks up exact historical intents before applying the new policy.
+If the client's new schema blocks that retry locally, retain the intent and use
+the authorized host reconciliation path described in the reference.
 
 ## Availability, authority and fallback
 

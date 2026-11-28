@@ -1,17 +1,22 @@
-"""Optional real-SDK transport contract tests, entirely in-process with synthetic stores."""
+"""Optional real-SDK HTTP/stdio contract tests with synthetic stores and dispatch."""
 from contextlib import asynccontextmanager
+from copy import deepcopy
 import asyncio
 import json
+import os
 from pathlib import Path
+import sys
 import threading
 import unittest
 from unittest.mock import patch
 
 import httpx2
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from ato.server.http import Boundary, create_app
+from ato.server.service import MCP_OPERATIONS
 from server_fixtures import BOT_TOKEN, HUMAN_TOKEN, READER_TOKEN, ServerFixture
 
 
@@ -49,6 +54,112 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
                     info = await session.initialize()
                     self.assertEqual(info.server_info.name, "ato")
                     yield session
+
+    @asynccontextmanager
+    async def stdio_sdk(self):
+        # Real stdio framing/entrypoint, synthetic dispatch in the child too.
+        # Never inherit provider/host state: ServerFixture clears the environment.
+        script = (
+            "import sys\n"
+            "from unittest.mock import patch\n"
+            "from ato.cli import main\n"
+            "with patch('ato.executor._spawn_background_run'), "
+            "patch('ato.executor.execute_run', side_effect=AssertionError('Provider forbidden')):\n"
+            "    raise SystemExit(main(['mcp', '--stdio', '--config', sys.argv[1]]))\n"
+        )
+        params = StdioServerParameters(command=sys.executable, args=["-c", script, str(self.config_file)],
+                                       env=dict(os.environ), cwd=str(Path(__file__).resolve().parents[2]))
+        async with stdio_client(params) as streams:
+            async with ClientSession(*streams, read_timeout_seconds=10) as session:
+                await session.initialize()
+                yield session
+
+    async def test_nested_discovery_and_raw_timeout_policy_match_http_and_stdio(self):
+        before = self.store.list_tasks()
+        async with self.sdk() as http, self.stdio_sdk() as stdio:
+            for session in (http, stdio):
+                listing = {tool.name: tool for tool in (await session.list_tools()).tools}
+                for operation in ("validate", "submit"):
+                    self.assertEqual(listing["ato_" + operation].input_schema, MCP_OPERATIONS[operation][1])
+                for field, code, values in (
+                        ("worker_contract", "MCP_WORKER_TIMEOUT_REQUIRED", (None, True, 0, 4, 7201, "120", 120.0)),
+                        ("reviewer", "MCP_REVIEWER_TIMEOUT_REQUIRED", (None, False, 0, 4, 3601, "300", 300.0))):
+                    for value in ("missing", *values):
+                        raw = self.spec()
+                        if field == "reviewer":
+                            raw[field] = {"agent": {"kind": "codex"}}
+                        raw[field].pop("timeout_seconds", None)
+                        if value != "missing":
+                            raw[field]["timeout_seconds"] = value
+                        for operation in ("validate", "submit"):
+                            args = {"repo": "demo", "spec": raw}
+                            if operation == "submit":
+                                args["request_id"] = "invalid-shared-key"
+                            reply = await session.call_tool("ato_" + operation, args)
+                            self.assertTrue(reply.is_error, reply)
+                            result = reply.structured_content
+                            self.assertEqual(result["error"]["code"], code)
+                            self.assertEqual(json.loads(reply.content[0].text), result)
+                            self.assertEqual(result, self.call(operation, args, origin="mcp"))
+            self.assertEqual(self.store.list_tasks(), before)
+            with self.service.journal.connection() as con:
+                self.assertEqual(con.execute("SELECT count(*) FROM requests").fetchone()[0], 0)
+            self.spawn.assert_not_called()
+            for reviewer in (None, {"agent": {"kind": "codex"}, "timeout_seconds": 3600}):
+                raw = {**self.spec(), "reviewer": reviewer}
+                args = {"repo": "demo", "spec": raw}
+                previews = [(await session.call_tool("ato_validate", args)).structured_content for session in (http, stdio)]
+                self.assertEqual(previews[0], previews[1])
+                self.assertTrue(previews[0]["ok"], previews)
+                self.assertEqual(previews[0]["data"]["timeout_seconds"], 120)
+                self.assertEqual(previews[0]["data"]["timeout_source"], "spec")
+                self.assertEqual(previews[0]["data"]["worker_kind"], "codex")
+                self.assertEqual(previews[0]["data"]["sandbox"], "workspace-write")
+                if reviewer:
+                    self.assertEqual(previews[0]["data"]["reviewer_timeout_seconds"], 3600)
+                    self.assertEqual(previews[0]["data"]["reviewer_timeout_source"], "spec")
+                self.assertNotIn(str(self.root), json.dumps(previews))
+            # An earlier rejection did not reserve the key; normal stdio admission
+            # now succeeds, and HTTP returns the identical historical receipt.
+            args = {"repo": "demo", "spec": self.spec(), "request_id": "invalid-shared-key"}
+            submitted = (await stdio.call_tool("ato_submit", args)).structured_content
+            self.assertTrue(submitted["ok"], submitted)
+            self.assertEqual(submitted["data"]["execution"]["timeout_seconds"], 120)
+            self.assertEqual(submitted["data"]["execution"]["timeout_source"], "spec")
+            self.assertEqual((await http.call_tool("ato_submit", args)).structured_content, submitted)
+            self.assertEqual(len(self.store.list_tasks()), len(before) + 1)
+
+    async def test_legacy_rest_default_receipts_remain_replayable_over_both_mcp_transports(self):
+        raw = self.spec()
+        del raw["worker_contract"]["timeout_seconds"]
+        raw["reviewer"] = {"agent": {"kind": "codex"}}
+        args = {"repo": "demo", "spec": raw}
+        validation = await self.client.post("/api/v1/validate", json=args)
+        self.assertEqual(validation.status_code, 200)
+        self.assertEqual(validation.json()["data"]["timeout_seconds"], 600)
+        self.assertEqual(validation.json()["data"]["reviewer_timeout_seconds"], 300)
+        complete = await self.client.post("/api/v1/tasks", json=args, headers={"Idempotency-Key": "legacy-ok"})
+        self.assertEqual(complete.status_code, 202)
+        with patch("ato.executor.submit_normalized", side_effect=RuntimeError("private fixture error")):
+            unresolved = await self.client.post("/api/v1/tasks", json=args, headers={"Idempotency-Key": "legacy-pending"})
+        self.assertEqual(unresolved.status_code, 409)
+        with self.service.journal.connection() as con:
+            before = [tuple(row) for row in con.execute("SELECT * FROM requests ORDER BY key_hash")]
+        async with self.sdk() as http, self.stdio_sdk() as stdio:
+            for session in (http, stdio):
+                for key, expected in (("legacy-ok", complete.json()), ("legacy-pending", unresolved.json())):
+                    replay = await session.call_tool("ato_submit", {**args, "request_id": key})
+                    self.assertEqual(replay.structured_content, expected)
+                    self.assertEqual(replay.is_error, not expected["ok"])
+                    changed = deepcopy(args)
+                    changed["spec"]["worker_contract"]["timeout_seconds"] = 600
+                    conflict = await session.call_tool("ato_submit", {**changed, "request_id": key})
+                    self.assertEqual(conflict.structured_content["error"]["code"], "IDEMPOTENCY_CONFLICT")
+                rejected = await session.call_tool("ato_submit", {**args, "request_id": "new-omission"})
+                self.assertEqual(rejected.structured_content["error"]["code"], "MCP_WORKER_TIMEOUT_REQUIRED")
+        with self.service.journal.connection() as con:
+            self.assertEqual([tuple(row) for row in con.execute("SELECT * FROM requests ORDER BY key_hash")], before)
+        self.spawn.assert_called_once()
 
     async def test_health_schema_authentication_and_host_origin_policy(self):
         for path in ("/health", "/api/v1/openapi.json", "/api/v1/tasks", "/mcp"):
