@@ -34,15 +34,21 @@ manual checks in setup.md, not speculative runnable JSON.
 
 | Layer | Evidence | What is not established |
 | --- | --- | --- |
-| Existing native Worker/Reviewer adapters | Prior adapter implementation/verification retained; current synthetic core regression | No new real native/model/provider qualification in this task |
+| Existing native Worker/Reviewer adapters | Prior implementation retained; [Codex qualification](codex-mcp-validation.md) adds one bounded real Codex worker and independent marker check | Other providers/reviewers are not newly qualified |
 | Service + official MCP SDK | Prior 126-test report plus [current regression](mcp-controller-validation.md); actual SDK in-process calls including packaged examples | Does not establish any native client UI/tool approval behavior |
 | Actual loopback + stdio | Bounded HTTP/MCP socket and CLI stdio harness with temporary stores, synthetic credentials and intercepted dispatch | Public network, reverse proxy/TLS, deployment load, OS/power crash recovery |
-| Codex / Cursor controller configs | Official schema + installed help; template syntax, install and SDK contract tests | Actual client connection not exercised |
+| Codex CLI 0.171.0 controller | [Native qualification](codex-mcp-validation.md): actual stdio + loopback HTTP tool calls, exact replay, one real worker, synthetic STOP/resume and offline evidence verification | Requires an available mutation approval route; does not qualify Work/app, public TLS/proxy or push wakeup |
+| Cursor controller config | Official schema + installed help; template syntax, install and SDK contract tests | Actual client connection not exercised |
 | AGY controller | Official transport fields + installed help; manual setup checklist | Secure token reference/forwarding and actual connection not exercised |
 | Grok Bot (`https://x.ai/bot`) | Product-specific official docs; manual capability checklist | Exact ATO-compatible client config/auth, durable keys, network access and actual connection not established |
 | Native notification delivery | Existing origin-aware mechanisms preserved | New MCP/API task origin does not bind/wake a native session; polling is not push |
 
 ## Operating boundaries
+
+Native `codex exec` defaults can reject mutation tools when approval policy is `never`.
+The isolated qualification used supported `--approve-for-me` automatic review with
+workspace-write sandboxing and temporary project trust; it did not bypass approvals.
+See the [exact scope and failed initial attempt](codex-mcp-validation.md).
 
 Controller credentials have read/control only. Human credentials stay in a
 separate human-controlled channel; `ato_answer` records only actual authorized

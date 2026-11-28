@@ -3,7 +3,8 @@
 Templates are examples for a later authorized installation, not active client
 configuration. Replace paths, aliases and hostnames; supply secrets through the
 client/host's private environment or credential facility, never prompts or Git.
-No native client was connected or exercised during this change.
+Codex CLI was subsequently qualified in an isolated manual exercise; see the
+client matrix below. Other native controller connections remain untested.
 
 ## Host and distribution
 
@@ -51,7 +52,7 @@ transport tokens and copies as well as inherited native origin bindings.
 
 | Controller | Recipe | Evidence / remaining qualification |
 | --- | --- | --- |
-| Codex CLI | Merge ONE of `codex-stdio.toml` / `codex-http.toml` into the approved config.toml | Official schema and installed `codex mcp add --help` (0.171.0); native connection untested |
+| Codex CLI | Merge ONE of `codex-stdio.toml` / `codex-http.toml` into the approved config.toml | Codex CLI 0.171.0 actual stdio and loopback HTTP qualified; exact replay, one real worker and synthetic lifecycle; mutation approval route required |
 | Cursor agent | Merge ONE of `cursor-stdio.json` / `cursor-http.json` into the approved `.cursor/mcp.json` | Official docs and installed `cursor-agent mcp --help`; native connection untested |
 | AGY / Antigravity | Manual setup below, no guessed secret interpolation | Official fields + installed CLI help; credential injection and native connection pending |
 | Grok Bot at x.ai/bot | Manual capability checklist below | Product-specific docs confirm custom MCP context; exact ATO-compatible client schema/auth and connection pending |
@@ -60,7 +61,29 @@ Codex supports `command`, `args`, `env`, `env_vars` for stdio and `url` plus
 `bearer_token_env_var` for HTTP. See [official MCP configuration](https://developers.openai.com/codex/mcp)
 (redirects to [ChatGPT Learn, CLI surface](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)).
 Local help also confirms `codex mcp add NAME --url URL --bearer-token-env-var NAME`
-and `codex mcp add NAME -- COMMAND ARGS`. We read help only, never ran add/login.
+and `codex mcp add NAME -- COMMAND ARGS`. The initial bundle qualification read
+help only. The subsequent Codex qualification used isolated `codex exec` processes
+and these templates for actual stdio and loopback HTTP tool calls. See the source
+checkout's `docs/codex-mcp-validation.md` for the report and private evidence paths.
+
+In Codex CLI 0.171.0, default noninteractive `exec` rejected ATO submit because its
+approval policy was `never`; no task was admitted. The tested route uses native
+`--approve-for-me` automatic approval review with workspace-write sandboxing.
+For an approved disposable qualification only:
+
+```sh
+codex exec --strict-config --json --ephemeral --approve-for-me --trust -C TEMP_REPO -
+```
+
+Use private CODEX_HOME/ATO_HOME and provision only the bot credential first.
+`--trust` persists trust, so this example is limited to the temporary client/repo;
+it is not an instruction to trust a real project or change global settings.
+Interactive setups can use normal human tool approval. An unavailable/rejected
+approval route remains a blocker; do not use bypass flags. The harness bounds
+controller calls to 240 seconds and the single real worker to 120 seconds.
+Qualification does not establish the current Work/app session, public TLS/proxy,
+other clients, a real human answer, or native push wakeup. No add/login command or
+live client settings mutation was used.
 
 Cursor supports environment interpolation in `env` and `headers`; examples use
 `${env:ATO_SERVER_TOKEN_BOT}`. See [official MCP config](https://cursor.com/docs/mcp)
