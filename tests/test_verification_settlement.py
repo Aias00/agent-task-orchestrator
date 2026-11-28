@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from ato import config, executor, observer, watchdog
 from ato.adapters.base import ReviewResult, WorkerResult
 from ato.spec import TaskError
-from ato.store import Store
+from ato.store import SCHEMA_VERSION, Store
 from test_core_and_store import init_repo, make_spec
 from test_execution_and_cli import run_cli
 from test_reviewer_and_inbox import _verdict
@@ -197,7 +197,7 @@ class VerificationSettlementTests(unittest.TestCase):
             self.assertEqual(self.store.list_runs(tid), runs)
             self.assertEqual(self.store.list_notifications(tid), notices)
             with sqlite3.connect(self.store.db_file) as con:
-                self.assertEqual(con.execute("PRAGMA user_version").fetchone(), (2,))
+                self.assertEqual(con.execute("PRAGMA user_version").fetchone(), (SCHEMA_VERSION,))
                 self.assertEqual(con.execute("PRAGMA integrity_check").fetchone(), ("ok",))
                 self.assertEqual(con.execute("PRAGMA foreign_key_check").fetchall(), [])
                 self.assertEqual(con.execute("SELECT output_excerpt FROM checks WHERE run_id=?", (rid,)).fetchone(),

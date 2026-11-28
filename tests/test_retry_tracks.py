@@ -275,8 +275,15 @@ class RetryTracksTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         starts = [s for s in self.stages if s["stage_id"] == "review"]
         self.assertEqual([s["no_progress_streak"] for s in starts], [0, 0, 1, 0, 1])
-        self.assertEqual(self.stages[-1]["no_progress_streak"], 0)
-        self.assertEqual(self.stages[-1]["repeated_items"], [])
+        # Completion is persisted atomically by settle_owned_run, not update_task.
+        # Read the durable stage rather than the last intermediate method call.
+        final_stage = self.store.get_task(result["task_id"])["stage"]
+        self.assertEqual(result["stage"], final_stage)
+        self.assertEqual(final_stage["steps"][0]["state"], "completed")
+        self.assertEqual(final_stage["no_progress_streak"], 0)
+        self.assertEqual(final_stage["repeated_items"], [])
+        self.assertIsNone(final_stage["repeated_kind"])
+        self.assertTrue(final_stage["progress_made"])
 
     def test_changed_failure_tree_resets_consecutive_streak(self):
         self.configure(contract={"max_attempts": 6})
