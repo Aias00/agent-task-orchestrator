@@ -63,8 +63,8 @@ curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/main
 Set `ATO_INSTALL_REF` on the installer process to fetch a specific tag. Use the same tag in the URL to pin the installer script too.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/v2.1.0/install.sh \
-  | ATO_INSTALL_REF=refs/tags/v2.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/Aias00/agent-task-orchestrator/v2.2.0/install.sh \
+  | ATO_INSTALL_REF=refs/tags/v2.2.0 sh
 ```
 
 ### Install from a local checkout
