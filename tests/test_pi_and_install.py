@@ -198,6 +198,10 @@ console.log('GUARDS_OK');
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertTrue((bin_dir / "ato").is_file())
             self.assertTrue((skills_dir / "ato/SKILL.md").is_file())
+            for source in (ROOT / "skills/ato").rglob("*"):
+                if source.is_file():
+                    self.assertEqual((skills_dir / "ato" / source.relative_to(ROOT / "skills/ato")).read_bytes(),
+                                     source.read_bytes())
             ver = subprocess.run([str(bin_dir / "ato"), "--version"], capture_output=True, text=True)
             self.assertEqual(ver.returncode, 0, ver.stderr)
             self.assertIn(f"ato {__version__}", ver.stdout)
@@ -206,9 +210,11 @@ console.log('GUARDS_OK');
             base_dir = Path(tmp).resolve()
             bin_dir = base_dir / "bin"
             venv_dir = base_dir / "venv"
+            skills_dir = base_dir / "skills"
             env = dict(os.environ, ATO_INSTALL_PYTHON=sys.executable)
             res = subprocess.run(
-                ["sh", str(ROOT / "install.sh"), "--bin-dir", str(bin_dir), "--venv-dir", str(venv_dir)],
+                ["sh", str(ROOT / "install.sh"), "--bin-dir", str(bin_dir), "--venv-dir", str(venv_dir),
+                 "--skills-dir", str(skills_dir)],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -216,6 +222,10 @@ console.log('GUARDS_OK');
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertTrue((venv_dir / "share/ato/pi-path-guard.mjs").is_file())
             self.assertFalse((venv_dir / "share/ato/integrations").exists())
+            for source in (ROOT / "skills/ato").rglob("*"):
+                if source.is_file():
+                    self.assertEqual((skills_dir / "ato" / source.relative_to(ROOT / "skills/ato")).read_bytes(),
+                                     source.read_bytes())
             ver = subprocess.run([str(bin_dir / "ato"), "--version"], capture_output=True, text=True)
             self.assertEqual(ver.returncode, 0, ver.stderr)
             self.assertIn(f"ato {__version__}", ver.stdout)

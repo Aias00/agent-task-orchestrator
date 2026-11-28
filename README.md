@@ -5,6 +5,20 @@ One Task ID tracks the task spec, execution runs, independent host checks, optio
 
 When independent checks still fail after the allowed repair attempts, or fail during a recheck, the task is `blocked` with `reason="CHECKS_FAILED"`. ATO keeps the product and check receipts so you can inspect the failure and recheck after correcting it.
 
+## Controllers and execution agents
+
+Controllers use [MCP first](skills/ato/SKILL.md) for discovery, validate/submit,
+list/status/diff/trace/inbox and STOP/resume. HTTP API and CLI remain supported for
+operators and scripts. See the [migration and qualification guide](docs/mcp-controller.md)
+for Codex, Cursor agent, AGY (Antigravity) and Grok Bot setup and limitations.
+
+Controller transport is separate from execution: workers remain `codex` (macOS/Linux),
+`claude`, `cursor` and `pi` (macOS with sandbox-exec). Optional read-only reviewers
+remain `codex`, `claude`, `agy`, `codex_acpx`; see [ACP setup](docs/acpx-reviewer.md).
+MCP does not introduce a Grok Bot worker or change sandbox/retry/check behavior.
+New MCP/API tasks do not bind or wake native conversations. Existing verified
+Codex-origin notifications remain supported; AGY notifications remain unsupported.
+
 ## Supported agents
 
 ### Task submission
@@ -74,7 +88,31 @@ ato system observer-start
 ato system status
 ```
 
-## Quick start
+## Remote coordinator entrypoints
+
+Optional HTTP REST (`/api/v1`) and official MCP Streamable HTTP (`/mcp`) share one
+listener and the existing ATO engine. On the later deployment host:
+
+```sh
+sh ./install.sh --server
+# Configure repository aliases, scopes and token environment variables first:
+ato serve --config /path/to/server.json
+# Local MCP clients may instead use an explicit configured stdio principal:
+ato mcp --stdio --config /path/to/server.json
+```
+
+The listener defaults to `127.0.0.1:8765`. Both HTTP entrypoints require bearer
+authentication; human answers use a separate token from bot control. Submission
+is for trusted controllers because task specs authorize executable work/checks.
+See [MCP/API deployment and usage](docs/mcp-api.md) and the
+[safe host configuration example](docs/server-config.example.json) for optional
+dependency installation, TLS proxy policy, REST/SDK examples and crash-safe
+idempotency limitations. Poll task status/inbox; webhook/push integration is not
+included. The [prior isolated API/MCP validation](docs/mcp-api-validation.md) and
+[controller regression report](docs/mcp-controller-validation.md) distinguish SDK
+verification from native client and deployment checks still pending.
+
+## CLI quick start (operators and authorized fallback)
 
 ```sh
 # 1. Validate a task spec using the format in the CLI & Spec Reference
@@ -110,4 +148,6 @@ ato system status
 - [Architecture](docs/architecture.md) — 4-layer single-package architecture, SQLite schema, and safety invariants
 - [CLI & Spec Reference](docs/cli-and-spec.md) — task specification, verification history, retry policy, and CLI commands
 - [Codex ACP Reviewer](docs/acpx-reviewer.md) — optional runtime and launcher setup
-- [Agent Skill](skills/ato/SKILL.md) — concise instructions for Codex/AGY agents driving `ato`
+- [MCP & HTTP API](docs/mcp-api.md) — authenticated transports, scopes, deployment, idempotency and polling
+- [MCP controller migration](docs/mcp-controller.md) — distributable client examples and qualification boundaries
+- [Agent Skill](skills/ato/SKILL.md) — MCP-first controller instructions and authorized CLI fallback

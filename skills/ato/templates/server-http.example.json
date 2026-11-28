@@ -1,0 +1,21 @@
+{
+  "repositories": {
+    "demo": "/srv/ato/repos/demo"
+  },
+  "principals": {
+    "coordinator": {
+      "token_env": "ATO_SERVER_TOKEN_BOT",
+      "repositories": ["demo"],
+      "scopes": ["read", "control"]
+    },
+    "operator": {
+      "token_env": "ATO_SERVER_TOKEN_HUMAN",
+      "repositories": ["demo"],
+      "scopes": ["read", "human"]
+    }
+  },
+  "allowed_hosts": ["127.0.0.1:8765", "localhost:8765", "ato.example.com"],
+  "allowed_origins": [],
+  "max_body_bytes": 1048576,
+  "stdio_principal": "coordinator"
+}

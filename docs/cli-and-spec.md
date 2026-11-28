@@ -4,6 +4,8 @@
 
 | Command | Description |
 | --- | --- |
+| `ato serve --config FILE [--host ADDRESS] [--port PORT]` | Optional authenticated REST and MCP Streamable HTTP listener, default `127.0.0.1:8765`; requires server extra |
+| `ato mcp --stdio --config FILE` | Official SDK MCP over local stdio using the host-configured principal |
 | `ato run --repo PATH --spec FILE [--foreground]` | Submit a task into a new isolated Git worktree |
 | `ato list [--repo PATH]` | List tasks (optionally filtered by repository) |
 | `ato status TASK_ID [--check-history]` | Inspect task state, execution, latest checks, review, product, notifications, and watchdog. Add check history to inspect individual rounds. |
@@ -26,6 +28,15 @@
 | `ato system observer-start` / `observer-stop` | Start or stop the background Observer/Watchdog daemon |
 
 ## Task Specification (`schema_version: 1`)
+
+The CLI reads a spec file with a repository path as shown below. The optional
+[MCP/API entrypoints](mcp-api.md) instead take inline JSON with `spec.repo` equal
+to an explicitly allowed repository **alias**, and reject extra writable roots.
+REST mutations require `Idempotency-Key`; MCP mutations require `request_id`.
+They reuse the same validation, executor and durable state. They do not expose
+arbitrary file reads, shell dispatch, accept, cleanup, merge, deploy or recheck.
+Recheck runs checks and remains outside API v1. Bot control and human question
+answer authority use separate credentials; all task access is repository-scoped.
 
 ```json
 {
@@ -66,8 +77,11 @@ Supported worker kinds: `codex`, `claude`, `cursor`, `pi`.
 Supported reviewer kinds are `codex`, `claude`, `agy`, and the opt-in
 [Codex ACP Reviewer](acpx-reviewer.md) (`codex_acpx`).
 
-Worker `timeout_seconds` defaults to 600 (range 5–7200); reviewer timeout defaults
-to 300 (range 5–3600). `ato project validate` shows `timeout_seconds` and
+For local CLI and REST, worker `timeout_seconds` defaults to 600 (range 5–7200);
+reviewer timeout defaults to 300 (range 5–3600). New MCP validate/submit requests
+require explicit worker timeout and explicit reviewer timeout when configured;
+see [MCP compatibility and recovery](mcp-api.md#idempotency-and-recovery).
+`ato project validate` shows `timeout_seconds` and
 `timeout_source` (`default` or `spec`), plus `reviewer_timeout_seconds` and
 `reviewer_timeout_source` when configured. `ato run`, `ato resume`, and `ato status`
 receipts expose the effective worker timeout and source in `execution` and each
@@ -78,7 +92,10 @@ Use `ato resume TASK_ID --timeout-seconds 3600` to override only the new run
 (`timeout_source: resume_override`), in foreground or background. The value must
 contain only base-10 digits in 5–7200. This preserves the Task ID, isolated
 worktree, frozen spec digest, and acceptance criteria. A later resume without
-the option returns to the spec/default timeout. The `task_resumed` event also
+the option returns to the frozen spec timeout, including its original default,
+not the previous run's override. Reading a file inside a worker cannot change
+this outer deadline; an MCP request timeout is a separate transport setting.
+The `task_resumed` event also
 records `previous_timeout_seconds` and `timeout_overridden`.
 
 `run_history` includes `error_code` and `worker_timed_out`. After two or more
