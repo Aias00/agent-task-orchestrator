@@ -12,7 +12,7 @@ import time
 from ato import config
 from ato.spec import TaskError, new_id, require, require_id
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DDL = """
 PRAGMA foreign_keys = ON;
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   stage_json TEXT,
   next_step TEXT,
   reviewer_json TEXT,
+  reviewer_sources_json TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -89,6 +90,39 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS review_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  round INTEGER NOT NULL,
+  product_id TEXT NOT NULL,
+  product_fingerprint TEXT NOT NULL,
+  config_sha256 TEXT NOT NULL,
+  policy TEXT NOT NULL CHECK(policy = 'all'),
+  state TEXT NOT NULL DEFAULT 'running',
+  verdict_json TEXT,
+  error TEXT,
+  created_at REAL NOT NULL,
+  finished_at REAL,
+  UNIQUE(run_id, round)
+);
+CREATE INDEX IF NOT EXISTS idx_review_groups_task ON review_groups(task_id, id);
+CREATE TABLE IF NOT EXISTS review_members (
+  group_id INTEGER NOT NULL REFERENCES review_groups(id) ON DELETE CASCADE,
+  member_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  config_sha256 TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  verdict_json TEXT,
+  error TEXT,
+  session_id TEXT,
+  started_at REAL,
+  finished_at REAL,
+  PRIMARY KEY(group_id, member_id),
+  UNIQUE(group_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS acpx_reviews (
   request_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -100,7 +134,8 @@ CREATE TABLE IF NOT EXISTS acpx_reviews (
   receipt_json TEXT,
   cleanup TEXT NOT NULL DEFAULT 'pending',
   bridge_closed INTEGER NOT NULL DEFAULT 0,
-  UNIQUE (run_id, round)
+  member_id TEXT NOT NULL DEFAULT '',
+  UNIQUE (run_id, round, member_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_acpx_reviews_task ON acpx_reviews(task_id);
@@ -233,7 +268,7 @@ class Store:
                 # Serialize inspection and alteration so concurrent openers are safe.
                 con.execute("BEGIN IMMEDIATE")
                 for table, additions in (
-                    ("tasks", (("spec_timeout_source", "TEXT"),)),
+                    ("tasks", (("spec_timeout_source", "TEXT"), ("reviewer_sources_json", "TEXT"))),
                     ("runs", (("timeout_seconds", "INTEGER"), ("timeout_source", "TEXT"),
                               ("child_pid", "INTEGER"), ("child_pid_identity", "TEXT"),
                               ("worker_timed_out", "INTEGER"))),
@@ -244,6 +279,18 @@ class Store:
                     for name, sql_type in additions:
                         if name not in columns:
                             con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                # Rebuild the old ACP uniqueness constraint atomically. No live DB
+                # is opened by development tooling; this runs on a future Store open.
+                if "member_id" not in {r["name"] for r in con.execute("PRAGMA table_info(acpx_reviews)")}:
+                    con.execute("ALTER TABLE acpx_reviews RENAME TO acpx_reviews_legacy")
+                    start = _DDL.index("CREATE TABLE IF NOT EXISTS acpx_reviews (")
+                    end = _DDL.index(";", start)
+                    con.execute(_DDL[start:end])
+                    columns = [r["name"] for r in con.execute("PRAGMA table_info(acpx_reviews_legacy)")]
+                    names = ", ".join(columns)
+                    con.execute(f"INSERT INTO acpx_reviews ({names}, member_id) SELECT {names}, '' FROM acpx_reviews_legacy ORDER BY rowid")
+                    con.execute("DROP TABLE acpx_reviews_legacy")
+                    con.execute("CREATE INDEX idx_acpx_reviews_task ON acpx_reviews(task_id)")
                 con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_checks_attempt
                                ON checks(task_id, run_id, attempt, criterion_id) WHERE attempt IS NOT NULL""")
                 con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -281,7 +328,7 @@ class Store:
     def create_task(self, *, task_id: str, repo_root: str, repo_key: str, base_commit: str,
                     branch: str, worktree_path: str, spec_doc: dict, spec_sha256: str,
                     origin_kind: str, origin_session_id: str | None,
-                    spec_timeout_source: str | None = None) -> dict:
+                    spec_timeout_source: str | None = None, reviewer_sources: dict | None = None) -> dict:
         now = time.time()
         def op():
             with self.tx(write=True) as con:
@@ -289,12 +336,12 @@ class Store:
                     """INSERT INTO tasks(id, repo_root, repo_key, base_commit, branch, worktree_path,
                        worktree_state, spec_json, spec_sha256, origin_kind, origin_session_id,
                        status, reason, stop_requested, revision, reviewer_json, created_at, updated_at,
-                       spec_timeout_source)
-                       VALUES (?, ?, ?, ?, ?, ?, 'present', ?, ?, ?, ?, 'queued', NULL, 0, 1, ?, ?, ?, ?)""",
+                       spec_timeout_source, reviewer_sources_json)
+                       VALUES (?, ?, ?, ?, ?, ?, 'present', ?, ?, ?, ?, 'queued', NULL, 0, 1, ?, ?, ?, ?, ?)""",
                     (task_id, repo_root, repo_key, base_commit, branch, worktree_path,
                      json.dumps(spec_doc, ensure_ascii=False), spec_sha256, origin_kind, origin_session_id,
                      json.dumps(spec_doc["reviewer"]) if spec_doc.get("reviewer") else None, now, now,
-                     spec_timeout_source),
+                     spec_timeout_source, json.dumps(reviewer_sources) if reviewer_sources else None),
                 )
         _retry(op)
         return self.get_task(task_id)
@@ -315,6 +362,7 @@ class Store:
         d["acceptance"] = json.loads(d["acceptance_json"]) if d["acceptance_json"] else None
         d["stage"] = json.loads(d["stage_json"]) if d["stage_json"] else None
         d["reviewer"] = json.loads(d["reviewer_json"]) if d["reviewer_json"] else None
+        d["reviewer_sources"] = json.loads(d.pop("reviewer_sources_json") or "{}")
         d["stop_requested"] = bool(d["stop_requested"])
         d["legacy_advisory_completion"] = d["status"] == "completed" and d["reason"] == "CHECKS_FAILED"
         return d
@@ -399,15 +447,33 @@ class Store:
         return bool(row and row['pid'] == os.getpid() and row['pid_identity']
                     and process.identity(row['pid']) == row['pid_identity'])
 
-    def begin_acpx_review(self, task_id: str, run_id: str, round_num: int, request_id: str, bridge: dict) -> bool:
+    @classmethod
+    def _acpx_member_owned(cls, con, row) -> bool:
+        if not cls._acpx_owner(con, row["task_id"], row["run_id"]):
+            return False
+        if not row["member_id"]:
+            return True
+        return con.execute("""SELECT 1 FROM review_groups g JOIN review_members m ON m.group_id = g.id
+                              WHERE g.task_id = ? AND g.run_id = ? AND g.round = ? AND g.state = 'running'
+                                AND m.member_id = ? AND m.state = 'running'""",
+                           (row["task_id"], row["run_id"], row["round"], row["member_id"])).fetchone() is not None
+
+    def begin_acpx_review(self, task_id: str, run_id: str, round_num: int, request_id: str, bridge: dict, *, member_id: str = "") -> bool:
         with self.tx(admission=True) as con:
             if not self._acpx_owner(con, task_id, run_id):
+                return False
+            cfg = json.loads(con.execute("SELECT reviewer_json FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] or "null")
+            if bool(cfg and "members" in cfg) != bool(member_id):
+                return False
+            if member_id and not con.execute("""SELECT 1 FROM review_groups g JOIN review_members m ON m.group_id = g.id
+                    WHERE g.task_id = ? AND g.run_id = ? AND g.round = ? AND g.state = 'running'
+                    AND m.member_id = ? AND m.state = 'running'""", (task_id, run_id, round_num, member_id)).fetchone():
                 return False
             if con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
                            (task_id,)).fetchone():
                 return False
-            con.execute("INSERT INTO acpx_reviews(request_id, task_id, run_id, round, bridge_json) VALUES (?, ?, ?, ?, ?)",
-                        (request_id, task_id, run_id, round_num, json.dumps(bridge)))
+            con.execute("INSERT INTO acpx_reviews(request_id, task_id, run_id, round, bridge_json, member_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        (request_id, task_id, run_id, round_num, json.dumps(bridge), member_id))
             return True
 
     def record_acpx_launch(self, request_id: str, launch: dict) -> bool:
@@ -422,7 +488,7 @@ class Store:
             row = con.execute("SELECT * FROM acpx_reviews WHERE request_id = ?", (request_id,)).fetchone()
             if (not row or row['bridge_closed'] or row['dispatch_json'] or not row['launch_json']
                     or json.loads(row['launch_json'])['launch_id'] != dispatch['launch_id']
-                    or not self._acpx_owner(con, row['task_id'], row['run_id'])):
+                    or not self._acpx_member_owned(con, row)):
                 return False
             launch = json.loads(row['launch_json'])
             launch['witnesses'] = witnesses
@@ -435,7 +501,7 @@ class Store:
         with self.tx(admission=True) as con:
             row = con.execute("SELECT * FROM acpx_reviews WHERE request_id = ?", (request_id,)).fetchone()
             if (row and not row['bridge_closed'] and row[record] and row['cleanup'] == 'pending'
-                    and self._acpx_owner(con, row['task_id'], row['run_id'])):
+                    and self._acpx_member_owned(con, row)):
                 send()
                 return True
             return False
@@ -452,11 +518,13 @@ class Store:
                              bridge_closed = MAX(bridge_closed, ?) WHERE request_id = ?""",
                         (cleanup, bridge_closed, request_id))
 
-    def acpx_review(self, task_id: str, *, unresolved: bool = False) -> dict | None:
+    def acpx_review(self, task_id: str, *, unresolved: bool = False, request_id: str | None = None) -> dict | None:
         with self.tx(write=False) as con:
             where = f"AND {_ACPX_UNRESOLVED}" if unresolved else ""
+            if request_id is not None:
+                where += " AND request_id = ?"
             row = con.execute(f"SELECT * FROM acpx_reviews WHERE task_id = ? {where} ORDER BY rowid DESC LIMIT 1",
-                              (task_id,)).fetchone()
+                              (task_id, request_id) if request_id is not None else (task_id,)).fetchone()
         if row is None:
             return None
         result = dict(row)
@@ -473,6 +541,7 @@ class Store:
                 return False
             require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
                                 (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+            self._require_panel_approval(con, task_id, run_id, product)
             con.execute("UPDATE runs SET phase = 'settled', outcome = 'completed', settled_at = ? WHERE id = ?",
                         (now, run_id))
             con.execute("""UPDATE tasks SET status = 'completed', reason = ?, product_json = ?,
@@ -544,11 +613,16 @@ class Store:
                 if row is None:
                     return False
                 require(expected_revision is None or row["revision"] == expected_revision, "BUSY", task_id)
+                cfg = json.loads(con.execute("SELECT reviewer_json FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] or "null")
+                if cfg and "members" in cfg and not self._acpx_owner(con, task_id, run_id):
+                    return False
                 if acpx:
                     if not self._acpx_owner(con, task_id, run_id):
                         return False
                     require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
                                         (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+                if reason is None:
+                    self._require_panel_approval(con, task_id, run_id, product)
                 status = "blocked" if reason else "completed"
                 con.execute("""UPDATE tasks SET status = ?, reason = ?, product_json = ?,
                                next_step = ?, stage_json = ?, revision = revision + 1, updated_at = ?
@@ -694,6 +768,213 @@ class Store:
                 return [{"run_id": run_id, "attempt": attempt, "checks": checks}
                         for (run_id, attempt), checks in rounds.items()]
         return _retry(op)
+
+    def settle_panel_stop(self, task_id: str, run_id: str, stage: dict | None = None) -> None:
+        from ato import process
+        with self.tx() as con:
+            row = con.execute("""SELECT r.pid, r.pid_identity FROM runs r JOIN tasks t ON t.active_run_id = r.id
+                               WHERE t.id = ? AND r.id = ? AND r.phase = 'running'""", (task_id, run_id)).fetchone()
+            if not row or row["pid"] != os.getpid() or process.identity(os.getpid()) != row["pid_identity"]:
+                return
+            pending = con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                  (task_id,)).fetchone()
+            state, reason = ("blocked", "CLEANUP_BLOCKED") if pending else ("stopped", "STOPPED")
+            now = time.time()
+            con.execute("UPDATE runs SET phase = 'settled', outcome = ?, error_code = ?, settled_at = ? WHERE id = ?",
+                        (state, reason, now, run_id))
+            con.execute("""UPDATE tasks SET status = ?, reason = ?, stage_json = ?, revision = revision + 1,
+                           updated_at = ? WHERE id = ?""", (state, reason, json.dumps(stage), now, task_id))
+
+    def set_reviewer(self, task_id: str, reviewer: dict, *, expected_revision: int) -> None:
+        """CAS under the same worktree lease as run admission and cleanup."""
+        from ato.executor import _ensure_idle
+        with self._worktree_lease(task_id):
+            task = self.get_task(task_id)
+            _ensure_idle(self, task)
+            with self.tx() as con:
+                require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                    (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+                invalidate = task["reviewer"] != reviewer and task["status"] == "completed"
+                changed = con.execute("""UPDATE tasks SET reviewer_json = ?, revision = revision + 1, updated_at = ?,
+                                         status = CASE WHEN ? THEN 'blocked' ELSE status END,
+                                         reason = CASE WHEN ? THEN 'REVIEW_REQUIRED' ELSE reason END,
+                                         next_step = CASE WHEN ? THEN ? ELSE next_step END
+                                         WHERE id = ? AND revision = ?""",
+                                      (json.dumps(reviewer), time.time(), invalidate, invalidate, invalidate,
+                                       f"Run ato project recheck {task_id} for the changed reviewer configuration.",
+                                       task_id, expected_revision)).rowcount
+                require(changed == 1, "BUSY", task_id)
+
+    @staticmethod
+    def _decode_group(row, members) -> dict:
+        group = dict(row)
+        group["verdict"] = json.loads(group.pop("verdict_json") or "null")
+        group["members"] = []
+        for row in members:
+            member = dict(row)
+            member["verdict"] = json.loads(member.pop("verdict_json") or "null")
+            member["config"] = json.loads(member.pop("config_json"))
+            group["members"].append(member)
+        return group
+
+    def review_group(self, task_id: str, group_id: int | None = None) -> dict | None:
+        with self.tx(write=False) as con:
+            row = con.execute("SELECT * FROM review_groups WHERE task_id = ? " +
+                              ("AND id = ? " if group_id is not None else "") + "ORDER BY id DESC LIMIT 1",
+                              (task_id, group_id) if group_id is not None else (task_id,)).fetchone()
+            if row is None:
+                return None
+            group = self._decode_group(row, con.execute(
+                "SELECT * FROM review_members WHERE group_id = ? ORDER BY position", (row["id"],)).fetchall())
+            acpx_rows = con.execute("SELECT * FROM acpx_reviews WHERE task_id = ? AND run_id = ? AND round = ?",
+                                    (task_id, row["run_id"], row["round"])).fetchall()
+            by_member = {r["member_id"]: r for r in acpx_rows}
+            for member in group["members"]:
+                acpx = by_member.get(member["member_id"])
+                if acpx:
+                    receipt = json.loads(acpx["receipt_json"] or "{}")
+                    member["acpx"] = {"request_id": acpx["request_id"],
+                                      "dispatch_recorded": acpx["dispatch_json"] is not None,
+                                      "delivery": receipt.get("delivery", "unknown" if acpx["dispatch_json"] else "not_dispatched"),
+                                      "cleanup": acpx["cleanup"], "bridge_closed": bool(acpx["bridge_closed"]),
+                                      **{k: receipt.get(k) for k in ("transport", "cancel_requested", "cancel_written", "cancel_acknowledged")}}
+            return group
+
+    def review_group_ids(self, task_id: str, *, cursor: int, limit: int) -> tuple[list[int], int]:
+        with self.tx(write=False) as con:
+            rows = con.execute("SELECT id FROM review_groups WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?",
+                               (task_id, cursor, limit)).fetchall()
+            total = con.execute("SELECT COUNT(*) FROM review_groups WHERE task_id = ?", (task_id,)).fetchone()[0]
+            return [r["id"] for r in rows], total
+
+    def begin_review_group(self, task_id: str, run_id: str, round_num: int, *, product_id: str,
+                           product_fingerprint: str, config_sha256: str, members: list[dict]) -> int:
+        from ato.spec import canonical_json, sha256_bytes
+        with self.tx(admission=True) as con:
+            require(self._acpx_owner(con, task_id, run_id), "STOPPED", task_id)
+            require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+            cur = con.execute("""INSERT INTO review_groups(task_id, run_id, round, product_id,
+                                 product_fingerprint, config_sha256, policy, created_at)
+                                 VALUES (?, ?, ?, ?, ?, ?, 'all', ?)""",
+                              (task_id, run_id, round_num, product_id, product_fingerprint, config_sha256, time.time()))
+            group_id = cur.lastrowid
+            for position, member in enumerate(members):
+                con.execute("""INSERT INTO review_members(group_id, member_id, position, config_sha256, config_json)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (group_id, member["id"], position, sha256_bytes(canonical_json(member)), json.dumps(member)))
+            return group_id
+
+    def review_group_owned(self, task_id: str, group_id: int) -> bool:
+        from ato.spec import canonical_json, sha256_bytes
+        with self.tx(write=False) as con:
+            group = con.execute("SELECT * FROM review_groups WHERE id = ? AND task_id = ?",
+                                (group_id, task_id)).fetchone()
+            task = con.execute("SELECT reviewer_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return bool(group and group["state"] == "running" and self._acpx_owner(con, task_id, group["run_id"])
+                        and sha256_bytes(canonical_json(json.loads(task["reviewer_json"]))) == group["config_sha256"])
+
+    def start_review_member(self, task_id: str, group_id: int, member_id: str) -> bool:
+        with self.tx(admission=True) as con:
+            group = con.execute("SELECT * FROM review_groups WHERE id = ? AND task_id = ?",
+                                (group_id, task_id)).fetchone()
+            if not group or group["state"] != "running" or not self._acpx_owner(con, task_id, group["run_id"]):
+                return False
+            return con.execute("""UPDATE review_members SET state = 'running', started_at = ?
+                                  WHERE group_id = ? AND member_id = ? AND state = 'pending'""",
+                               (time.time(), group_id, member_id)).rowcount == 1
+
+    def save_review_member(self, task_id: str, group_id: int, member_id: str, result) -> bool:
+        with self.tx(admission=True) as con:
+            group = con.execute("SELECT * FROM review_groups WHERE id = ? AND task_id = ?",
+                                (group_id, task_id)).fetchone()
+            if not group or group["state"] != "running" or not self._acpx_owner(con, task_id, group["run_id"]):
+                return False
+            return con.execute("""UPDATE review_members SET state = ?, verdict_json = ?, error = ?, session_id = ?,
+                                  finished_at = ? WHERE group_id = ? AND member_id = ? AND state = 'running'""",
+                               ("completed" if result.ok else "error", json.dumps(result.verdict) if result.verdict else None,
+                                None if result.ok else result.code, result.session_id, time.time(), group_id, member_id)).rowcount == 1
+
+    def interrupt_review_group(self, task_id: str, group_id: int, code: str, *, member_id=None, result=None) -> None:
+        # Evidence only: never settle a task, grant approval, or overwrite completed members.
+        with self.tx(admission=True) as con:
+            row = con.execute("SELECT state FROM review_groups WHERE id = ? AND task_id = ?",
+                              (group_id, task_id)).fetchone()
+            if row is None or row["state"] != "running":
+                return
+            now = time.time()
+            if member_id is not None and result is not None:
+                from ato.adapters.base import has_secret, secret_values
+                # Store a late receipt as unaccepted evidence only. Never revive a group.
+                verdict = result.verdict if not has_secret(result.verdict, secret_values()) else None
+                con.execute("""UPDATE review_members SET verdict_json = ?, session_id = ?
+                               WHERE group_id = ? AND member_id = ? AND state = 'running'""",
+                            (json.dumps(verdict) if verdict else None, result.session_id, group_id, member_id))
+            con.execute("UPDATE review_groups SET state = 'incomplete', error = ?, finished_at = ? WHERE id = ?",
+                        (code, now, group_id))
+            con.execute("""UPDATE review_members SET state = CASE WHEN state = 'pending' THEN 'not_run' ELSE 'error' END,
+                           error = ?, finished_at = ? WHERE group_id = ? AND state IN ('pending', 'running')""",
+                        (code, now, group_id))
+
+    def finish_review_group(self, task_id: str, group_id: int) -> dict | None:
+        from ato.joint_review import aggregate, effective_member
+        from ato.spec import canonical_json, sha256_bytes
+        with self.tx(admission=True) as con:
+            row = con.execute("SELECT * FROM review_groups WHERE id = ? AND task_id = ?", (group_id, task_id)).fetchone()
+            if row is None or row["state"] != "running" or not self._acpx_owner(con, task_id, row["run_id"]):
+                return None
+            cfg = con.execute("SELECT reviewer_json FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+            require(sha256_bytes(canonical_json(json.loads(cfg))) == row["config_sha256"], "BUSY", task_id)
+            require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                                (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+            group = self._decode_group(row, con.execute(
+                "SELECT * FROM review_members WHERE group_id = ? ORDER BY position", (group_id,)).fetchall())
+            configured = json.loads(cfg)
+            require(len(group["members"]) == len(configured["members"]) and all(
+                m["state"] == "completed" and m["member_id"] == configured["members"][i]["id"]
+                and m["position"] == i and m["config_sha256"] == sha256_bytes(canonical_json(
+                    effective_member(configured, configured["members"][i])))
+                and m["config_sha256"] == sha256_bytes(canonical_json(m["config"]))
+                for i, m in enumerate(group["members"])), "INVALID_EVIDENCE", task_id)
+            verdict = aggregate(group["members"])
+            now = time.time()
+            con.execute("UPDATE review_groups SET state = 'completed', verdict_json = ?, finished_at = ? WHERE id = ?",
+                        (json.dumps(verdict), now, group_id))
+            con.execute("""INSERT INTO reviews(task_id, run_id, round, reviewer_kind, verdict, verdict_json,
+                           product_id, reviewer_sha256, created_at) VALUES (?, ?, ?, 'panel', ?, ?, ?, ?, ?)""",
+                        (task_id, row["run_id"], row["round"], verdict["verdict"], json.dumps(verdict),
+                         row["product_id"], row["config_sha256"], now))
+            return verdict
+
+    @staticmethod
+    def _require_panel_approval(con, task_id: str, run_id: str, product: dict | None) -> None:
+        from ato.spec import canonical_json, sha256_bytes
+        cfg = json.loads(con.execute("SELECT reviewer_json FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] or "null")
+        if not cfg or "members" not in cfg:
+            return
+        task = con.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        from ato.worktree import tree_fingerprint, shared_links_for
+        task_doc = {**dict(task), "spec": json.loads(task["spec_json"])}
+        require(product is not None and product["product_id"] == "product-" + tree_fingerprint(
+                    task["worktree_path"], ignored=shared_links_for(task_doc)), "PRODUCT_CHANGED", task_id)
+        require(Store._acpx_owner(con, task_id, run_id), "STOPPED", task_id)
+        require(con.execute(f"SELECT 1 FROM acpx_reviews WHERE task_id = ? AND {_ACPX_UNRESOLVED}",
+                            (task_id,)).fetchone() is None, "CLEANUP_BLOCKED", task_id)
+        group = con.execute("""SELECT g.*, r.outcome FROM review_groups g JOIN runs r ON r.id = g.run_id
+                               WHERE g.task_id = ? ORDER BY g.id DESC LIMIT 1""", (task_id,)).fetchone()
+        require(group is not None and group["state"] == "completed" and product is not None
+                and group["product_id"] == product["product_id"]
+                and group["config_sha256"] == sha256_bytes(canonical_json(cfg))
+                and json.loads(group["verdict_json"])["verdict"] == "approve"
+                and (group["run_id"] == run_id or group["outcome"] == "completed"), "INVALID_EVIDENCE", task_id)
+        from ato.joint_review import effective_member
+        members = con.execute("SELECT * FROM review_members WHERE group_id = ? ORDER BY position", (group["id"],)).fetchall()
+        require(len(members) == len(cfg["members"]) and all(
+                m["state"] == "completed" and json.loads(m["verdict_json"])["verdict"] == "approve"
+                and m["member_id"] == cfg["members"][i]["id"] and m["position"] == i
+                and m["config_sha256"] == sha256_bytes(canonical_json(effective_member(cfg, cfg["members"][i])))
+                and m["config_sha256"] == sha256_bytes(canonical_json(json.loads(m["config_json"])))
+                for i, m in enumerate(members)), "INVALID_EVIDENCE", task_id)
 
     def add_review(self, task_id: str, run_id: str, round_num: int, reviewer_kind: str,
                    verdict: dict, session_id: str | None = None, *, product_id: str,

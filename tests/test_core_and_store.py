@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from ato import config, process
 from ato.spec import TaskError, normalize_spec, valid_id
-from ato.store import Store, _DDL
+from ato.store import Store, _DDL, SCHEMA_VERSION
 
 
 def init_repo(path: Path) -> Path:
@@ -118,7 +118,7 @@ class CoreAndStoreTests(unittest.TestCase):
             for _ in range(3):
                 store = Store(db)
                 with sqlite3.connect(db) as con:
-                    self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 2)
+                    self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
                     for table in tables:
                         self.assertEqual(con.execute(f"SELECT {', '.join(columns[table])} FROM {table}").fetchall(), before[table])
                     self.assertEqual(con.execute("PRAGMA integrity_check").fetchone()[0], "ok")

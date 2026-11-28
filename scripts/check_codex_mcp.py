@@ -31,7 +31,7 @@ from ato import config, executor, process
 from ato.store import Store
 
 BASELINE = 'a6cd1ec9eaedd11a88c73464976b4e8f6465c843'
-READS = {'ato_repositories', 'ato_list', 'ato_status', 'ato_diff', 'ato_trace', 'ato_inbox'}
+READS = {'ato_repositories', 'ato_list', 'ato_status', 'ato_diff', 'ato_trace', 'ato_reviews', 'ato_inbox'}
 REQUIRED = READS | {'ato_validate', 'ato_submit'}
 MARKER = 'native-codex-mcp-ok\n'
 

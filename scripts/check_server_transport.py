@@ -203,10 +203,11 @@ async def check_stdio(config_file, task_id):
                 async with ClientSession(*streams, read_timeout_seconds=10) as session:
                     assert (await session.initialize()).server_info.name == "ato"
                     names = {tool.name for tool in (await session.list_tools()).tools}
-                    assert names == {"ato_repositories", "ato_list", "ato_status", "ato_diff", "ato_trace", "ato_inbox"}
+                    assert names == {"ato_repositories", "ato_list", "ato_status", "ato_diff", "ato_trace", "ato_reviews", "ato_inbox"}
                     tool_result(await session.call_tool("ato_repositories", {}))
                     tool_result(await session.call_tool("ato_status", {"task_id": task_id}))
                     tool_result(await session.call_tool("ato_trace", {"task_id": task_id}))
+                    tool_result(await session.call_tool("ato_reviews", {"task_id": task_id, "limit": 2}))
                     tool_result(await session.call_tool("ato_inbox", {"task_id": task_id}))
         assert len(processes) == 1 and processes[0].returncode == 0, "Stdio CLI did not exit cleanly"
     finally:

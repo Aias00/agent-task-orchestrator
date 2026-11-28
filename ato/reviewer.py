@@ -8,7 +8,7 @@ from pathlib import Path
 from ato import config
 from ato.adapters.base import ReviewRequest, ReviewResult, get_reviewer_runner, safe_review_detail, secret_values
 from ato.product import collect_diff
-from ato.spec import REVIEW_VERDICT_SCHEMA, SEVERITIES, CATEGORIES
+from ato.spec import REVIEW_VERDICT_SCHEMA, SEVERITIES, CATEGORIES, require, sha256_bytes, TaskError
 from ato.store import Store
 from ato.worktree import shared_links_for, tree_fingerprint
 
@@ -29,6 +29,14 @@ def build_review_prompt(task: dict, spec: dict, *, round_num: int, previous_find
         lines.append("Checklist:\n" + "\n".join(f"- {item}" for item in reviewer["checklist"]))
     if reviewer.get("design_docs"):
         lines.append("Design docs: " + ", ".join(d["path"] for d in reviewer["design_docs"]))
+    if reviewer.get("id"):
+        lines.append("Reviewer member ID: " + reviewer["id"])
+        # Freeze the design context at base_ref, not the worker's editable copy.
+        from ato.worktree import git_run
+        for doc in reviewer.get("design_docs", []):
+            blob = git_run(Path(task["repo_root"]), "cat-file", "blob", f"{task['base_commit']}:{doc['path']}")[0]
+            require(sha256_bytes(blob) == doc["sha256"], "BINDING_CHANGED", task["id"])
+            lines.append("Frozen design document " + doc["path"] + ":\n" + blob.decode("utf-8"))
     if previous_findings:
         lines.append("Previous round blocker findings to re-verify:\n" + json.dumps(previous_findings, ensure_ascii=False))
     lines.extend([
@@ -56,17 +64,29 @@ def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
                     resume_session_id: str | None = None,
                     previous_findings: list[dict] | None = None,
                     stop_check=None, on_child: object = None, runner_override=None,
-                    max_format_retries: int = 2, store: Store | None = None) -> ReviewResult:
+                    max_format_retries: int = 2, store: Store | None = None,
+                    member_id: str = "", product_id: str | None = None) -> ReviewResult:
     """Execute one read-only review turn and fail closed if the worktree mutates."""
     reviewer_cfg = task.get("reviewer") or spec.get("reviewer")
     if not reviewer_cfg:
         return ReviewResult(ok=True, code="NO_REVIEWER", verdict=None)
+
+    from ato.joint_review import is_panel, run_panel, MAX_PROMPT_BYTES
+    if is_panel(reviewer_cfg):
+        try:
+            return run_panel(task, spec, run_id, round_num=round_num, store=store, product_id=product_id,
+                             previous_findings=previous_findings, stop_check=stop_check,
+                             on_child=on_child, runner_override=runner_override)
+        except TaskError as exc:
+            return ReviewResult(False, exc.code)
 
     wt = Path(task["worktree_path"]).resolve()
     ignored = shared_links_for(task)
     before_fp = tree_fingerprint(wt, ignored=ignored)
 
     runtime = config.ensure_private_dir(config.runtime_dir() / task["id"] / run_id / f"review-{round_num}")
+    if member_id:
+        runtime = config.ensure_private_dir(runtime / member_id)
     prompt = build_review_prompt(task, spec, round_num=round_num, previous_findings=previous_findings)
     agent = reviewer_cfg["agent"]
     req = ReviewRequest(
@@ -81,13 +101,18 @@ def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
         resume_session_id=resume_session_id if reviewer_cfg.get("session_mode", "fresh_only") != "fresh_only" else None,
         timeout_seconds=reviewer_cfg.get("timeout_seconds", 300),
         stop_check=stop_check, on_child=on_child,
-        store=store, run_id=run_id, round_num=round_num,
+        store=store, run_id=run_id, round_num=round_num, member_id=member_id,
     )
     runner = runner_override or get_reviewer_runner(agent["kind"])
     uses_acpx = agent["kind"] == "codex_acpx"
     for retry in range(max(0, max_format_retries) + 1):
         if stop_check is not None and stop_check():
             return ReviewResult(ok=False, code="STOPPED")
+        if member_id:
+            if len(req.prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+                return ReviewResult(False, "REVIEW_PROMPT_TOO_LARGE",
+                                    detail="Full review context exceeds the inline prompt capacity; no findings were dropped.")
+            req = replace(req, runtime_dir=config.ensure_private_dir(runtime / f"format-{retry}"))
         try:
             result = runner(req)
         except Exception:
@@ -96,11 +121,13 @@ def run_review_turn(task: dict, spec: dict, run_id: str, *, round_num: int = 1,
             result = ReviewResult(ok=False, code="ACPX_BRIDGE_FAILED")
         after_fp = tree_fingerprint(wt, ignored=ignored)
         if after_fp != before_fp:
+            if member_id:
+                return replace(result, ok=False, code="MUTATION_VIOLATION", metadata={"before": before_fp, "after": after_fp})
             return ReviewResult(ok=False, code="MUTATION_VIOLATION", metadata={"before": before_fp, "after": after_fp})
         if uses_acpx:
             return result
         if stop_check is not None and stop_check():
-            return ReviewResult(ok=False, code="STOPPED")
+            return replace(result, ok=False, code="STOPPED") if member_id else ReviewResult(ok=False, code="STOPPED")
         if result.code != "INVALID_PROTOCOL":
             return result
         detail = safe_review_detail(ValueError(result.detail), secret_values())

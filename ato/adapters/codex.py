@@ -8,7 +8,7 @@ from pathlib import Path
 from ato import config
 from ato.adapters.base import (
     ReviewRequest, ReviewResult, WorkerRequest, WorkerResult,
-    has_secret, run_bounded_subprocess, safe_review_detail, secret_values, validate_worker_result,
+    record_review_output, review_environment, has_secret, run_bounded_subprocess, safe_review_detail, secret_values, validate_worker_result,
 )
 from ato.spec import REVIEW_VERDICT_SCHEMA, WORKER_RESULT_SCHEMA, strict_json, validate_review_verdict
 
@@ -127,9 +127,10 @@ def run_review(req: ReviewRequest) -> ReviewResult:
 
     secrets = secret_values()
     rc, stdout, stderr, code = run_bounded_subprocess(
-        argv, cwd=req.worktree, env=_clean_env(req.runtime_dir),
+        argv, cwd=req.worktree, env=review_environment(req, _clean_env(req.runtime_dir)),
         prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
     )
+    record_review_output(req, stdout, stderr)
     if code != "OK":
         if b"not logged in" in stderr.lower():
             return ReviewResult(ok=False, code="AUTH_BLOCKED")

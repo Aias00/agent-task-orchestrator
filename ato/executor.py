@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from ato import codex_notify, config, inbox, process, product, reviewer, worktree
+from ato import codex_notify, config, inbox, process, product, reviewer, worktree, joint_review
 from ato.adapters.base import WorkerRequest, get_worker_runner, safe_review_detail, secret_values
 from ato.spec import (
     DEFAULT_WORKER_TIMEOUT_SECONDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
@@ -181,6 +181,7 @@ def submit_normalized(store: Store, norm: NormalizedSpec, *, foreground: bool = 
         spec_doc=norm.document,
         spec_sha256=norm.spec_sha256,
         spec_timeout_source=norm.timeout_source,
+        reviewer_sources=norm.reviewer_member_timeout_sources,
         origin_kind=origin_kind,
         origin_session_id=origin_session,
     )
@@ -249,9 +250,9 @@ def execute_run(store: Store, task_id: str, run_id: str, *,
     try:
         task = store.get_task(task_id)
         review = task.get("reviewer") or task["spec"].get("reviewer") or {}
-        uses_acpx = review.get("agent", {}).get("kind") == "codex_acpx"
+        uses_acpx = joint_review.uses_acpx(review)
         pid = os.getpid()
-        if not store.claim_run_execution(task_id, run_id, pid, process.identity(pid), match_owner=uses_acpx):
+        if not store.claim_run_execution(task_id, run_id, pid, process.identity(pid), match_owner=uses_acpx or joint_review.is_panel(review)):
             return store.get_task(task_id)
         return _execute_claimed_run(store, task_id, run_id, stop_requested=stop_requested,
                                     on_child=on_child, worker_runner=worker_runner,
@@ -270,7 +271,7 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
     spec = task["spec"]
     contract = spec["worker_contract"]
     active_reviewer = task.get("reviewer") or spec.get("reviewer")
-    uses_acpx = bool(active_reviewer and active_reviewer["agent"]["kind"] == "codex_acpx")
+    uses_acpx = joint_review.uses_acpx(active_reviewer)
     worker_cfg = contract.get("agent") or {"kind": "codex"}
     worker_kind = worker_cfg["kind"]
     model = worker_cfg.get("model") or contract.get("model")
@@ -319,7 +320,11 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
     def settle_blocked(reason, next_step, *, outcome="blocked", worker_timeout=None) -> dict:
         blocked_stage = stage(state="blocked")
         notice = _failure_notice(task, run_id, reason)
-        if reason == "CHECKS_FAILED" or worker_timeout is not None:
+        if joint_review.is_panel(active_reviewer):
+            if not store.settle_owned_run(task_id, run_id, reason=reason, product=prod, next_step=next_step,
+                                          stage=blocked_stage, worker_timeout=worker_timeout, notice=notice):
+                store.settle_panel_stop(task_id, run_id, stage(state="stopped"))
+        elif reason == "CHECKS_FAILED" or worker_timeout is not None:
             if stop_requested() or not store.settle_owned_run(
                 task_id, run_id, reason=reason, product=prod, next_step=next_step,
                 stage=blocked_stage, worker_timeout=worker_timeout, acpx=uses_acpx, notice=notice,
@@ -476,35 +481,39 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
             # Each review uses the effective task override and receives prior blocker findings.
             task = store.get_task(task_id)
             active_reviewer = task.get("reviewer") or spec.get("reviewer")
-            uses_acpx = bool(active_reviewer and active_reviewer["agent"]["kind"] == "codex_acpx")
+            uses_acpx = joint_review.uses_acpx(active_reviewer)
             if active_reviewer is not None:
                 max_review_rounds = active_reviewer.get("max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS)
-                if review_kind != active_reviewer["agent"]["kind"]:
+                if review_kind != ("panel" if joint_review.is_panel(active_reviewer) else active_reviewer["agent"]["kind"]):
                     review_session = None
-                review_kind = active_reviewer["agent"]["kind"]
+                review_kind = ("panel" if joint_review.is_panel(active_reviewer) else active_reviewer["agent"]["kind"])
                 review_round += 1
                 category = "review_rework"
                 store.update_task(task_id, stage=stage(stage_id="review", step_id="reviewer"))
                 rev = reviewer.run_review_turn(
                     task, spec, run_id, round_num=review_round, previous_findings=previous_findings,
                     resume_session_id=review_session, stop_check=stop_requested, on_child=on_child,
-                    runner_override=reviewer_runner, store=store,
+                    runner_override=reviewer_runner, store=store, product_id=prod["product_id"],
                 )
                 if rev.code == "STOPPED" or (not uses_acpx and stop_requested()):
                     raise TaskError("STOPPED", task_id)
                 if not rev.ok or rev.verdict is None:
                     detail = safe_review_detail(ValueError(rev.detail), secret_values())
+                    if joint_review.is_panel(active_reviewer):
+                        detail = joint_review.public(detail, task)
                     store.append_event(task_id, "review_failed", {"code": rev.code, "detail": detail}, run_id=run_id)
                     return settle_blocked(rev.code, detail)
                 review_session = rev.session_id or review_session
-                store.add_review(task_id, run_id, review_round, review_kind, rev.verdict, session_id=review_session,
-                                 product_id=prod["product_id"], reviewer_sha256=_reviewer_digest(active_reviewer))
+                if not joint_review.is_panel(active_reviewer):
+                    store.add_review(task_id, run_id, review_round, review_kind, rev.verdict, session_id=review_session,
+                                     product_id=prod["product_id"], reviewer_sha256=_reviewer_digest(active_reviewer))
                 store.append_event(task_id, "review_finished", {"round": review_round, "verdict": rev.verdict["verdict"]}, run_id=run_id)
                 previous_findings = [f for f in rev.verdict["findings"] if f["severity"] == "blocker"]
                 if rev.verdict["verdict"] == "request_changes":
                     review_rework_rounds += 1
                     tree_fp = worktree.tree_fingerprint(wt, ignored=ignored)
-                    blocker_fp = blocker_fingerprint(tree_fp, rev.verdict)
+                    blocker_fp = (sha256_bytes(canonical_json([tree_fp, previous_findings]))
+                                  if joint_review.is_panel(active_reviewer) else blocker_fingerprint(tree_fp, rev.verdict))
                     blocker_keys = {(f["file"], f["category"], " ".join(f["title"].casefold().split()))
                                     for f in previous_findings}
                     if prev_blocker_fp is not None and (blocker_fp == prev_blocker_fp
@@ -518,10 +527,17 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
                         reset_progress()
                     prev_blocker_fp, prev_blocker_keys = blocker_fp, blocker_keys
                     feedback = "Reviewer requested changes:\n" + json.dumps(rev.verdict["findings"], ensure_ascii=False)
+                    if joint_review.is_panel(active_reviewer) and len(feedback.encode("utf-8")) > joint_review.MAX_FEEDBACK_BYTES:
+                        return settle_blocked("REVIEW_FEEDBACK_TOO_LARGE",
+                                              "Complete findings retained. Read ato project reviews " + task_id +
+                                              " before narrowing the repair scope; no blockers were omitted.")
                     paused = repeated_pause()
                     if paused is not None:
                         return paused
                     if review_round >= max_review_rounds:
+                        if joint_review.is_panel(active_reviewer):
+                            return settle_blocked("REVIEW_CHANGES_REQUESTED",
+                                                  f"Review round limit reached. Read ato project reviews {task_id} for all blockers.")
                         return settle_blocked("REVIEW_CHANGES_REQUESTED", "Resolve reviewer blockers: "
                                               + "; ".join(f"{f['file']}: {f['title']}" for f in previous_findings))
                     store.update_task(task_id, stage=stage())
@@ -538,9 +554,9 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
                 if not store.complete_acpx_run(task_id, run_id, prod, stage=completed_stage):
                     raise TaskError("STOPPED", task_id)
             else:
-                store.update_run(run_id, phase="settled", outcome="completed", settled_at=time.time())
-                store.update_task(task_id, status="completed", reason=None, product=prod, next_step=None,
-                                  stage=completed_stage)
+                if not store.settle_owned_run(task_id, run_id, reason=None, product=prod, next_step=None,
+                                              stage=completed_stage):
+                    raise TaskError("STOPPED", task_id)
             store.enqueue_notification(**_terminal_notice(
                 task, run_id, kind="completion",
                 body=f"ATO 任务 {task_id} 已完成。请用 ato status {task_id} 查看产物和检查结果。",
@@ -548,6 +564,9 @@ def _execute_claimed_run(store: Store, task_id: str, run_id: str, *, stop_reques
             return store.get_task(task_id)
     except TaskError as exc:
         if exc.code == "STOPPED":
+            if joint_review.is_panel(active_reviewer):
+                store.settle_panel_stop(task_id, run_id, stage(state="stopped"))
+                return store.get_task(task_id)
             if store.get_task(task_id)["active_run_id"] != run_id:
                 return store.get_task(task_id)
             store.update_run(run_id, phase="settled", outcome="stopped", error_code="STOPPED", settled_at=time.time())
@@ -562,7 +581,7 @@ def request_stop(store: Store, task_id: str) -> dict:
     task = store.update_task(task_id, stop_requested=True)
     if task["active_run_id"]:
         run = store.get_run(task["active_run_id"])
-        acpx = store.acpx_review(task_id)
+        acpx = store.acpx_review(task_id, unresolved=True) or store.acpx_review(task_id)
         # A later worker attempt may have its own child after a review closes.
         if acpx and acpx["run_id"] == run["id"] and (not acpx["bridge_closed"] or run["child_pid"] is None):
             return _stop_acpx_review(store, task_id, run, acpx)
@@ -613,11 +632,11 @@ def _stop_acpx_review(store: Store, task_id: str, run: dict, row: dict) -> dict:
     deadline = time.monotonic() + STOP_GRACE
     while _is_run_live(run) and time.monotonic() < deadline:
         time.sleep(0.05)
-        row = store.acpx_review(task_id)
+        row = store.acpx_review(task_id, request_id=row["request_id"])
         run = store.get_run(run["id"])
     if not row["bridge_closed"]:
         reconcile_cleanup(store, row, stop=True)
-        row = store.acpx_review(task_id)
+        row = store.acpx_review(task_id, request_id=row["request_id"])
     if not _is_run_live(run):
         store.settle_acpx_stop(task_id, run["id"], recovery_blocker(row))
     return task_status_view(store, task_id)
@@ -659,12 +678,30 @@ def resume(store: Store, task_id: str, *, foreground: bool = False,
 
 
 def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_runner=None) -> dict:
+    before = store.get_task(task_id)
+    try:
+        return _recheck(store, task_id, checks_only=checks_only, reviewer_runner=reviewer_runner)
+    except TaskError as exc:
+        task = store.get_task(task_id)
+        if not joint_review.is_panel(task.get("reviewer")) or task["active_run_id"] == before["active_run_id"]:
+            raise
+        run_id = task["active_run_id"]
+        # A late product/cleanup failure must not leave a live-looking recheck.
+        if exc.code == "STOPPED" or not store.settle_owned_run(
+            task_id, run_id, reason=exc.code, product=task["product"],
+            next_step=f"Inspect review evidence and retry recheck only after resolving {exc.code}.",
+        ):
+            store.settle_panel_stop(task_id, run_id)
+        return task_status_view(store, task_id)
+
+
+def _recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_runner=None) -> dict:
     task = store.get_task(task_id)
     _ensure_idle(store, task)
     worktree.verify_worktree(task)
     spec = task["spec"]
     active_rev = task.get("reviewer") or spec.get("reviewer")
-    acpx = active_rev and active_rev["agent"]["kind"] == "codex_acpx"
+    acpx = joint_review.uses_acpx(active_rev)
     owner = (os.getpid(), process.identity(os.getpid()))
     run = store.create_run(task_id, "recheck", expected_revision=task["revision"], owner=owner)
     run_id = run["id"]
@@ -677,7 +714,10 @@ def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_r
         store.update_run(run_id, child_pid=pid, child_pid_identity=birth)
 
     def stopped():
-        store.settle_acpx_stop(task_id, run_id, None)
+        if joint_review.is_panel(active_rev):
+            store.settle_panel_stop(task_id, run_id)
+        else:
+            store.settle_acpx_stop(task_id, run_id, None)
         return task_status_view(store, task_id)
 
     def finish(reason, next_step, *, expected_revision=None, notice=None):
@@ -715,13 +755,16 @@ def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_r
 
     task = store.get_task(task_id)
     active_rev = task.get("reviewer") or spec.get("reviewer")
-    acpx = active_rev and active_rev["agent"]["kind"] == "codex_acpx"
+    acpx = joint_review.uses_acpx(active_rev)
     reason = None
     review_next_step = f"Run `ato project recheck {task_id}` to review this product."
     if checks_only:
         if active_rev:
             prior = store.latest_review(task_id)
-            if (prior is None or prior["product_id"] != prod["product_id"]
+            if joint_review.is_panel(active_rev):
+                if not joint_review.approved_group(store, task_id, prod["product_id"], active_rev):
+                    reason = "REVIEW_REQUIRED"
+            elif (prior is None or prior["product_id"] != prod["product_id"]
                     or prior["reviewer_sha256"] != _reviewer_digest(active_rev)):
                 reason = "REVIEW_REQUIRED"
             elif prior["verdict"] != "approve":
@@ -741,18 +784,25 @@ def recheck(store: Store, task_id: str, *, checks_only: bool = False, reviewer_r
 
     if active_rev:
         rev = reviewer.run_review_turn(task, spec, run_id, round_num=1, runner_override=reviewer_runner,
-                                       stop_check=stop_requested, on_child=on_child, store=store)
+                                       stop_check=stop_requested, on_child=on_child, store=store, product_id=prod["product_id"])
         if rev.code == "STOPPED":
             return stopped()
         if not rev.ok or rev.verdict is None:
             detail = safe_review_detail(ValueError(rev.detail), secret_values())
+            if joint_review.is_panel(active_rev):
+                detail = joint_review.public(detail, task)
             store.append_event(task_id, "review_failed", {"code": rev.code, "detail": detail}, run_id=run_id)
+            if joint_review.is_panel(active_rev):
+                if not store.settle_owned_run(task_id, run_id, reason=rev.code, product=prod, next_step=detail):
+                    return stopped()
+                return task_status_view(store, task_id)
             # Keep the review error, including ACP delivery/cleanup and the mutation tripwire.
             store.update_run(run_id, phase="settled", outcome="blocked", error_code=rev.code, settled_at=time.time())
             store.update_task(task_id, status="blocked", reason=rev.code, product=prod, next_step=detail)
             return task_status_view(store, task_id)
-        store.add_review(task_id, run_id, 1, active_rev["agent"]["kind"], rev.verdict, session_id=rev.session_id,
-                         product_id=prod["product_id"], reviewer_sha256=_reviewer_digest(active_rev))
+        if not joint_review.is_panel(active_rev):
+            store.add_review(task_id, run_id, 1, active_rev["agent"]["kind"], rev.verdict, session_id=rev.session_id,
+                             product_id=prod["product_id"], reviewer_sha256=_reviewer_digest(active_rev))
         store.append_event(task_id, "review_finished", {"round": 1, "verdict": rev.verdict["verdict"]}, run_id=run_id)
         if rev.verdict["verdict"] != "approve":
             reason = "REVIEW_CHANGES_REQUESTED" if rev.verdict["verdict"] == "request_changes" else "REVIEW_BLOCKED"
@@ -803,6 +853,10 @@ def task_status_view(store: Store, task_id: str, *, include_check_history: bool 
         check_history = None
         checks = store.latest_checks(task_id)
     rev = store.latest_review(task_id)
+    panel = joint_review.is_panel(task.get("reviewer") or task["spec"].get("reviewer"))
+    panel_view = joint_review.status(store, task) if panel else None
+    if panel:
+        rev = None  # Panel partial history must never expose a prior legacy approval.
     open_q = store.list_questions(task_id, state="open")
     notices = store.list_notifications(task_id)
     comp = next((n for n in reversed(notices) if n["kind"] == "completion"), None)
@@ -813,7 +867,7 @@ def task_status_view(store: Store, task_id: str, *, include_check_history: bool 
         next_step = (_checks_next_step(task_id, checks) if task["worktree_state"] == "present"
                      else "The historical worktree was removed. Submit a new task to verify the product.")
     acpx_view = None
-    acpx = store.acpx_review(task_id)
+    acpx = store.acpx_review(task_id, unresolved=True) or store.acpx_review(task_id)
     if acpx:
         from ato.adapters.acpx import delivery_of, recovery_blocker
 
@@ -824,6 +878,7 @@ def task_status_view(store: Store, task_id: str, *, include_check_history: bool 
         receipt = acpx["receipt"] or {}
         acpx_view = {
             "run_id": acpx["run_id"], "round": acpx["round"],
+            **({"member_id": acpx["member_id"]} if acpx.get("member_id") else {}),
             "dispatch_recorded": acpx["dispatch"] is not None,
             "delivery": delivery, "transport": receipt.get("transport"),
             "cancel_requested": receipt.get("cancel_requested"),
@@ -878,9 +933,10 @@ def task_status_view(store: Store, task_id: str, *, include_check_history: bool 
             for r in runs
         ],
         "repeated_worker_timeout": _repeated_worker_timeout(task_id, runs),
-        "stage": task["stage"],
+        "stage": joint_review.public(task["stage"], task) if panel else task["stage"],
         "checks": [{"criterion_id": c["criterion_id"], "state": c["state"], "receipt_id": c["receipt_id"]} for c in checks],
         **({"check_history": check_history} if check_history is not None else {}),
+        **({"review_panel": panel_view} if panel else {}),
         "review": ({"round": rev["round"], "reviewer_kind": rev["reviewer_kind"], "verdict": rev["verdict"], "summary": rev["detail"]["summary"]} if rev else None),
         "product": task["product"],
         "acceptance": (task["acceptance"] if not legacy and task["acceptance"] else

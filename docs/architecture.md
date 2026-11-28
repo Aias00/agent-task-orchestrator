@@ -21,7 +21,7 @@ flowchart TD
 ## State Storage
 
 All v2 runtime state lives under `$ATO_HOME/v2/` (default `~/.local/share/ato/v2/`):
-- `ato.db` — SQLite WAL database (`tasks`, `runs`, `checks`, `reviews`, `acpx_reviews`, `questions`, `watchdog_state`, `watchdog_alerts`, `notifications`, `events`)
+- `ato.db` — SQLite WAL database (`tasks`, `runs`, `checks`, `reviews`, `review_groups`, `review_members`, `acpx_reviews`, `questions`, `watchdog_state`, `watchdog_alerts`, `notifications`, `events`)
 - `worktrees/<task_id>/` — isolated Git worktrees on branch `ato/<task_id>`
 - `runtime/<task_id>/<run_id>/` — per-attempt logs, schemas, and sandbox profiles
 - `observer.json` / `observer.lock` — background Observer heartbeat and single-instance lock
@@ -75,3 +75,16 @@ supported AGY enqueue operation that verifies the target session, returns a
 delivery receipt, and can enqueue without starting an agent turn. ATO would
 need an adapter for that operation under its existing notification policy.
 [AGY reviewer invocation](../ato/adapters/agy.py) · [Origin detection](../ato/config.py)
+
+
+## Joint review
+
+`ato/joint_review.py` coordinates 2–8 named sequential members through the existing
+read-only adapters. `review_groups` and `review_members` preserve partial results;
+a transaction writes the complete host aggregate to `reviews`. All-approve is
+required, together with matching product/configuration, owner identity, STOP and
+ACP cleanup checks. Schema version 3 transactionally replaces ACP's old unique
+`(run_id, round)` key with `(run_id, round, member_id)`; old rows use the empty legacy
+identity. No fake rounds or concurrent child management are introduced.
+See [joint-review.md](joint-review.md) for the implementation map and unexecuted
+acceptance plan.

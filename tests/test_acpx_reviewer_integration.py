@@ -105,6 +105,28 @@ class _ReviewCases:
                           f"review-{row['round']}" / "native").exists())
         return row
 
+    def test_joint_two_acp_members_use_independent_sessions_and_same_round(self):
+        self.scenario("normal")
+        make_spec(self.repo, self.spec, reviewer={"members": [
+            {"id": "one", "agent": {"kind": "codex_acpx"}},
+            {"id": "two", "agent": {"kind": "codex_acpx"}},
+        ]})
+        view = _submit(self.repo, self.spec)
+        self.assertEqual(view["status"], "completed", view)
+        self.assertEqual(view["review_panel"]["verdict"], "approve")
+        with self.store.tx(write=False) as con:
+            rows = con.execute("SELECT * FROM acpx_reviews ORDER BY rowid").fetchall()
+        self.assertEqual([r["round"] for r in rows], [1, 1])
+        self.assertEqual([r["member_id"] for r in rows], ["one", "two"])
+        self.assertEqual(len({r["request_id"] for r in rows}), 2)
+        self.assertEqual(len({json.loads(r["dispatch_json"])["turn_id"] for r in rows}), 2)
+        for row in rows:
+            self.assertTrue(row["bridge_closed"])
+            self.assertEqual(row["cleanup"], "verified_gone")
+            native = config.runtime_dir() / row["task_id"] / row["run_id"] / f"review-{row['round']}" / row["member_id"] / "format-0" / "native"
+            self.assertFalse(native.exists())
+        self.assertEqual(len(self.events("prompt")), 2)
+
     def test_normal_review_records_before_send_and_keeps_ato_checks(self):
         self.scenario("normal")
         view = _submit(self.repo, self.spec)

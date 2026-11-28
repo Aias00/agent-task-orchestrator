@@ -34,8 +34,9 @@ def create_server(service, principal):
                                     structuredContent=result, isError=not result["ok"])
 
     return Server("ato", version=__version__, on_list_tools=list_tools, on_call_tool=call_tool,
-                  instructions="Set explicit worker and configured reviewer execution timeouts before validate/submit. "
+                  instructions="Set explicit worker and configured reviewer execution timeouts before validate/submit; panels require a timeout for every member. "
                   "Validation previews effective settings and starts no worker. Inspect receipt timeout/source and poll status. "
+                  "Use ato_reviews pagination for complete panel/member evidence; a partial group is not approval. "
                   "Worker file contents cannot change the outer execution deadline. Reconnect/rediscover tools after schema changes. "
                   "A submitted task is not a completed task. Human answers require human authority.")
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from ato import executor, inbox, product
+from ato import executor, inbox, product, joint_review
 from ato.spec import (TaskError, canonical_json, new_id, normalize_inline_spec, normalize_repository,
                       require, require_id, result_envelope, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS)
 from ato.store import Store
@@ -26,6 +26,12 @@ OPERATIONS = {
     "status": ("read", schema({"task_id": TASK, "check_history": {"type": "boolean"}}, ("task_id",)),
                "Read current task, run, check, reviewer and STOP facts."),
     "diff": ("read", schema({"task_id": TASK, "stat": {"type": "boolean"}}, ("task_id",)), "Read bounded task changes."),
+    "reviews": ("read", schema({"task_id": TASK, "group_id": integer(1, 2**63 - 1),
+                                "review_id": integer(1, 2**63 - 1),
+                                "member_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+                                "section": {"type": "string", "enum": ["groups", "members", "findings", "checked_items", "residual_risks", "legacy"]},
+                                "cursor": integer(0, 2**63 - 1), "limit": integer(1, 20)}, ("task_id",)),
+                "Read paginated joint review history and complete member evidence. Use group_id/member_id and section; follow next_cursor."),
     "trace": ("read", schema({"task_id": TASK}, ("task_id",)), "Read the bounded task event timeline."),
     "stop": ("control", schema({"task_id": TASK, "request_id": KEY}, ("task_id", "request_id")), "Request durable STOP."),
     "resume": ("control", schema({"task_id": TASK, "request_id": KEY,
@@ -45,7 +51,7 @@ for _operation in ("validate", "submit"):
     _scope, _shape, _description = OPERATIONS[_operation]
     MCP_OPERATIONS[_operation] = (_scope, schema(
         {**_shape["properties"], "repo": ALIAS, "spec": task_spec_schema(mcp=True)}, _shape["required"]),
-        _description + " Explicit worker timeout_seconds is required, and reviewer timeout_seconds when configured. "
+        _description + " Explicit worker timeout_seconds is required, plus single reviewer timeout_seconds or every panel members[i].timeout_seconds. "
         "Validate previews effective settings without starting a worker; inspect timeout/source in receipts.")
 
 
@@ -62,6 +68,7 @@ def validate_arguments(operation: str, arguments: dict) -> dict:
             require("\x00" not in value and len(value) >= rule.get("minLength", 0)
                     and len(value) <= rule.get("maxLength", 8192), "USAGE")
             require(not rule.get("pattern") or re.fullmatch(rule["pattern"], value) is not None, "USAGE")
+        require("enum" not in rule or value in rule["enum"], "USAGE")
         if type(value) is int:
             require(rule.get("minimum", value) <= value <= rule.get("maximum", value), "USAGE")
     args = dict(arguments)
@@ -153,7 +160,9 @@ class Service:
             return self.journal.perform(principal.name, args["request_id"], operation, canonical_args, task_id,
                                         effect, prepare=prepare)
         except TaskError as exc:
-            return result_envelope(error=TaskError(exc.code, task_id=exc.task_id))
+            # Only this field-only diagnostic is safe to return verbatim.
+            detail = str(exc) if exc.code == "MCP_REVIEWER_TIMEOUT_REQUIRED" else None
+            return result_envelope(error=TaskError(exc.code, task_id=exc.task_id, detail=detail))
         except Exception:
             return result_envelope(error=TaskError("INTERNAL_ERROR"))
 
@@ -184,6 +193,8 @@ class Service:
             return {"task_id": task_id, "base": task["base_commit"], "branch": task["branch"],
                     "worktree_state": task["worktree_state"],
                     **product.collect_diff(task, include_patch=not args["stat"])}
+        if operation == "reviews":
+            return joint_review.reviews(store, task_id, **{k: v for k, v in args.items() if k != "task_id"})
         if operation == "trace":
             return {"task_id": task_id, "events": store.list_events(task_id)}
         if operation == "inbox":

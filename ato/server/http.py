@@ -16,6 +16,7 @@ ROUTES = [
     ("GET", "/api/v1/tasks/{task_id}", "status"),
     ("GET", "/api/v1/tasks/{task_id}/diff", "diff"),
     ("GET", "/api/v1/tasks/{task_id}/trace", "trace"),
+    ("GET", "/api/v1/tasks/{task_id}/reviews", "reviews"),
     ("POST", "/api/v1/tasks/{task_id}/stop", "stop"),
     ("POST", "/api/v1/tasks/{task_id}/resume", "resume"),
     ("GET", "/api/v1/tasks/{task_id}/inbox", "inbox"),
@@ -198,6 +199,9 @@ def create_app(service):
                         if rule.get("type") == "boolean":
                             require(value in {"true", "false"}, "USAGE")
                             value = value == "true"
+                        if rule.get("type") == "integer":
+                            require(value.isascii() and value.isdecimal() and len(value) <= 19, "USAGE")
+                            value = int(value)
                         params[key] = value
                 else:
                     require(not request.query_params, "USAGE")

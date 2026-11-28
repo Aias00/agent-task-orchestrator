@@ -99,6 +99,16 @@ def task_spec_schema(*, mcp: bool):
         "then": {"properties": {"session_mode": {"const": "fresh_only"}, "agent": {
             "properties": {"model": {"type": "null"}, "effort": {"type": "null"}}}}},
     }]
+    member = schema({"id": text(128, pattern="^" + ID_TOKEN.pattern + "$"),
+                     **{k: v for k, v in reviewer["properties"].items()
+                        if k not in ("max_review_rounds", "design_docs")}},
+                    ("id", "agent") + (("timeout_seconds",) if mcp else ()))
+    member["allOf"] = reviewer["allOf"]
+    panel = schema({"policy": {"type": "string", "enum": ["all"], "default": "all"},
+                    **{k: reviewer["properties"][k] for k in ("max_review_rounds", "checklist", "design_docs")},
+                    "members": array(member, 8, 2, description="Unique stable IDs; independent sequential reviews, all required.")},
+                   ("members",))
+    reviewer = {"oneOf": [reviewer, panel]}
     guard_path = {**RELATIVE_PATH, "maxLength": 1025,
                   "description": "Repository-relative path, optional trailing slash; no control characters, .git segments or .codex/tasks subtree."}
     # Guardrails allow a trailing slash which normalization removes.
@@ -124,6 +134,14 @@ def require_mcp_timeouts(raw: dict) -> None:
     require(type(timeout) is int and MIN_WORKER_TIMEOUT_SECONDS <= timeout <= MAX_WORKER_TIMEOUT_SECONDS,
             "MCP_WORKER_TIMEOUT_REQUIRED")
     reviewer = raw.get("reviewer")
+    if isinstance(reviewer, dict) and "members" in reviewer:
+        require(isinstance(reviewer["members"], list), "INVALID_SPEC")
+        for index, member in enumerate(reviewer["members"]):
+            timeout = member.get("timeout_seconds") if isinstance(member, dict) else None
+            require(type(timeout) is int and MIN_REVIEWER_TIMEOUT_SECONDS <= timeout <= MAX_REVIEWER_TIMEOUT_SECONDS,
+                    "MCP_REVIEWER_TIMEOUT_REQUIRED",
+                    detail=f"spec.reviewer.members[{index}].timeout_seconds must be explicitly set to an integer in [5, 3600].")
+        return
     if reviewer is not None:
         timeout = reviewer.get("timeout_seconds") if isinstance(reviewer, dict) else None
         require(type(timeout) is int and MIN_REVIEWER_TIMEOUT_SECONDS <= timeout <= MAX_REVIEWER_TIMEOUT_SECONDS,

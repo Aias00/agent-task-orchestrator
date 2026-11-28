@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import copy
+from pathlib import Path
 import json
 import re
 import sys
 
-from ato import __version__, config, executor, inbox, observer, product
+from ato import __version__, config, executor, inbox, observer, product, joint_review
 from ato.adapters.base import doctor_all
 from ato.spec import (
     DEFAULT_MAX_REVIEW_ROUNDS, EFFORTS, REVIEWER_KINDS, MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS,
-    TaskError, normalize_repository, normalize_spec,
+    TaskError, normalize_repository, normalize_spec, _normalize_reviewer,
     read_regular_file, require, require_id, result_envelope,
 )
 from ato.store import Store
@@ -91,6 +93,9 @@ def build_parser() -> _Parser:
     spec_opts(cmd(psub, "validate", "Validate and preview a task specification."))
     _opt(cmd(psub, "diff", "Inspect repository changes for a task.", "task_id"), "stat", flag=True)
     cmd(psub, "trace", "Read a bounded task event timeline.", "task_id")
+    history = cmd(psub, "reviews", "Read paginated review groups, members and findings.", "task_id")
+    for name in ("group-id", "member-id", "review-id", "section", "cursor", "limit"):
+        _opt(history, name)
     _opt(cmd(psub, "recheck", "Re-run frozen checks and optional reviewer.", "task_id"), "checks-only", flag=True)
     _opt(cmd(psub, "cleanup", "Commit accepted changes to branch and remove worktree.", "task_id"),
          "confirm", required=True, flag=True)
@@ -99,8 +104,9 @@ def build_parser() -> _Parser:
     asub = agent.add_subparsers(dest="subcommand", required=True)
     _opt(cmd(asub, "doctor", "Inspect installed agent CLI capabilities."), "probe-versions", flag=True)
     cmd(asub, "binding", "Read task origin and reviewer configuration.", "task_id")
-    rev = cmd(asub, "reviewer", "Select or update technical reviewer for a task.", "task_id")
+    rev = cmd(asub, "reviewer", "Update a task reviewer; panels require --reviewer-id for an existing member.", "task_id")
     _opt(rev, "kind", required=True)
+    _opt(rev, "reviewer-id")
     _opt(rev, "model")
     _opt(rev, "effort")
     _opt(rev, "evidence")
@@ -177,6 +183,14 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
                 "worktree_state": task["worktree_state"],
                 **diff,
             }
+        if sub == "reviews":
+            opts = {key: getattr(args, key) for key in
+                    ("group_id", "member_id", "review_id", "section", "cursor", "limit") if hasattr(args, key)}
+            for key in ("group_id", "review_id", "cursor", "limit"):
+                if key in opts:
+                    require(re.fullmatch(r"[0-9]{1,19}", opts[key]) is not None, "USAGE")
+                    opts[key] = int(opts[key])
+            return joint_review.reviews(st, args.task_id, **opts)
         if sub == "trace":
             st.get_task(args.task_id)
             return {"task_id": args.task_id, "events": st.list_events(args.task_id)}
@@ -210,13 +224,20 @@ def dispatch(args, *, store: Store | None = None, worker_runner=None, reviewer_r
                 agent_cfg["model"] = args.model
             if effort:
                 agent_cfg["effort"] = effort
-            existing = dict(task.get("reviewer") or {"session_mode": "fresh_only", "max_review_rounds": DEFAULT_MAX_REVIEW_ROUNDS, "timeout_seconds": 300, "checklist": [], "design_docs": []})
-            if args.kind == "codex_acpx":
-                require(existing["session_mode"] == "fresh_only" and set(agent_cfg) == {"kind"}, "INVALID_SPEC",
-                        detail="codex_acpx requires fresh_only with the host launcher defaults.")
-            existing["agent"] = agent_cfg
-            existing["allowed_kinds"] = sorted(set(existing.get("allowed_kinds") or []) | {args.kind})
-            st.update_task(args.task_id, reviewer=existing)
+            existing = copy.deepcopy(task.get("reviewer") or {"session_mode": "fresh_only", "max_review_rounds": DEFAULT_MAX_REVIEW_ROUNDS, "timeout_seconds": 300, "checklist": [], "design_docs": []})
+            mid = getattr(args, "reviewer_id", None)
+            if joint_review.is_panel(existing):
+                require(mid is not None, "USAGE", detail="Panel editing requires --reviewer-id ID; members cannot be added or removed.")
+                selected = next((m for m in existing["members"] if m["id"] == mid), None)
+                require(selected is not None, "INVALID_SPEC", detail="Unknown reviewer member ID.")
+            else:
+                require(mid is None, "USAGE", detail="--reviewer-id is only valid for a panel.")
+                selected = existing
+            selected["agent"] = agent_cfg
+            selected["allowed_kinds"] = sorted(set(selected.get("allowed_kinds") or []) | {args.kind})
+            existing["design_docs"] = [d["path"] for d in existing.get("design_docs", [])]
+            existing = _normalize_reviewer(existing, Path(task["repo_root"]), task["base_commit"])
+            st.set_reviewer(args.task_id, existing, expected_revision=task["revision"])
             return {"task_id": args.task_id, "reviewer": existing}
         if sub == "ask":
             q = inbox.ask_question(

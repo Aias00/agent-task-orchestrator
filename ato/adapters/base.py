@@ -63,6 +63,7 @@ class ReviewRequest:
     store: Store | None = None
     run_id: str | None = None
     round_num: int = 1
+    member_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,27 @@ class ReviewResult:
     session_id: str | None = None
     metadata: dict = field(default_factory=dict)
     detail: str = ""
+
+
+def record_review_output(req: ReviewRequest, stdout: bytes, stderr: bytes) -> None:
+    """Member-private diagnostic files; never part of public history/trace."""
+    if not req.member_id:
+        return
+    for name, data in (("stdout.log", stdout), ("stderr.log", stderr)):
+        text = data.decode("utf-8", "replace")
+        for secret in sorted(secret_values(), key=len, reverse=True):
+            text = text.replace(secret, "[redacted]")
+        path = req.runtime_dir / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o600)
+
+
+def review_environment(req: ReviewRequest, env: dict[str, str]) -> dict[str, str]:
+    if not req.member_id:
+        return env
+    return {k: v for k, v in env.items() if k not in (
+        "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "ATO_SUBMISSION_KIND", "ATO_ACTOR_FILE",
+        "CLAUDE_CODE_SESSION_ID")}
 
 
 def safe_review_detail(exc: Exception, secrets: tuple[str, ...]) -> str:

@@ -87,3 +87,15 @@ ATO_TEST_ACPX_RUNTIME=/absolute/path/to/acpx/dist/runtime.js python3.12 scripts/
 
 Set `ATO_TEST_ACPX_NODE` to an absolute Node executable if it differs from the
 Node found on your test PATH.
+
+
+Joint panels may contain multiple `codex_acpx` members with distinct stable IDs.
+Each gets a separate bridge, fresh native home, request/dispatch/receipt/cleanup
+journal and real shared group round number. The DB unique key includes member ID;
+legacy rows use an empty member identity. Dispatch/ACK authorization checks the
+owning run and active member. Cleanup and unknown-delivery gates inspect all
+unresolved requests, never just the newest successful member. Provider session
+IDs are scoped to their separate bridge/request identities, not used as member
+IDs. `ato project reviews TASK_ID --group-id N --section members` exposes each
+member's bounded ACP facts. The source migration has not been applied to live
+state by this implementation task.

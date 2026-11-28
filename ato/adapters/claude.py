@@ -9,7 +9,7 @@ import uuid
 from ato import config
 from ato.adapters.base import (
     SANDBOX_EXEC, ReviewRequest, ReviewResult, WorkerRequest, WorkerResult,
-    has_secret, readonly_sandbox_profile, run_bounded_subprocess, safe_review_detail, secret_values,
+    record_review_output, review_environment, has_secret, readonly_sandbox_profile, run_bounded_subprocess, safe_review_detail, secret_values,
     validate_worker_result, worker_sandbox_profile,
 )
 from ato.spec import REVIEW_VERDICT_SCHEMA, WORKER_RESULT_SCHEMA, strict_json, validate_review_verdict
@@ -124,8 +124,9 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     env = dict(os.environ, TMPDIR=str(req.runtime_dir / "tmp"), CLAUDE_CODE_TMPDIR=str(req.runtime_dir / "tmp"))
     secrets = secret_values()
     rc, stdout, stderr, code = run_bounded_subprocess(
-        argv, cwd=req.worktree, env=env, prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
+        argv, cwd=req.worktree, env=review_environment(req, env), prompt=req.prompt, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
     )
+    record_review_output(req, stdout, stderr)
     if code not in ("OK", "PROCESS_ERROR"):
         return ReviewResult(ok=False, code=code)
     terminal, output = _decode_stream(stdout)

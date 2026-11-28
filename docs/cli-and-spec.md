@@ -17,11 +17,12 @@
 | `ato project validate --repo PATH --spec FILE` | Validate and preview normalized spec digest |
 | `ato project diff TASK_ID [--stat]` | Show structured diff summary (and unified patch unless `--stat`) |
 | `ato project trace TASK_ID` | Show bounded task lifecycle event timeline |
+| `ato project reviews TASK_ID [--group-id N] [--member-id ID] [--section NAME] [--cursor N] [--limit N]` | Paginated group/member evidence; see joint-review history below |
 | `ato project recheck TASK_ID [--checks-only]` | Re-run frozen host checks (and reviewer unless `--checks-only`) |
 | `ato project cleanup TASK_ID --confirm` | Retain product commit on branch and remove worktree |
 | `ato agent doctor [--probe-versions]` | Inspect local Codex, Claude, Cursor, AGY, and Pi CLI availability |
 | `ato agent binding TASK_ID` | Inspect task origin, worker adapter, and reviewer config |
-| `ato agent reviewer TASK_ID --kind KIND [--model M] [--effort E]` | Select or change task reviewer |
+| `ato agent reviewer TASK_ID --kind KIND [--reviewer-id ID] [--model M] [--effort E]` | Select or change task reviewer |
 | `ato agent ask TASK_ID --kind K --question Q --reason R` | Open a human question in `ato inbox` |
 | `ato system status` | Inspect v2 runtime, Observer heartbeat, and notification counts |
 | `ato system notification-policy [--repo PATH]` | Inspect global notification and repo mute policy |
@@ -206,3 +207,58 @@ The CLI exit code and JSON `ok` describe the command itself. The Task result
 appears in `data.status`. AGY-origin tasks report
 `completion_notification.state: unsupported`. See the
 [delivery architecture](architecture.md#origin-session-delivery).
+
+
+## Joint-review configuration and history
+
+`reviewer` accepts either the existing single `agent` configuration or a panel
+with 2–8 uniquely named `members`; these forms cannot be mixed. See
+[the design and implementation mapping](joint-review.md) and
+[the complete example](../examples/joint-review.json). All members are mandatory,
+execute sequentially and use `policy: "all"`. Shared and member checklists both
+apply. `max_review_rounds` counts full panel rounds (default 10, range 1..50).
+Each member retains the ordinary reviewer kind/model/effort/session validation.
+CLI/REST default each member timeout to 300 seconds; MCP requires an explicit
+integer 5..3600 for every member. Worker timeout remains independent.
+
+`status.review` keeps its single-reviewer shape. Panels use `review_panel`, with
+configuration, timeout sources, member states, current member, group verdict and
+counts. `complete` means the entire group produced valid results, not that the
+Task passed. Inspect `run_completed`, `config_matches`, `approval_usable` and the
+Task's checks/status/acceptance. Incomplete groups never supply approval.
+A crashed group remains durable evidence and is reported as incomplete while
+its original member states are retained. Resume creates a new run and reviews
+all members again. `recheck --checks-only` can reuse only a complete all-approve
+group with identical product/configuration and a successfully completed run.
+
+History defaults to groups in ascending ID order. `limit` is 1..20 (default 20),
+`cursor` is a nonnegative integer (default 0). Follow `next_cursor` until null:
+
+```sh
+ato project reviews TASK_ID --limit 10
+ato project reviews TASK_ID --group-id 12 --section members
+ato project reviews TASK_ID --group-id 12 --section findings --cursor 0 --limit 10
+ato project reviews TASK_ID --group-id 12 --member-id security --section findings
+ato project reviews TASK_ID --group-id 12 --member-id security --section checked_items
+ato project reviews TASK_ID --group-id 12 --section residual_risks
+ato project reviews TASK_ID --section legacy
+ato project reviews TASK_ID --review-id 3 --section findings
+```
+
+The groups/legacy cursors are last-seen DB IDs; selected evidence uses array
+offsets. Keep the same task, filters and section across pages. Member details
+include the complete summary/configuration and evidence counts. Raw member
+findings remain separate from the aggregate; aggregate sources contain
+`member_id` and the original `finding_id` within that group. To read an incomplete
+group's available findings, select its completed/error member explicitly. ACP
+members also expose bounded dispatch/delivery/cleanup facts; native sessions and
+runtime logs remain private. Findings are never silently truncated.
+
+`ato agent binding TASK_ID` shows every member configuration. Updating an existing
+panel requires `--reviewer-id ID`; it cannot silently become a single reviewer.
+Updates require idle state and revision/worktree fencing and revalidate the entire
+configuration. A changed completed task becomes `REVIEW_REQUIRED`. Member addition
+or removal belongs in a new task spec. Full recheck invokes the whole panel.
+
+The implementation is present in source; tests and deployment await separate
+user authorization. See [the pending acceptance report](joint-review-implementation.md).

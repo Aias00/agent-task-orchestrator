@@ -25,12 +25,16 @@ An already dispatched worker executes its task; it must not dispatch nested ATO 
    authorized, manual criteria when human acceptance is required). Explicitly set
    `worker_contract.timeout_seconds` to an integer 5..7200 based on the task.
    If a reviewer is configured, explicitly set `reviewer.timeout_seconds` to an
-   integer 5..3600. New MCP requests have no implicit execution timeout defaults.
+   integer 5..3600. For a 2–8 member joint panel, set that timeout on every
+   `reviewer.members[i]` instead; IDs must be unique and `policy` is `all`.
+   See [the panel spec example](templates/joint-review-spec.example.json).
+   New MCP requests have no implicit execution timeout defaults.
    Optional guardrails are `protected_paths` and `forbid_delete_paths`.
 3. Call `ato_validate({"repo": ALIAS, "spec": SPEC})`. Require `ok:true` and
    `data.valid:true`. The transport preview returns `repo`, `valid`, `spec_sha256`,
    `base_commit`, `worker_kind`, `sandbox`, `timeout_seconds`, `timeout_source`, and
-   `reviewer_timeout_seconds` / `reviewer_timeout_source` when configured. Inspect
+   `reviewer_timeout_seconds` / `reviewer_timeout_source` for single review, or
+   `reviewer.members[].timeout_seconds/timeout_source` for a panel. Inspect
    these effective values before submission; MCP explicit timeouts have source
    `spec`. Validation starts no worker. A file read inside the worker cannot change
    its outer execution deadline. MCP network/request timeouts are separate.
@@ -60,6 +64,12 @@ mutation merely because the client could not parse its reply.
   current status, reason, execution, checks/history, review, product and pending.
   Use `ato_diff({"task_id": ID, "stat": true})` for the summary, `stat:false`
   for the bounded patch, and `ato_trace({"task_id": ID})` for bounded events.
+  Joint panels expose `review_panel` in status. Use `ato_reviews({"task_id": ID})`
+  for history and then `group_id`, `member_id`, `section` and `next_cursor` for
+  complete evidence. Partial groups, unknown ACP outcomes and a member error
+  are not approval. `complete` describes the group; `approval_usable` also needs
+  a completed run and matching configuration/product. Check task status and
+  manual acceptance separately. Never infer a pass from a truncated trace.
 - Poll status/inbox at a bounded cadence only while this controller is executing
   (e.g. 5 seconds, back off to 30 seconds). On a local wait deadline retain the
   Task ID and report current facts; it does not stop the task or authorize a retry.

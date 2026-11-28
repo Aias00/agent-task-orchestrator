@@ -188,7 +188,10 @@ def reconcile_cleanup(store: Store, row: dict, *, stop: bool = False) -> bool:
     closed = bridge_gone and cleanup in ("verified_gone", "no_process")
     store.record_acpx_cleanup(row["request_id"], cleanup if closed else "unknown", bridge_closed=closed)
     if closed:
-        home = config.runtime_dir() / row["task_id"] / row["run_id"] / f"review-{row['round']}" / "native"
+        home = config.runtime_dir() / row["task_id"] / row["run_id"] / f"review-{row['round']}"
+        if row.get("member_id"):
+            home = home / row["member_id"] / "format-0"
+        home = home / "native"
         shutil.rmtree(home, ignore_errors=True)
     return closed
 
@@ -355,7 +358,7 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     try:
         birth = process.group_birth(proc.pid)
         if not birth or not store.begin_acpx_review(
-            req.task_id, req.run_id, req.round_num, request_id, {"pid": proc.pid, "birth": birth}
+            req.task_id, req.run_id, req.round_num, request_id, {"pid": proc.pid, "birth": birth}, member_id=req.member_id
         ):
             return ReviewResult(False, "ACPX_DISPATCH_REJECTED")
         admitted = True
@@ -371,7 +374,7 @@ def run_review(req: ReviewRequest) -> ReviewResult:
         proc.stdin.close()
         proc.stdout.close()
         if admitted:
-            row = store.acpx_review(req.task_id)
+            row = store.acpx_review(req.task_id, request_id=request_id)
             if row["launch"] is None and bridge and bridge.observed_launch:
                 # The first launch commit may have contended. Keep the identity
                 # already verified while the bridge still parented the child.
@@ -380,11 +383,11 @@ def run_review(req: ReviewRequest) -> ReviewResult:
                     store.record_acpx_launch(request_id, observed)
                 finally:
                     process.stop_owned_group(observed["pid"], observed["birth"])
-                row = store.acpx_review(req.task_id)
+                row = store.acpx_review(req.task_id, request_id=request_id)
             if not row["bridge_closed"]:
                 reconcile_cleanup(store, row, stop=True)
         else:
             shutil.rmtree(home, ignore_errors=True)
 
-    row = store.acpx_review(req.task_id)
+    row = store.acpx_review(req.task_id, request_id=request_id)
     return bridge.result(row) if bridge else ReviewResult(False, recovery_blocker(row) or "ACPX_BRIDGE_FAILED")

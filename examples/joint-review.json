@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "repo": ".",
+  "base_ref": "HEAD",
+  "worker_contract": {
+    "objective": "Implement the agreed feature",
+    "scope": "Only agreed repository files",
+    "authorization": "Local changes; tests await separate authorization",
+    "timeout_seconds": 1800,
+    "acceptance": [
+      {
+        "id": "implementation",
+        "kind": "manual",
+        "description": "Implementation review; tests pending authorization"
+      }
+    ]
+  },
+  "reviewer": {
+    "policy": "all",
+    "max_review_rounds": 10,
+    "checklist": [
+      "核对目标覆盖、兼容性和失败恢复"
+    ],
+    "design_docs": [],
+    "members": [
+      {
+        "id": "correctness",
+        "agent": {
+          "kind": "codex"
+        },
+        "timeout_seconds": 600,
+        "session_mode": "fresh_only",
+        "checklist": [
+          "状态机、竞态与幂等"
+        ]
+      },
+      {
+        "id": "security",
+        "agent": {
+          "kind": "claude"
+        },
+        "timeout_seconds": 600,
+        "session_mode": "fresh_only",
+        "checklist": [
+          "权限边界、凭据和只读约束"
+        ]
+      }
+    ]
+  }
+}

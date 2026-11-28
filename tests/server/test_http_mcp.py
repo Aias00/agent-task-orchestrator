@@ -74,6 +74,23 @@ class TransportTests(ServerFixture, unittest.IsolatedAsyncioTestCase):
                 await session.initialize()
                 yield session
 
+    async def test_joint_review_http_pagination_and_mcp_read_discovery(self):
+        task = self.task()
+        tid = task["id"]
+        response = await self.client.get(f"/api/v1/tasks/{tid}/reviews?limit=2&cursor=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["items"], [])
+        bad = await self.client.get(f"/api/v1/tasks/{tid}/reviews?cursor=-1")
+        self.assertEqual(bad.status_code, 400)
+        denied = await self.client.get(f"/api/v1/tasks/{tid}/reviews", headers={"Authorization": "Bearer " + READER_TOKEN})
+        self.assertEqual(denied.status_code, 404)
+        async with self.sdk() as session:
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+            self.assertIn("ato_reviews", tools)
+            self.assertEqual(tools["ato_reviews"].input_schema, MCP_OPERATIONS["reviews"][1])
+            result = await session.call_tool("ato_reviews", {"task_id": tid, "limit": 2})
+            self.assertFalse(result.is_error)
+
     async def test_nested_discovery_and_raw_timeout_policy_match_http_and_stdio(self):
         before = self.store.list_tasks()
         async with self.sdk() as http, self.stdio_sdk() as stdio:

@@ -1,6 +1,6 @@
 # 多方联合审阅
 
-状态：2026-11-28 设计并进入实现；测试待用户通知。设计基线 `main@9f8ddfa`。用户要求“设计方案并实现”，本阶段不授权发布、部署或真实审阅调用。
+状态：2026-11-28 实现完成，测试待用户通知。仅做源码实现与人工静态审查，未运行测试、构建、provider、真实 DB 迁移或部署。设计基线 `main@9f8ddfa`。用户要求“设计方案并实现”，本阶段不授权发布、部署或真实审阅调用。
 
 ## 目标与首版边界
 
@@ -102,3 +102,26 @@ ACP 现有 UNIQUE(run_id, round) 不能容纳同一轮多个 ACP 成员；需要
 | 回归 | 旧worker/单reviewer/重试/无进展/通知/独立checks行为保持 |
 
 后续仅获测试授权后执行 `python3.12 scripts/run_tests.py`、带官方SDK的server套件及传输检查。测试全部使用临时 ATO_HOME/CODEX_HOME 和离线fixtures；真实provider资格另行授权。实现报告必须注明“实现完成，测试待用户通知”，并列出未完成或设计偏差。
+
+
+## 实现映射（2026-11-28）
+
+| 设计层 | 实现位置 |
+| --- | --- |
+| 互斥单方/panel 配置、2–8 成员、旧 digest | `ato/spec.py` |
+| MCP 成员显式 timeout、REST 默认、完整嵌套 schema、旧幂等回放 | `ato/server/spec_schema.py`、`ato/server/service.py` |
+| 全体 pending、成员逐次落盘、完整组原子聚合、旧 DB 升级 | `ato/store.py`，schema version 3 |
+| 顺序独立执行、all、无损来源合并、容量暂停 | `ato/joint_review.py`、`ato/reviewer.py` |
+| 会话、每成员/格式重试 runtime、独立日志 | `ato/adapters/base.py`、`codex.py`、`claude.py`、`agy.py` |
+| ACP `(run_id, round, member_id)`、request 精确读取、owner/cleanup | `ato/store.py`、`ato/adapters/acpx.py` |
+| worker 统一退修、全体复审、STOP、recheck/checks-only、原子结算 | `ato/executor.py` |
+| 状态/历史/原始成员意见/聚合意见/ACP 摘要、分页与脱敏 | `ato/joint_review.py`、`ato/cli.py`、`ato/server/service.py`、`ato/server/http.py`；MCP 从 manifest 自动发现 |
+| idle + worktree lease + revision CAS 的成员编辑 | `ato/cli.py`、`Store.set_reviewer` |
+| 离线测试代码 | `tests/test_joint_review.py`、`tests/test_joint_review_service.py`；既有 ACP、SDK、schema 测试补充 |
+| 操作文档与安装 skill | `docs/cli-and-spec.md`、`docs/mcp-api.md`、`skills/ato/`、`examples/joint-review.json` |
+
+实现细节与验收交接见 [联合审阅实现报告](joint-review-implementation.md)。
+首版选择设计允许的容量暂停分支：完整 worker 反馈超过 64 KiB 时以
+`REVIEW_FEEDBACK_TOO_LARGE` 暂停，全部意见仍保留在 DB 和分页查询中；不创建
+未经 sandbox 可读性验证的外部反馈文件。reviewer 完整提示词超过 128 KiB 时
+以 `REVIEW_PROMPT_TOO_LARGE` 暂停，同样不截断设计文档或历史 blocker。

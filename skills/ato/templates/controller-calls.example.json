@@ -42,6 +42,7 @@
   "list": {"repo": "demo"},
   "status": {"task_id": "task-00000000000000000000000000000001", "check_history": true},
   "diff": {"task_id": "task-00000000000000000000000000000001", "stat": true},
+  "reviews": {"task_id": "task-00000000000000000000000000000001", "limit": 20},
   "trace": {"task_id": "task-00000000000000000000000000000001"},
   "inbox": {"task_id": "task-00000000000000000000000000000001"},
   "stop": {"task_id": "task-00000000000000000000000000000001", "request_id": "example-stop-00000000000000000000000000000002"},

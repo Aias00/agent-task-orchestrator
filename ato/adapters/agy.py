@@ -8,7 +8,7 @@ from pathlib import Path
 from ato import config
 from ato.adapters.base import (
     SANDBOX_EXEC, ReviewRequest, ReviewResult,
-    has_secret, readonly_sandbox_profile, run_bounded_subprocess, safe_review_detail, secret_values,
+    record_review_output, review_environment, has_secret, readonly_sandbox_profile, run_bounded_subprocess, safe_review_detail, secret_values,
 )
 from ato.spec import REVIEW_VERDICT_SCHEMA, strict_json, validate_review_verdict
 
@@ -49,13 +49,14 @@ def run_review(req: ReviewRequest) -> ReviewResult:
     secrets = secret_values()
     try:
         rc, stdout, stderr, code = run_bounded_subprocess(
-            argv, cwd=req.worktree, env=env, timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
+            argv, cwd=req.worktree, env=review_environment(req, env), timeout=req.timeout_seconds, stop_check=req.stop_check, on_child=req.on_child,
         )
     except OSError as exc:
         if getattr(exc, "errno", None) == 7:  # E2BIG
             return ReviewResult(ok=False, code="REVIEW_PROMPT_TOO_LARGE")
         return ReviewResult(ok=False, code="PROCESS_ERROR")
 
+    record_review_output(req, stdout, stderr)
     if code != "OK":
         if b"not logged in" in stderr.lower():
             return ReviewResult(ok=False, code="AUTH_BLOCKED")

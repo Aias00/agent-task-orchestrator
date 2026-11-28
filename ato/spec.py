@@ -304,6 +304,7 @@ class NormalizedSpec:
     spec_sha256: str
     timeout_source: str = "default"
     reviewer_timeout_source: str | None = None
+    reviewer_member_timeout_sources: dict | None = None
 
     def preview(self) -> dict:
         preview = {
@@ -313,6 +314,11 @@ class NormalizedSpec:
             "timeout_seconds": self.document["worker_contract"]["timeout_seconds"],
             "timeout_source": self.timeout_source,
         }
+        if (self.document.get("reviewer") or {}).get("members"):
+            preview["reviewer"] = {**self.document["reviewer"], "execution": "sequential",
+                "members": [{**m, "timeout_source": (self.reviewer_member_timeout_sources or {}).get(m["id"], "unknown")}
+                            for m in self.document["reviewer"]["members"]]}
+            return preview
         if self.document.get("reviewer"):
             preview.update(
                 reviewer_timeout_seconds=self.document["reviewer"]["timeout_seconds"],
@@ -437,6 +443,26 @@ def _normalize_worker_contract(raw: object) -> dict:
 def _normalize_reviewer(raw: object, repo: Path, base: str) -> dict | None:
     if raw is None:
         return None
+    if isinstance(raw, dict) and "members" in raw:
+        _fields(raw, ("members",), ("policy", "max_review_rounds", "checklist", "design_docs"))
+        require(raw.get("policy", "all") == "all", "INVALID_SPEC")
+        members = raw["members"]
+        require(isinstance(members, list) and 2 <= len(members) <= 8, "INVALID_SPEC")
+        # Reuse the single-reviewer constraints without changing its canonical form.
+        common = _normalize_reviewer({"agent": {"kind": "codex"},
+                    **{k: v for k, v in raw.items() if k not in ("members", "policy")}}, repo, base)
+        normalized, seen = [], set()
+        for member in members:
+            _fields(member, ("id", "agent"), ("allowed_kinds", "session_mode", "timeout_seconds", "checklist"))
+            mid = member["id"]
+            require(isinstance(mid, str) and ID_TOKEN.fullmatch(mid) is not None and mid not in seen,
+                    "INVALID_SPEC")
+            seen.add(mid)
+            cfg = _normalize_reviewer({k: v for k, v in member.items() if k != "id"}, repo, base)
+            normalized.append({"id": mid, **{k: v for k, v in cfg.items()
+                                              if k not in ("max_review_rounds", "design_docs")}})
+        return {"policy": "all", "max_review_rounds": common["max_review_rounds"],
+                "checklist": common["checklist"], "design_docs": common["design_docs"], "members": normalized}
     _fields(raw, ("agent",), ("allowed_kinds", "session_mode", "max_review_rounds",
                               "timeout_seconds", "checklist", "design_docs"), code="INVALID_SPEC")
     assert isinstance(raw, dict)
@@ -575,6 +601,8 @@ def normalize_spec_document(repo: str | Path, raw: dict, *, spec_directory: Path
     return NormalizedSpec(
         repository=repository, document=doc, canonical=canonical, spec_sha256=sha256_bytes(canonical),
         timeout_source="spec" if "timeout_seconds" in raw["worker_contract"] else "default",
+        reviewer_member_timeout_sources={m["id"]: "spec" if "timeout_seconds" in m else "default"
+                                         for m in (raw.get("reviewer") or {}).get("members", [])} or None,
         reviewer_timeout_source=(
             "spec" if "timeout_seconds" in raw["reviewer"] else "default"
         ) if doc["reviewer"] is not None else None,

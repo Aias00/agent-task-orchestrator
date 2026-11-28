@@ -157,3 +157,11 @@ Codex remains unbound, AGY remains unsupported. MCP stop/resume of an existing
 native-origin task preserves its origin. Do not forge a binding to recover a
 notification, replace native notification mechanisms, or promise background
 follow-up when this controller is not running.
+
+
+Joint-review schema upgrades add `ato_reviews` (read scope) and a nested panel
+branch in `reviewer`. Clients must refresh discovery after an authorized update.
+For new MCP submissions, supply each `members[i].timeout_seconds`; the worker
+execution deadline is separate. See [the controller contract](controller.md) and
+[panel template](../templates/joint-review-spec.example.json). Source availability
+does not establish that a running MCP service has been updated or tested.

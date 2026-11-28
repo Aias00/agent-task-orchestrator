@@ -16,6 +16,7 @@ using null. Nested nullable fields are identified in the discovered spec schema.
 | `ato_list` | optional `repo` | read | `tasks:[{task_id,repo,status,reason,updated_at}]` |
 | `ato_status` | `task_id`, optional `check_history` (false) | read | status/execution/checks/review/product/pending and notification facts |
 | `ato_diff` | `task_id`, optional `stat` (false) | read | `task_id, base, branch, worktree_state, summary, files`; bounded `patch` unless stat |
+| `ato_reviews` | `task_id`; optional `group_id`, `member_id`, `review_id`, `section`, `cursor`, `limit` | read | paginated `items`, `total`, `next_cursor`; full member/aggregate evidence |
 | `ato_trace` | `task_id` | read | `task_id, events` (bounded) |
 | `ato_inbox` | `task_id` | read | `requests, count` (open questions for this task only) |
 | `ato_stop` | `task_id`, `request_id` | control | status receipt; poll fresh cleanup facts |
@@ -147,3 +148,41 @@ default 3), guardrail/check repair and repeated-no-progress counters remain
 separate. `max_no_progress_rounds` defaults to 2 (1..10); `REPEATED_NO_PROGRESS`
 and `REVIEW_CHANGES_REQUESTED` are blockers to inspect, not reasons to resubmit.
 Watchdog alerts are advisory; healthy review rework is not execution failure.
+
+
+## Joint panels and complete evidence
+
+Use either the existing single `reviewer.agent` shape or `reviewer.members`
+(2..8); never combine them. Members require unique stable `id`, `agent` and an
+explicit MCP `timeout_seconds` (integer 5..3600). Supported kinds remain codex,
+claude, agy, codex_acpx; ACP remains fresh-only with host defaults. Shared and
+member checklists apply together. `policy` supports only `all`; execution is
+sequential and max rounds counts entire groups. See
+[the panel example](../templates/joint-review-spec.example.json).
+
+`ato_reviews` requires read scope and the task's repository authorization. Default
+`section: "groups"` lists groups; `limit` is 1..20, default 20. Follow `next_cursor`
+until null while retaining task/filters/section. Listings use ascending DB ID
+cursors, detail arrays use offsets. With `group_id`, use `section: "members"` for
+complete summaries, configs and bounded ACP facts. `findings`, `checked_items`,
+`residual_risks` return aggregate evidence or, with `member_id`, the original
+member's evidence. An incomplete group has no aggregate; select a member.
+Aggregate sources reference member ID and original finding ID within the group.
+`section: "legacy"` lists old single reviews; `review_id` plus an evidence section
+reads them. Neither native sessions nor raw runtime logs are public.
+
+Do not equate one member's approve, a historical group, `complete`, or STOP
+acknowledgment with task completion. Inspect `review_panel.state`, `verdict`,
+`config_matches`, `run_completed`, `approval_usable`, and task checks/pending.
+A failed member stops remaining execution; blocked/request_changes receipts are
+collected from every member. Rework addresses all blockers and the next round
+reviews everyone again. Full recheck reviews everyone. Checks-only reuse requires
+a complete same-product/same-config all-approve group from a completed run.
+
+No control mutation tool was added. Authorized local editing uses
+`ato agent reviewer TASK_ID --reviewer-id ID --kind KIND` for an existing member;
+it requires idle/revision fencing and invalidates changed approvals. Add/remove
+members in a new task spec. Capacity errors retain all findings: inspect history
+and resolve the capacity/scope issue, never discard blockers or blindly resume.
+This extension is implemented in source; tests and deployed-server updates still
+require separate authorization. Refresh discovery only after the actual update.

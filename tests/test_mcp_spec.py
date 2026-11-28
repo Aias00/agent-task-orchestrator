@@ -42,7 +42,7 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual(acceptance["items"]["allOf"][0]["then"]["required"], ["checks"])
             checks = acceptance["items"]["properties"]["checks"]["anyOf"][0]
             self.assertEqual((checks["maxItems"], checks["items"]["maxItems"]), (32, 128))
-            reviewer = props["reviewer"]
+            reviewer = props["reviewer"]["oneOf"][0]
             self.assertEqual(set(reviewer["required"]), {"agent", "timeout_seconds"})
             self.assertIn("null", reviewer["type"])
             self.assertEqual(reviewer["properties"]["agent"]["properties"]["kind"]["enum"], list(REVIEWER_KINDS))
@@ -51,10 +51,13 @@ class SchemaTests(unittest.TestCase):
             for name, minimum, maximum, default in (
                     ("worker_contract", MIN_WORKER_TIMEOUT_SECONDS, MAX_WORKER_TIMEOUT_SECONDS, DEFAULT_WORKER_TIMEOUT_SECONDS),
                     ("reviewer", MIN_REVIEWER_TIMEOUT_SECONDS, MAX_REVIEWER_TIMEOUT_SECONDS, DEFAULT_REVIEWER_TIMEOUT_SECONDS)):
-                timeout = props[name]["properties"]["timeout_seconds"]
+                branch = props[name]["oneOf"][0] if name == "reviewer" else props[name]
+                timeout = branch["properties"]["timeout_seconds"]
                 self.assertEqual((timeout["type"], timeout["minimum"], timeout["maximum"]), ("integer", minimum, maximum))
                 self.assertNotIn("default", timeout)
                 rest = OPERATIONS[operation][1]["properties"]["spec"]["properties"][name]
+                if name == "reviewer":
+                    rest = rest["oneOf"][0]
                 self.assertNotIn("timeout_seconds", rest["required"])
                 self.assertEqual(rest["properties"]["timeout_seconds"]["default"], default)
         rest_body = openapi()["paths"]["/api/v1/tasks"]["post"]["requestBody"]["content"]["application/json"]["schema"]

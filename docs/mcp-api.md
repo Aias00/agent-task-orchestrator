@@ -235,6 +235,7 @@ curl --fail-with-body -H "Authorization: Bearer $ATO_SERVER_TOKEN_BOT" \
 | GET | `/api/v1/tasks` | optional query `repo` alias |
 | GET | `/api/v1/tasks/{task_id}` | optional query `check_history=true\|false` |
 | GET | `/api/v1/tasks/{task_id}/diff` | optional query `stat=true\|false` |
+| GET | `/api/v1/tasks/{task_id}/reviews` | optional `group_id`, `member_id`, `review_id`, `section`, `cursor`, `limit` (1..20); read scope |
 | GET | `/api/v1/tasks/{task_id}/trace` | none; bounded existing event timeline |
 | GET | `/api/v1/tasks/{task_id}/inbox` | none; open questions for this task only |
 | POST | `/api/v1/tasks/{task_id}/stop` | empty body or `{}`; Idempotency-Key |
@@ -257,7 +258,7 @@ session ID grants authority. Per-principal SDK instances prevent identity crosso
 A JSON-RPC message ID is **not** an operation idempotency key.
 
 The tools are `ato_repositories`, `ato_validate`, `ato_submit`, `ato_list`,
-`ato_status`, `ato_diff`, `ato_trace`, `ato_stop`, `ato_resume`, `ato_inbox`,
+`ato_status`, `ato_diff`, `ato_trace`, `ato_reviews`, `ato_stop`, `ato_resume`, `ato_inbox`,
 `ato_answer`. `tools/list` shows only tools permitted by the principal's scopes;
 direct calls are independently authorized. Task and question IDs are tool
 arguments and mutations require a `request_id` argument. New MCP validate/submit
@@ -459,3 +460,34 @@ specs, async dispatch/origin/environment, persistent collision/restart/concurren
 intents, HTTP routes/errors/limits and real SDK tool calls. Only the recorded local
 dependency/platform combination is qualified. Public HTTPS/proxy behavior, Grok Bot,
 real model execution and the selected deployment host remain unqualified.
+
+
+## Joint-review extension (source implemented; tests/deployment pending)
+
+The reviewer discovery schema is a `oneOf`: the legacy nullable single-reviewer
+object or a panel object. The latter has `members` (2..8), `policy` (`all`),
+`max_review_rounds`, `checklist`, `design_docs`. Each member has a stable unique
+`id`, `agent`, and optional `allowed_kinds`, `session_mode`, `checklist`;
+`timeout_seconds` is mandatory for new MCP validate/submit intents. Missing or
+invalid values return `MCP_REVIEWER_TIMEOUT_REQUIRED` naming
+`spec.reviewer.members[i].timeout_seconds`. Existing journal replay still precedes
+new-intent validation. REST retains per-member defaults. Validation previews
+`reviewer.execution: "sequential"` and every member's effective timeout/source.
+
+Read evidence using `ato_reviews` or `GET /api/v1/tasks/{task_id}/reviews` with the
+same arguments. `section` is `groups` (default), `members`, `findings`,
+`checked_items`, `residual_risks`, or `legacy`. Select `group_id` for member or
+aggregate evidence; add `member_id` for one member's original receipt. Legacy
+single-reviewer evidence uses `section: "legacy"`, then `review_id` with an evidence
+section. Responses include `items`, `total`, `next_cursor` and selected identities.
+The cursor is a group/review ID for listings, otherwise an array offset. Limits
+are 1..20, integer cursors 0..2^63-1. No runtime path, native session or raw log is
+returned. All reads retain principal read-scope and repository binding checks.
+
+Example: `ato_reviews({"task_id": ID, "group_id": 12, "member_id": "security",
+"section": "findings", "cursor": 0, "limit": 10})`. Continue using `next_cursor`.
+Status carries bounded `review_panel` evidence and never folds a partial group
+into the legacy `review` approval. A group verdict is distinct from checks and
+manual acceptance. No reviewer mutation API or new listener is introduced.
+Reconnect/rediscover schemas only after a separately authorized deployment;
+source changes do not upgrade an already deployed MCP service.
